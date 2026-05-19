@@ -53,6 +53,53 @@ function parseMockInput(content: string): any {
 function buildMockPayload(prompt: string, input: any): Record<string, unknown> {
   const edgeContext = input?.context?.data?.edgeContext;
   const nodeContext = input?.context?.data?.nodeContext;
+  if (prompt.includes("Requirement Agent")) {
+    const idea = input?.productIdea ?? input?.intent ?? "New Praxis project";
+    return {
+      requirements: [
+        {
+          id: "REQ-001",
+          title: "Clarify product intent",
+          description: String(idea)
+        },
+        {
+          id: "REQ-002",
+          title: "Persist project memory",
+          description: "Generate .distinction graph, decisions, traces, and AI constraints from the initial plan."
+        },
+        {
+          id: "REQ-003",
+          title: "Enter graph workspace",
+          description: "Open the generated Development Graph after project creation."
+        }
+      ],
+      assumptions: ["MockProvider generated requirements because no provider key was available."],
+      questions: ["Which requirements should become CONFIRMED memory?"]
+    };
+  }
+  if (prompt.includes("Architecture Agent")) {
+    return {
+      architecture: [
+        {
+          id: "ARCH-001",
+          title: "Product Requirements",
+          responsibility: "Capture product intent, requirements, assumptions, and questions."
+        },
+        {
+          id: "ARCH-002",
+          title: "Development Graph",
+          responsibility: "Represent product intent, architecture components, tasks, memory, and progress."
+        },
+        {
+          id: "ARCH-003",
+          title: "Project Memory",
+          responsibility: "Persist graph files, decisions, changes, traces, and AI constraints in .distinction."
+        }
+      ],
+      risks: ["Generated architecture is a candidate until user review."],
+      questions: ["Which component boundaries should be confirmed first?"]
+    };
+  }
   if (prompt.includes("Coding Task Agent")) {
     return {
       title: "Controlled coding task",

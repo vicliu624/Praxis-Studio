@@ -5,13 +5,25 @@ import { CreateProjectWizardPage } from "./pages/CreateProjectWizardPage";
 import { DevelopmentGraphWorkspacePage } from "./pages/DevelopmentGraphWorkspacePage";
 import { ModelSettingsPage } from "./pages/ModelSettingsPage";
 import { type AppRoute, routes } from "./routes";
-import type { RuntimeGraph, RuntimeIntakeResult } from "./runtimeClient";
+import { openProjectDialog, type RuntimeGraph, type RuntimeIntakeResult } from "./runtimeClient";
 
 export function App() {
   const [route, setRoute] = useState<AppRoute>("home");
   const [projectRoot, setProjectRoot] = useState("");
   const [intakeResult, setIntakeResult] = useState<RuntimeIntakeResult | null>(null);
   const [graph, setGraph] = useState<RuntimeGraph | null>(null);
+  const [autoIntakeToken, setAutoIntakeToken] = useState(0);
+
+  async function openExistingProject() {
+    const selectedRoot = await openProjectDialog();
+    if (selectedRoot) {
+      setProjectRoot(selectedRoot);
+      setIntakeResult(null);
+      setGraph(null);
+      setAutoIntakeToken(Date.now());
+    }
+    setRoute("project-intake");
+  }
 
   return (
     <main className="app-shell">
@@ -39,7 +51,7 @@ export function App() {
 
       {route === "home" ? (
         <HomePage
-          onOpenExistingProject={() => setRoute("project-intake")}
+          onOpenExistingProject={openExistingProject}
           onCreateNewProject={() => setRoute("create-project")}
           onOpenGraphWorkspace={() => setRoute("graph-workspace")}
           onOpenModelSettings={() => setRoute("model-settings")}
@@ -51,6 +63,7 @@ export function App() {
           intakeResult={intakeResult}
           onProjectRootChange={setProjectRoot}
           onIntakeResult={setIntakeResult}
+          autoIntakeToken={autoIntakeToken}
           onGraphAccepted={(acceptedGraph) => {
             setGraph(acceptedGraph);
             setRoute("graph-workspace");

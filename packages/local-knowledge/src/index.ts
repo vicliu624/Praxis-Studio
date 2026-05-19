@@ -1,4 +1,4 @@
-import { cp, mkdir, readFile, rename, stat, writeFile, appendFile } from "node:fs/promises";
+import { mkdir, readFile, rename, stat, writeFile, appendFile } from "node:fs/promises";
 import path from "node:path";
 import type { DevelopmentGraph, DevelopmentGraphCandidate } from "@praxis/development-graph";
 import { serializeTraceEvent, type TraceEvent } from "@praxis/trace-recorder";
@@ -36,8 +36,9 @@ export function getLocalKnowledgePaths(projectRoot: string): LocalKnowledgePaths
 
 export async function initializeLocalKnowledge(projectRoot: string, candidate: DevelopmentGraphCandidate): Promise<LocalKnowledgePaths> {
   const paths = getLocalKnowledgePaths(projectRoot);
+  let backupPath: string | undefined;
   if (await exists(paths.distinctionDir)) {
-    await backupExistingDistinction(paths);
+    backupPath = await backupExistingDistinction(paths);
   }
   await ensureDistinctionDirectories(paths);
   await writeDevelopmentGraph(projectRoot, candidate.graph);
@@ -49,11 +50,16 @@ export async function initializeLocalKnowledge(projectRoot: string, candidate: D
     default: "relations",
     views: ["outline", "relations", "progress", "risk", "memory"]
   });
-  await writeProjectIntakeReport(projectRoot, candidate);
+  await writeProjectIntakeReport(projectRoot, candidate, backupPath);
   await ensureFile(path.join(paths.memoryDir, "changes.md"), "# Changes\n\n");
   await appendChange(projectRoot, {
     title: "Project intake graph accepted",
-    summary: `Accepted graph candidate with ${candidate.graph.nodes.length} nodes and ${candidate.graph.edges.length} edges.`,
+    summary: [
+      `Accepted graph candidate with ${candidate.graph.nodes.length} nodes and ${candidate.graph.edges.length} edges.`,
+      backupPath ? `Previous .distinction was backed up to ${backupPath}.` : ""
+    ]
+      .filter(Boolean)
+      .join(" "),
     kind: "CONFIRMED"
   });
   await ensureFile(path.join(paths.memoryDir, "decisions.md"), "# Decisions\n\n");
@@ -124,7 +130,7 @@ export async function appendChange(projectRoot: string, change: ChangeRecord): P
   await appendFile(path.join(paths.memoryDir, "changes.md"), `## ${timestamp} ${change.title}\n\n${kind}: ${change.summary}\n\n`, "utf8");
 }
 
-export async function writeProjectIntakeReport(projectRoot: string, candidate: DevelopmentGraphCandidate): Promise<void> {
+export async function writeProjectIntakeReport(projectRoot: string, candidate: DevelopmentGraphCandidate, backupPath?: string): Promise<void> {
   const paths = getLocalKnowledgePaths(projectRoot);
   await mkdir(paths.reportsDir, { recursive: true });
   const metadata = candidate.graph.metadata ?? {};
@@ -147,6 +153,10 @@ export async function writeProjectIntakeReport(projectRoot: string, candidate: D
     `Generated at: ${candidate.generatedAt}`,
     `Source: ${candidate.source}`,
     `Confidence: ${candidate.confidence}`,
+    "",
+    "## Existing Memory",
+    "",
+    backupPath ? `Previous .distinction backup: ${backupPath}` : "No previous .distinction directory was replaced.",
     "",
     "## Project Profile",
     "",
@@ -208,13 +218,16 @@ async function ensureDistinctionDirectories(paths: LocalKnowledgePaths): Promise
   await mkdir(paths.reportsDir, { recursive: true });
 }
 
-async function backupExistingDistinction(paths: LocalKnowledgePaths): Promise<void> {
+async function backupExistingDistinction(paths: LocalKnowledgePaths): Promise<string> {
   const stamp = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14);
-  const backupPath = path.join(paths.root, `.distinction.backup-${stamp}`);
-  await cp(paths.distinctionDir, backupPath, { recursive: true });
-  await rename(paths.distinctionDir, `${paths.distinctionDir}.previous-${stamp}`).catch(async () => {
-    await cp(paths.distinctionDir, backupPath, { recursive: true });
-  });
+  let backupPath = path.join(paths.root, `.distinction.backup-${stamp}`);
+  let suffix = 1;
+  while (await exists(backupPath)) {
+    backupPath = path.join(paths.root, `.distinction.backup-${stamp}-${suffix}`);
+    suffix += 1;
+  }
+  await rename(paths.distinctionDir, backupPath);
+  return backupPath;
 }
 
 async function ensureFile(filePath: string, content: string): Promise<void> {

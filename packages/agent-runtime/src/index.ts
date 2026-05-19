@@ -3,7 +3,7 @@ import { buildContext, type SelectionTarget } from "@praxis/context-builder";
 import { loadModelConfig, resolveModelRoute, type ModelTaskType } from "@praxis/model-router";
 import { createProvider } from "@praxis/provider-deepseek";
 import { getPrompt, type PromptName } from "@praxis/prompt-registry";
-import type { GraphPlan } from "@praxis/plan-model";
+import { normalizeGraphPlanDraft, type GraphPlan } from "@praxis/plan-model";
 import { appendTrace } from "@praxis/local-knowledge";
 import { InMemoryTraceRecorder } from "@praxis/trace-recorder";
 
@@ -76,18 +76,54 @@ export class PraxisAgentRuntime {
   }
 
   async planForTarget(request: RuntimeRequest): Promise<RuntimeResponse> {
-    const explanation = await this.explainTarget({ ...request, mode: "explain" });
-    const plan = fallbackPlan(request, explanation.contextSummary);
+    const traceId = `trace:${Date.now()}`;
+    const context = buildContext(request.graph, request.target);
     await this.record(request.projectRoot, {
-      traceId: explanation.traceId,
+      traceId,
+      kind: "context.built",
+      target: targetForTrace(request.target),
+      summary: context.summary,
+      data: { target: request.target }
+    });
+
+    const config = await loadModelConfig(request.projectRoot);
+    const planTaskType: ModelTaskType = request.target.type === "edge" ? "graph.edge.plan" : "graph.node.plan";
+    const route = resolveModelRoute(config, planTaskType);
+    const providerConfig = config.providers[route.provider];
+    const provider = createProvider(route.provider, { apiKeyEnv: providerConfig?.apiKeyEnv, baseUrl: providerConfig?.baseUrl });
+    const prompt = getPrompt(promptForTask(planTaskType));
+    const modelResponse = await provider.call({
+      route,
+      responseFormat: "json",
+      messages: [
+        { role: "system", content: prompt.body },
+        { role: "user", content: JSON.stringify({ instruction: request.instruction, context }, null, 2) }
+      ]
+    });
+
+    await this.record(request.projectRoot, {
+      traceId,
+      kind: "model.called",
+      target: targetForTrace(request.target),
+      summary: `Called ${modelResponse.provider}/${modelResponse.model}`,
+      data: { usedMock: modelResponse.usedMock, taskType: planTaskType }
+    });
+
+    const parsed = safeJson(modelResponse.content);
+    const fallback = fallbackPlan(request, context.summary);
+    const plan = normalizeGraphPlanDraft(parsed, fallback);
+    await this.record(request.projectRoot, {
+      traceId,
       kind: "plan.generated",
       target: targetForTrace(request.target),
       summary: plan.summary,
-      data: { plan }
+      data: { plan, usedFallback: parsed === undefined }
     });
     return {
-      ...explanation,
+      traceId,
       mode: "plan",
+      contextSummary: context.summary,
+      selectedModel: `${modelResponse.provider}/${modelResponse.model}`,
       message: JSON.stringify(plan, null, 2),
       structured: plan
     };

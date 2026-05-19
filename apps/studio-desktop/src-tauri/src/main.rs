@@ -2,6 +2,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 use tauri::Manager;
+use tauri_plugin_dialog::DialogExt;
 
 #[tauri::command]
 fn app_version() -> String {
@@ -9,8 +10,19 @@ fn app_version() -> String {
 }
 
 #[tauri::command]
-fn open_project_dialog() -> Result<String, String> {
-    Err("Native directory dialog is not wired in v0.1 alpha yet. Paste a project path instead.".to_string())
+async fn open_project_dialog(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    let folder = app
+        .dialog()
+        .file()
+        .set_title("Open Existing Project")
+        .blocking_pick_folder();
+    folder
+        .map(|path| {
+            path.into_path()
+                .map(|path| path.to_string_lossy().to_string())
+                .map_err(|error| error.to_string())
+        })
+        .transpose()
 }
 
 #[tauri::command]
@@ -20,12 +32,17 @@ fn run_runtime_command(app: tauri::AppHandle, command: String, args: Vec<String>
 
 #[tauri::command]
 fn read_file(path: String) -> Result<String, String> {
-    fs::read_to_string(path).map_err(|error| error.to_string())
+    let allowed_path = ensure_distinction_path(&path)?;
+    fs::read_to_string(allowed_path).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 fn write_file(path: String, content: String) -> Result<(), String> {
-    fs::write(path, content).map_err(|error| error.to_string())
+    let allowed_path = ensure_distinction_path(&path)?;
+    if let Some(parent) = allowed_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    fs::write(allowed_path, content).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -115,6 +132,31 @@ fn locate_runtime_cli(app: &tauri::AppHandle) -> Result<(PathBuf, PathBuf), Stri
     ))
 }
 
+fn ensure_distinction_path(input: &str) -> Result<PathBuf, String> {
+    let path = PathBuf::from(input);
+    let resolved = if path.exists() {
+        fs::canonicalize(&path).map_err(|error| error.to_string())?
+    } else {
+        let parent = path
+            .parent()
+            .ok_or_else(|| "File path must have a parent directory.".to_string())?;
+        let file_name = path
+            .file_name()
+            .ok_or_else(|| "File path must include a file name.".to_string())?;
+        fs::canonicalize(parent)
+            .map_err(|error| error.to_string())?
+            .join(file_name)
+    };
+    let inside_distinction = resolved
+        .components()
+        .any(|component| component.as_os_str().to_string_lossy() == ".distinction");
+    if inside_distinction {
+        Ok(resolved)
+    } else {
+        Err("v0.1 file access is limited to the active project's .distinction directory.".to_string())
+    }
+}
+
 fn find_repo_root() -> Option<PathBuf> {
     let mut current = std::env::current_dir().ok()?;
     loop {
@@ -137,6 +179,7 @@ fn chrono_like_stamp() -> String {
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             app_version,
             open_project_dialog,

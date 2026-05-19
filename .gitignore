@@ -7,5 +7,7 @@ target/
 .env.local
 apps/studio-desktop/src-tauri/target/
 .distinction/
+.distinction.backup-*/
+.distinction.previous-*/
 !.distinction.example/
 .tmp/

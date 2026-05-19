@@ -433,7 +433,13 @@ function generateWarnings(snapshot: RepositorySnapshot, profile: ProjectProfile)
   }
   if (snapshot.directories.some((directory) => directory.path === ".distinction")) {
     const hasGraph = snapshot.files.some((file) => file.path === ".distinction/graph/nodes.json");
-    if (!hasGraph) {
+    if (hasGraph) {
+      warnings.push({
+        id: "warning:distinction-confirmed-graph-detected",
+        severity: "medium",
+        summary: "Existing confirmed graph detected. Use merge/review, not blind overwrite."
+      });
+    } else {
       warnings.push({
         id: "warning:distinction-graph-missing",
         severity: "medium",

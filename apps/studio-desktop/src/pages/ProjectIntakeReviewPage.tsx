@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { acceptGraph, readGraph, runProjectIntake, type RuntimeGraph, type RuntimeIntakeResult } from "../runtimeClient";
 
 interface ProjectIntakeReviewPageProps {
@@ -6,6 +6,7 @@ interface ProjectIntakeReviewPageProps {
   intakeResult: RuntimeIntakeResult | null;
   onProjectRootChange: (root: string) => void;
   onIntakeResult: (result: RuntimeIntakeResult) => void;
+  autoIntakeToken: number;
   onGraphAccepted: (graph: RuntimeGraph) => void;
 }
 
@@ -16,10 +17,18 @@ export function ProjectIntakeReviewPage({
   intakeResult,
   onProjectRootChange,
   onIntakeResult,
+  autoIntakeToken,
   onGraphAccepted
 }: ProjectIntakeReviewPageProps) {
   const [state, setState] = useState<IntakeState>(intakeResult ? "review" : "idle");
   const [error, setError] = useState("");
+  const lastAutoIntakeToken = useRef(0);
+
+  useEffect(() => {
+    if (!autoIntakeToken || autoIntakeToken === lastAutoIntakeToken.current || !projectRoot) return;
+    lastAutoIntakeToken.current = autoIntakeToken;
+    void runIntake();
+  }, [autoIntakeToken, projectRoot]);
 
   async function runIntake() {
     setState("scanning");

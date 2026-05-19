@@ -90,6 +90,8 @@ const DEFAULT_IGNORE = [
   "__pycache__"
 ];
 
+const ALLOWED_HIDDEN_DIRECTORIES = new Set([".github", ".distinction"]);
+
 const MANIFESTS = new Set([
   "package.json",
   "tsconfig.json",
@@ -162,8 +164,7 @@ export class FileSystemRepositoryScanner implements RepositoryScanner {
     const entries = await readdir(current, { withFileTypes: true });
     for (const entry of entries) {
       if (context.files.length >= context.maxFiles) return;
-      if (!context.includeHidden && entry.name.startsWith(".") && entry.name !== ".github") continue;
-      if (context.ignore.includes(entry.name)) continue;
+      if (shouldSkipEntry(entry.name, context)) continue;
 
       const absolute = path.join(current, entry.name);
       const relative = toRepositoryPath(path.relative(root, absolute));
@@ -229,6 +230,13 @@ interface WalkContext {
   includeHidden: boolean;
   maxFiles: number;
   maxFileSizeBytes: number;
+}
+
+function shouldSkipEntry(name: string, context: WalkContext): boolean {
+  if (name.startsWith(".distinction.backup-") || name.startsWith(".distinction.previous-")) return true;
+  if (context.ignore.includes(name)) return true;
+  if (!context.includeHidden && name.startsWith(".") && !ALLOWED_HIDDEN_DIRECTORIES.has(name)) return true;
+  return false;
 }
 
 export async function scanRepository(options: RepositoryScannerOptions): Promise<RepositorySnapshot> {

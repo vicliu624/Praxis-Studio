@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
 
 export interface RuntimeIntakeResult {
   ok: boolean;
@@ -84,6 +85,18 @@ export const defaultModelSettings: ModelSettings = {
 
 export async function runRuntimeCommand(command: string, args: string[]): Promise<string> {
   return invoke<string>("run_runtime_command", { command, args });
+}
+
+export async function openProjectDialog(): Promise<string | null> {
+  try {
+    const selected = await open({ directory: true, multiple: false, title: "Open Existing Project" });
+    if (typeof selected === "string") return selected;
+    if (Array.isArray(selected)) return selected[0] ?? null;
+    return null;
+  } catch {
+    const selected = await invoke<string | null>("open_project_dialog").catch(() => null);
+    return selected;
+  }
 }
 
 export async function runProjectIntake(root: string): Promise<RuntimeIntakeResult> {
