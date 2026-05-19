@@ -113,7 +113,8 @@ button:disabled {
 .home-layout,
 .page-grid,
 .wizard-layout,
-.workspace-layout {
+.workspace-layout,
+.settings-layout {
   margin-top: 20px;
 }
 
@@ -521,6 +522,31 @@ textarea {
   min-height: calc(100vh - 124px);
 }
 
+.settings-layout {
+  display: grid;
+  grid-template-columns: minmax(360px, 0.85fr) minmax(360px, 1fr);
+  gap: 18px;
+}
+
+.settings-form,
+.settings-preview {
+  display: grid;
+  align-content: start;
+  gap: 16px;
+}
+
+.muted-copy {
+  margin: 0;
+  color: #8ea0b5;
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: minmax(160px, 0.55fr) minmax(220px, 1fr);
+  gap: 10px 14px;
+  align-items: center;
+}
+
 .outline-panel,
 .inspector-panel {
   display: grid;
@@ -577,7 +603,9 @@ textarea {
   .home-grid,
   .page-grid,
   .wizard-layout,
-  .workspace-layout {
+  .workspace-layout,
+  .settings-layout,
+  .form-grid {
     grid-template-columns: 1fr;
   }
 

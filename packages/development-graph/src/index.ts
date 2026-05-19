@@ -66,6 +66,7 @@ export interface DevelopmentGraph {
   nodes: DevelopmentNode[];
   edges: DevelopmentEdge[];
   updatedAt: string;
+  metadata?: Record<string, unknown>;
 }
 
 export interface GraphAssumption {

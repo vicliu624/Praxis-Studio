@@ -50,12 +50,16 @@ export function generateDevelopmentGraphCandidate(input: GraphGeneratorInput): D
 
   const moduleNodes = profile.moduleCandidates.map((module) => moduleNode(module, snapshot));
   const documentNodes = snapshot.docs.slice(0, 40).map((doc) => documentNode(doc.path, doc.title));
+  const codeUnitNodes = detectCodeUnitNodes(snapshot, profile);
   const testNodes = snapshot.files
     .filter((file) => file.roleHint === "test")
     .slice(0, 40)
     .map((file) => testNode(file));
 
-  const nodes: DevelopmentNode[] = [projectNode, ...moduleNodes, ...documentNodes, ...testNodes];
+  const warnings = generateWarnings(snapshot, profile);
+  const riskNodes = warnings.slice(0, 30).map(riskNode);
+  const taskNodes = warnings.slice(0, 12).map(taskNode);
+  const nodes: DevelopmentNode[] = [projectNode, ...moduleNodes, ...documentNodes, ...codeUnitNodes, ...testNodes, ...riskNodes, ...taskNodes];
   const edges: DevelopmentEdge[] = [];
 
   for (const module of profile.moduleCandidates) {
@@ -91,6 +95,25 @@ export function generateDevelopmentGraphCandidate(input: GraphGeneratorInput): D
     });
   }
 
+  for (const codeUnit of codeUnitNodes) {
+    const codePath = String(codeUnit.metadata?.path ?? "");
+    const owner = findOwningModule(profile.moduleCandidates, codePath);
+    if (!owner) continue;
+    edges.push({
+      id: edgeId(`module:${owner.path}`, "contains", codeUnit.id),
+      source: `module:${owner.path}`,
+      target: codeUnit.id,
+      kind: "contains",
+      title: "contains",
+      status: "active",
+      progress: 1,
+      riskLevel: "none",
+      confidence: "medium",
+      knowledgeKind: "FACT",
+      evidence: [factEvidence("repository-scanner", `Module contains code unit ${codePath}`, [codePath])]
+    });
+  }
+
   for (const test of snapshot.files.filter((file) => file.roleHint === "test").slice(0, 40)) {
     const owner = inferTestTarget(profile.moduleCandidates, test.path);
     edges.push({
@@ -109,8 +132,38 @@ export function generateDevelopmentGraphCandidate(input: GraphGeneratorInput): D
   }
 
   edges.push(...dependencyEdges(snapshot, profile));
+  for (const risk of riskNodes) {
+    const targetId = String(risk.metadata?.targetId ?? "project:root");
+    edges.push({
+      id: edgeId(risk.id, "impacts", targetId),
+      source: risk.id,
+      target: targetId,
+      kind: "impacts",
+      title: "impacts",
+      status: "active",
+      progress: 0.2,
+      riskLevel: "medium",
+      confidence: "medium",
+      knowledgeKind: "INFERENCE",
+      evidence: [factEvidence("graph-generator", `Generated risk candidate ${risk.title}`, [])]
+    });
+  }
+  for (const task of taskNodes) {
+    edges.push({
+      id: edgeId("project:root", "contains", task.id),
+      source: "project:root",
+      target: task.id,
+      kind: "contains",
+      title: "contains",
+      status: "draft",
+      progress: 0,
+      riskLevel: "none",
+      confidence: "low",
+      knowledgeKind: "CANDIDATE",
+      evidence: [factEvidence("graph-generator", `Generated task candidate ${task.title}`, [])]
+    });
+  }
 
-  const warnings = generateWarnings(snapshot, profile);
   const unresolvedQuestions = generateQuestions(profile, warnings);
 
   const graph: DevelopmentGraph = {
@@ -119,7 +172,27 @@ export function generateDevelopmentGraphCandidate(input: GraphGeneratorInput): D
     rootPath: snapshot.root,
     nodes,
     edges: dedupeEdges(edges),
-    updatedAt: new Date().toISOString()
+    updatedAt: new Date().toISOString(),
+    metadata: {
+      profile: {
+        projectKinds: profile.projectKinds,
+        languages: profile.languages,
+        frameworks: profile.frameworks,
+        buildSystems: profile.buildSystems,
+        packageManagers: profile.packageManagers,
+        entrypoints: profile.entrypoints,
+        testCommands: profile.testCommands,
+        runCommands: profile.runCommands,
+        buildCommands: profile.buildCommands,
+        moduleCandidates: profile.moduleCandidates
+      },
+      snapshotSummary: {
+        fileCount: snapshot.statistics.fileCount,
+        directoryCount: snapshot.statistics.directoryCount,
+        manifests: snapshot.manifests.map((manifest) => manifest.path),
+        docs: snapshot.docs.map((doc) => doc.path)
+      }
+    }
   };
 
   return {
@@ -151,7 +224,7 @@ function moduleNode(module: ModuleCandidate, snapshot: RepositorySnapshot): Deve
     knowledgeKind: "FACT",
     tags: [module.kind],
     evidence: [factEvidence("project-profiler", `Detected module candidate ${module.path}`, [module.path])],
-    metadata: { path: module.path, moduleKind: module.kind }
+    metadata: { path: module.path, moduleKind: module.kind, progressKnowledgeKind: "INFERENCE" }
   };
 }
 
@@ -180,6 +253,56 @@ function testNode(file: SourceFileSummary): DevelopmentNode {
     knowledgeKind: "FACT",
     evidence: [factEvidence("repository-scanner", `Detected test file ${file.path}`, [file.path])],
     metadata: { path: file.path }
+  };
+}
+
+function detectCodeUnitNodes(snapshot: RepositorySnapshot, profile: ProjectProfile): DevelopmentNode[] {
+  const candidates = snapshot.files.filter((file) => {
+    if (file.roleHint === "test" || file.language === "Markdown" || file.language === "Config") return false;
+    return /src\/index\.ts$|src\/main\.tsx?$|src-tauri\/src\/main\.rs$|src\/.*\.(ts|tsx|rs)$/.test(file.path);
+  });
+  return candidates.slice(0, 60).map((file) => {
+    const owner = findOwningModule(profile.moduleCandidates, file.path);
+    return {
+      id: `code:${file.path}`,
+      kind: "code_unit",
+      title: file.path,
+      description: owner ? `Code unit inside ${owner.path}` : "Code unit detected by repository scanner",
+      status: "active",
+      progress: 0.3,
+      confidence: "medium",
+      knowledgeKind: "FACT",
+      evidence: [factEvidence("repository-scanner", `Detected code unit ${file.path}`, [file.path])],
+      metadata: { path: file.path, ownerModuleId: owner ? `module:${owner.path}` : undefined, progressKnowledgeKind: "INFERENCE" }
+    };
+  });
+}
+
+function riskNode(warning: GraphWarning): DevelopmentNode {
+  return {
+    id: `risk:${warning.id.replace(/^warning:/, "")}`,
+    kind: "risk",
+    title: warning.summary,
+    status: "active",
+    progress: 0,
+    confidence: "medium",
+    knowledgeKind: "INFERENCE",
+    evidence: [factEvidence("graph-generator", warning.summary, [])],
+    metadata: { targetId: warning.targetId }
+  };
+}
+
+function taskNode(warning: GraphWarning, index: number): DevelopmentNode {
+  return {
+    id: `task:intake-${String(index + 1).padStart(3, "0")}`,
+    kind: "task",
+    title: `Review: ${warning.summary}`,
+    status: "draft",
+    progress: 0,
+    confidence: "low",
+    knowledgeKind: "CANDIDATE",
+    evidence: [factEvidence("graph-generator", `Generated review task for warning: ${warning.summary}`, [])],
+    metadata: { warningId: warning.id, targetId: warning.targetId }
   };
 }
 

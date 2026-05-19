@@ -60,6 +60,28 @@ export interface RuntimeChatResult {
   structured?: unknown;
 }
 
+export interface ModelSettings {
+  defaultProvider: string;
+  baseUrl: string;
+  apiKeyEnv: string;
+  intakeModel: string;
+  nodeExplainModel: string;
+  edgeExplainModel: string;
+  edgePlanModel: string;
+  codingTaskModel: string;
+}
+
+export const defaultModelSettings: ModelSettings = {
+  defaultProvider: "deepseek",
+  baseUrl: "https://api.deepseek.com",
+  apiKeyEnv: "DEEPSEEK_API_KEY",
+  intakeModel: "deepseek-v4-pro",
+  nodeExplainModel: "deepseek-v4-flash",
+  edgeExplainModel: "deepseek-v4-pro",
+  edgePlanModel: "deepseek-v4-pro",
+  codingTaskModel: "deepseek-v4-pro"
+};
+
 export async function runRuntimeCommand(command: string, args: string[]): Promise<string> {
   return invoke<string>("run_runtime_command", { command, args });
 }
@@ -100,4 +122,54 @@ export async function readGraph(root: string): Promise<RuntimeGraph> {
     nodes: JSON.parse(nodes) as RuntimeNode[],
     edges: JSON.parse(edges) as RuntimeEdge[]
   };
+}
+
+export function renderModelsYaml(settings: ModelSettings): string {
+  return [
+    `default_provider: ${settings.defaultProvider}`,
+    "",
+    "providers:",
+    "  deepseek:",
+    "    type: openai-compatible",
+    `    base_url: ${settings.baseUrl}`,
+    `    api_key_env: ${settings.apiKeyEnv}`,
+    "",
+    "routes:",
+    "  project.intake.analyze:",
+    "    provider: deepseek",
+    `    model: ${settings.intakeModel}`,
+    "    reasoning: true",
+    "    reasoning_effort: medium",
+    "",
+    "  graph.node.explain:",
+    "    provider: deepseek",
+    `    model: ${settings.nodeExplainModel}`,
+    "    reasoning: false",
+    "",
+    "  graph.edge.explain:",
+    "    provider: deepseek",
+    `    model: ${settings.edgeExplainModel}`,
+    "    reasoning: true",
+    "    reasoning_effort: medium",
+    "",
+    "  graph.edge.plan:",
+    "    provider: deepseek",
+    `    model: ${settings.edgePlanModel}`,
+    "    reasoning: true",
+    "    reasoning_effort: high",
+    "",
+    "  coding.task.generate:",
+    "    provider: deepseek",
+    `    model: ${settings.codingTaskModel}`,
+    "    reasoning: true",
+    "    reasoning_effort: high",
+    ""
+  ].join("\n");
+}
+
+export async function saveProjectModelSettings(projectRoot: string, settings: ModelSettings): Promise<void> {
+  await invoke<void>("write_file", {
+    path: `${projectRoot}/.distinction/models.yaml`,
+    content: renderModelsYaml(settings)
+  });
 }

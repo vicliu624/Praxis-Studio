@@ -136,8 +136,24 @@ function fallbackPlan(request: RuntimeRequest, contextSummary: string): GraphPla
     ],
     actions: [
       {
+        id: `action:${Date.now()}:update-edge`,
+        type: "update_edge",
+        title: "Update selected edge candidate",
+        description: "Record missing glue points and blocked reason on the selected edge after user confirmation.",
+        targetNodeIds,
+        targetEdgeIds
+      },
+      {
+        id: `action:${Date.now()}:memory`,
+        type: "create_memory_event",
+        title: "Create candidate memory event",
+        description: "Record this plan as candidate memory before any Apply action.",
+        targetNodeIds,
+        targetEdgeIds
+      },
+      {
         id: `action:${Date.now()}:task`,
-        type: "create_coding_task",
+        type: "create_task",
         title: "Create controlled coding task",
         description: request.instruction,
         targetNodeIds,

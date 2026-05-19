@@ -13,8 +13,11 @@
     "typecheck:packages": "npm run typecheck -w @praxis/core && npm run typecheck -w @praxis/development-graph && npm run typecheck -w @praxis/trace-recorder && npm run typecheck -w @praxis/tool-registry && npm run typecheck -w @praxis/repository-scanner && npm run typecheck -w @praxis/project-profiler && npm run typecheck -w @praxis/graph-generator && npm run typecheck -w @praxis/graph-store && npm run typecheck -w @praxis/local-knowledge && npm run typecheck -w @praxis/model-router && npm run typecheck -w @praxis/provider-deepseek && npm run typecheck -w @praxis/prompt-registry && npm run typecheck -w @praxis/context-builder && npm run typecheck -w @praxis/plan-model && npm run typecheck -w @praxis/file-generator && npm run typecheck -w @praxis/template-generator && npm run typecheck -w @praxis/project-wizard && npm run typecheck -w @praxis/coding-agent-adapter && npm run typecheck -w @praxis/agent-runtime && npm run typecheck -w @praxis/ui-kit",
     "typecheck:apps": "npm run typecheck -w @praxis/runtime-cli && npm run typecheck -w @praxis/studio-desktop",
     "dev:desktop": "npm run dev -w @praxis/studio-desktop",
-    "tauri:dev": "npm run tauri:dev -w @praxis/studio-desktop",
-    "tauri:build": "npm run tauri:build -w @praxis/studio-desktop"
+    "tauri:dev": "npm run build:packages && npm run build -w @praxis/runtime-cli && npm run tauri:dev -w @praxis/studio-desktop",
+    "tauri:build": "npm run package:desktop",
+    "package:desktop": "npm run build:packages && npm run build -w @praxis/runtime-cli && npm run tauri:build -w @praxis/studio-desktop",
+    "package:desktop:debug": "npm run build:packages && npm run build -w @praxis/runtime-cli && npm run tauri:build:debug -w @praxis/studio-desktop",
+    "dist:desktop": "npm run package:desktop"
   },
   "engines": { "node": ">=20" },
   "devDependencies": {

@@ -1,6 +1,7 @@
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
+use tauri::Manager;
 
 #[tauri::command]
 fn app_version() -> String {
@@ -13,8 +14,8 @@ fn open_project_dialog() -> Result<String, String> {
 }
 
 #[tauri::command]
-fn run_runtime_command(command: String, args: Vec<String>) -> Result<String, String> {
-    run_runtime(&command, &args)
+fn run_runtime_command(app: tauri::AppHandle, command: String, args: Vec<String>) -> Result<String, String> {
+    run_runtime(&app, &command, &args)
 }
 
 #[tauri::command]
@@ -28,10 +29,11 @@ fn write_file(path: String, content: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn initialize_project_memory(project_root: String, candidate_json: String) -> Result<String, String> {
+fn initialize_project_memory(app: tauri::AppHandle, project_root: String, candidate_json: String) -> Result<String, String> {
     let temp_path = std::env::temp_dir().join(format!("praxis-candidate-{}.json", chrono_like_stamp()));
     fs::write(&temp_path, candidate_json).map_err(|error| error.to_string())?;
     run_runtime(
+        &app,
         "init-memory",
         &[
             "--root".to_string(),
@@ -43,10 +45,11 @@ fn initialize_project_memory(project_root: String, candidate_json: String) -> Re
 }
 
 #[tauri::command]
-fn generate_task_from_plan(project_root: String, plan_json: String) -> Result<String, String> {
+fn generate_task_from_plan(app: tauri::AppHandle, project_root: String, plan_json: String) -> Result<String, String> {
     let temp_path = std::env::temp_dir().join(format!("praxis-plan-{}.json", chrono_like_stamp()));
     fs::write(&temp_path, plan_json).map_err(|error| error.to_string())?;
     run_runtime(
+        &app,
         "generate-task",
         &[
             "--project-root".to_string(),
@@ -57,9 +60,8 @@ fn generate_task_from_plan(project_root: String, plan_json: String) -> Result<St
     )
 }
 
-fn run_runtime(command: &str, args: &[String]) -> Result<String, String> {
-    let repo_root = find_repo_root().ok_or("Could not locate Praxis Studio repository root")?;
-    let cli_path = repo_root.join("apps").join("runtime-cli").join("dist").join("index.js");
+fn run_runtime(app: &tauri::AppHandle, command: &str, args: &[String]) -> Result<String, String> {
+    let (cli_path, runtime_cwd) = locate_runtime_cli(app)?;
     if !cli_path.exists() {
         return Err(format!(
             "runtime-cli is not built at {}. Run npm run build -w @praxis/runtime-cli first.",
@@ -70,7 +72,7 @@ fn run_runtime(command: &str, args: &[String]) -> Result<String, String> {
         .arg(cli_path)
         .arg(command)
         .args(args)
-        .current_dir(repo_root)
+        .current_dir(runtime_cwd)
         .output()
         .map_err(|error| error.to_string())?;
     if output.status.success() {
@@ -78,6 +80,39 @@ fn run_runtime(command: &str, args: &[String]) -> Result<String, String> {
     } else {
         Err(String::from_utf8_lossy(&output.stderr).to_string())
     }
+}
+
+fn locate_runtime_cli(app: &tauri::AppHandle) -> Result<(PathBuf, PathBuf), String> {
+    if let Some(repo_root) = find_repo_root() {
+        let cli_path = repo_root.join("apps").join("runtime-cli").join("dist").join("index.js");
+        if cli_path.exists() {
+            return Ok((cli_path, repo_root));
+        }
+    }
+
+    let resource_dir = app
+        .path()
+        .resource_dir()
+        .map_err(|error| format!("Could not locate app resource directory: {}", error))?;
+    let candidates = [
+        resource_dir.join("runtime-cli").join("dist").join("index.js"),
+        resource_dir.join("dist").join("index.js"),
+        resource_dir.join("index.js"),
+    ];
+    for candidate in candidates {
+        if candidate.exists() {
+            let cwd = candidate
+                .parent()
+                .map(|parent| parent.to_path_buf())
+                .unwrap_or_else(|| resource_dir.clone());
+            return Ok((candidate, cwd));
+        }
+    }
+
+    Err(format!(
+        "Could not locate runtime-cli. Checked repository root and resources under {}.",
+        resource_dir.display()
+    ))
 }
 
 fn find_repo_root() -> Option<PathBuf> {

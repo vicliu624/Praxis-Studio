@@ -106,6 +106,19 @@ export class ClaudeCodeAdapter implements CodingAgentAdapter {
   }
 }
 
+export class OpenCodeAdapter implements CodingAgentAdapter {
+  name = "opencode";
+
+  async prepare(task: CodingAgentTask): Promise<CodingAgentPreparedTask> {
+    return {
+      kind: "manual_command",
+      command: "opencode",
+      promptFile: `.distinction/tasks/${task.id}.md`,
+      instructions: "Open OpenCode in project root and provide the generated task file."
+    };
+  }
+}
+
 export function createCodingAgentTask(input: Partial<CodingAgentTask> & Pick<CodingAgentTask, "title" | "instruction">): CodingAgentTask {
   const id = input.id ?? `TASK-${String(Date.now()).slice(-4)}`;
   return {
@@ -140,6 +153,16 @@ export function renderCodingTaskMarkdown(task: CodingAgentTask): string {
   return [
     `# ${task.id} ${task.title}`,
     "",
+    "## Selected target",
+    "",
+    `Plan: ${task.source.planId ?? "None"}`,
+    "",
+    "Target nodes:",
+    ...list(task.source.targetNodeIds),
+    "",
+    "Target edges:",
+    ...list(task.source.targetEdgeIds),
+    "",
     "## Context",
     "",
     task.context.graphContext || "No graph context provided.",
@@ -147,14 +170,6 @@ export function renderCodingTaskMarkdown(task: CodingAgentTask): string {
     "## Architecture Context",
     "",
     task.context.architectureContext || "No architecture context provided.",
-    "",
-    "## Target Nodes",
-    "",
-    ...list(task.source.targetNodeIds),
-    "",
-    "## Target Edges",
-    "",
-    ...list(task.source.targetEdgeIds),
     "",
     "## Allowed paths",
     "",

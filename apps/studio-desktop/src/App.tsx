@@ -3,6 +3,7 @@ import { HomePage } from "./pages/HomePage";
 import { ProjectIntakeReviewPage } from "./pages/ProjectIntakeReviewPage";
 import { CreateProjectWizardPage } from "./pages/CreateProjectWizardPage";
 import { DevelopmentGraphWorkspacePage } from "./pages/DevelopmentGraphWorkspacePage";
+import { ModelSettingsPage } from "./pages/ModelSettingsPage";
 import { type AppRoute, routes } from "./routes";
 import type { RuntimeGraph, RuntimeIntakeResult } from "./runtimeClient";
 
@@ -41,6 +42,7 @@ export function App() {
           onOpenExistingProject={() => setRoute("project-intake")}
           onCreateNewProject={() => setRoute("create-project")}
           onOpenGraphWorkspace={() => setRoute("graph-workspace")}
+          onOpenModelSettings={() => setRoute("model-settings")}
         />
       ) : null}
       {route === "project-intake" ? (
@@ -57,6 +59,7 @@ export function App() {
       ) : null}
       {route === "create-project" ? <CreateProjectWizardPage /> : null}
       {route === "graph-workspace" ? <DevelopmentGraphWorkspacePage projectRoot={projectRoot} graph={graph} onGraphLoaded={setGraph} /> : null}
+      {route === "model-settings" ? <ModelSettingsPage projectRoot={projectRoot} /> : null}
     </main>
   );
 }

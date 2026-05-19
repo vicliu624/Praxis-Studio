@@ -93,7 +93,7 @@ async function commandGenerateTask(args: Args): Promise<void> {
   const projectRoot = required(args, "project-root");
   const plan = (await readJson(required(args, "plan"))) as GraphPlan;
   const draft = plan.codingTasks[0];
-  const action = plan.actions.find((item) => item.type === "create_coding_task");
+  const action = plan.actions.find((item) => item.type === "create_coding_task" || item.type === "create_task");
   const task = createCodingAgentTask({
     id: "TASK-0001",
     title: draft?.title ?? "Controlled coding task",

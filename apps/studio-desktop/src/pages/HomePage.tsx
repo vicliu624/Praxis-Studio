@@ -2,9 +2,10 @@ interface HomePageProps {
   onOpenExistingProject: () => void;
   onCreateNewProject: () => void;
   onOpenGraphWorkspace: () => void;
+  onOpenModelSettings: () => void;
 }
 
-export function HomePage({ onOpenExistingProject, onCreateNewProject, onOpenGraphWorkspace }: HomePageProps) {
+export function HomePage({ onOpenExistingProject, onCreateNewProject, onOpenGraphWorkspace, onOpenModelSettings }: HomePageProps) {
   return (
     <section className="home-layout" aria-labelledby="home-title">
       <section className="home-primary">
@@ -62,7 +63,7 @@ export function HomePage({ onOpenExistingProject, onCreateNewProject, onOpenGrap
         <section className="panel model-panel" aria-labelledby="model-title">
           <div className="panel-heading">
             <h2 id="model-title">Model Route</h2>
-            <button className="text-button" type="button">
+            <button className="text-button" type="button" onClick={onOpenModelSettings}>
               Settings
             </button>
           </div>

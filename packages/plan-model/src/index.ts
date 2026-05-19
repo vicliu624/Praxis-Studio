@@ -1,10 +1,12 @@
 export type PlanActionType =
   | "create_node"
   | "create_edge"
+  | "update_edge"
   | "update_node_progress"
   | "update_edge_progress"
   | "create_memory_event"
   | "create_decision"
+  | "create_task"
   | "create_coding_task"
   | "write_report";
 

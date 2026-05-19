@@ -29,26 +29,10 @@ export class MockProvider implements ModelProvider {
 
   async call(request: ModelCallRequest): Promise<ModelCallResponse> {
     const userMessage = [...request.messages].reverse().find((message: ChatMessage) => message.role === "user")?.content ?? "";
-    const content =
-      request.responseFormat === "json"
-        ? JSON.stringify(
-            {
-              summary: "MockProvider response generated without an API key.",
-              missingGluePoints: [
-                {
-                  title: "Confirm graph boundary",
-                  reason: "The runtime can only infer graph relations until the user confirms memory.",
-                  kind: "INFERENCE"
-                }
-              ],
-              actions: [],
-              codingTasks: [],
-              questions: ["Which inferred nodes and edges should become confirmed memory?"]
-            },
-            null,
-            2
-          )
-        : `MockProvider response.\n\n${userMessage.slice(0, 1200)}`;
+    const prompt = request.messages.find((message) => message.role === "system")?.content ?? "";
+    const input = parseMockInput(userMessage);
+    const payload = buildMockPayload(prompt, input);
+    const content = request.responseFormat === "json" ? JSON.stringify(payload, null, 2) : `MockProvider response.\n\n${userMessage.slice(0, 1200)}`;
     return {
       provider: this.name,
       model: request.route.model,
@@ -56,6 +40,119 @@ export class MockProvider implements ModelProvider {
       usedMock: true
     };
   }
+}
+
+function parseMockInput(content: string): any {
+  try {
+    return JSON.parse(content);
+  } catch {
+    return {};
+  }
+}
+
+function buildMockPayload(prompt: string, input: any): Record<string, unknown> {
+  const edgeContext = input?.context?.data?.edgeContext;
+  const nodeContext = input?.context?.data?.nodeContext;
+  if (prompt.includes("Coding Task Agent")) {
+    return {
+      title: "Controlled coding task",
+      allowedPaths: [".distinction", "packages"],
+      forbiddenPaths: ["apps/studio-desktop/src"],
+      acceptanceCriteria: ["Patch summary returned", "Changed files returned", "Verification result returned"],
+      questions: []
+    };
+  }
+  if (prompt.includes("Graph Planning Agent") && edgeContext?.edge) {
+    const edge = edgeContext.edge;
+    const source = edgeContext.sourceNode?.title ?? edge.source;
+    const target = edgeContext.targetNode?.title ?? edge.target;
+    return {
+      summary: `Plan for ${source} --${edge.kind}--> ${target}. Current progress is ${Math.round((edge.progress ?? 0) * 100)}%.`,
+      missingGluePoints: [
+        {
+          title: "Confirm relation evidence",
+          reason: "The edge was inferred from scan or lightweight rules and needs user confirmation before becoming memory.",
+          kind: "INFERENCE"
+        },
+        {
+          title: "Define completion criteria",
+          reason: "Edge progress needs explicit evidence for implementation, verification, and memory recording.",
+          kind: "CANDIDATE"
+        }
+      ],
+      actions: [
+        {
+          type: "update_edge",
+          title: "Update edge blocked reason",
+          description: "Record missing glue points on the selected edge.",
+          targetNodeIds: [edge.source, edge.target],
+          targetEdgeIds: [edge.id]
+        },
+        {
+          type: "create_memory_event",
+          title: "Record plan candidate",
+          description: "Write the plan as candidate memory after user confirmation.",
+          targetNodeIds: [edge.source, edge.target],
+          targetEdgeIds: [edge.id]
+        },
+        {
+          type: "create_task",
+          title: "Generate controlled coding task",
+          description: "Create a TASK.md for an external coding agent.",
+          targetNodeIds: [edge.source, edge.target],
+          targetEdgeIds: [edge.id]
+        }
+      ],
+      codingTasks: [
+        {
+          title: `Improve ${edge.kind} relation between ${source} and ${target}`,
+          allowedPaths: ["packages", ".distinction"],
+          forbiddenPaths: ["apps/studio-desktop/src"],
+          acceptanceCriteria: ["Relation evidence is documented", "Trace is recorded", "Progress suggestion is returned"]
+        }
+      ],
+      questions: ["Should this inferred relation be promoted to confirmed memory?"]
+    };
+  }
+  if (edgeContext?.edge) {
+    const edge = edgeContext.edge;
+    const source = edgeContext.sourceNode?.title ?? edge.source;
+    const target = edgeContext.targetNode?.title ?? edge.target;
+    return {
+      summary: `${source} --${edge.kind}--> ${target} is currently ${Math.round((edge.progress ?? 0) * 100)}% complete.`,
+      facts: [
+        `Source node: ${source}`,
+        `Target node: ${target}`,
+        `Risk level: ${edge.riskLevel}`,
+        `Knowledge kind: ${edge.knowledgeKind}`
+      ],
+      gaps: edge.blockedReason ? [edge.blockedReason] : ["No explicit blocked reason is recorded."],
+      questions: ["What evidence should raise this edge progress?"]
+    };
+  }
+  if (nodeContext?.node) {
+    const node = nodeContext.node;
+    return {
+      summary: `${node.title} is a ${node.kind} node at ${Math.round((node.progress ?? 0) * 100)}% progress.`,
+      facts: [`Status: ${node.status}`, `Confidence: ${node.confidence}`, `Knowledge kind: ${node.knowledgeKind}`],
+      incomingEdges: nodeContext.incomingEdges?.length ?? 0,
+      outgoingEdges: nodeContext.outgoingEdges?.length ?? 0,
+      questions: ["Which inferred responsibilities should be confirmed?"]
+    };
+  }
+  return {
+    summary: "MockProvider response generated without an API key.",
+    missingGluePoints: [
+      {
+        title: "Confirm graph boundary",
+        reason: "The runtime can only infer graph relations until the user confirms memory.",
+        kind: "INFERENCE"
+      }
+    ],
+    actions: [],
+    codingTasks: [],
+    questions: ["Which inferred nodes and edges should become confirmed memory?"]
+  };
 }
 
 export class DeepSeekProvider implements ModelProvider {

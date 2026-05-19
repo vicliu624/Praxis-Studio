@@ -5,5 +5,10 @@
   "identifier": "studio.praxis.app",
   "build": { "beforeDevCommand": "npm run dev", "beforeBuildCommand": "npm run build", "devUrl": "http://localhost:1420", "frontendDist": "../dist" },
   "app": { "windows": [{ "title": "Praxis Studio", "width": 1400, "height": 900, "minWidth": 1100, "minHeight": 760 }] },
-  "bundle": { "active": true, "targets": "all", "icon": [] }
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [],
+    "resources": ["../../runtime-cli/dist/**/*"]
+  }
 }
