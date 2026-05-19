@@ -171,22 +171,54 @@ export interface ToolDefinition<Input, Output> {
   isReadOnly: boolean;
   call(input: Input, context: ToolContext): Promise<Output>;
 }
+
+export interface ToolContext {
+  projectRoot: string;
+  traceId: string;
+  mode: RuntimeMode;
+  permissions: PermissionSet;
+}
 ```
 
 ### v0.1 Tools
+
+Project Intake tools:
 
 ```text
 ScanRepositoryTool
 ProfileProjectTool
 GenerateGraphCandidateTool
+WriteLocalKnowledgeTool
+RenderProjectIntakeReportTool
+```
+
+Development Graph tools:
+
+```text
 ReadDevelopmentGraphTool
 WriteDevelopmentGraphTool
 UpdateNodeProgressTool
 UpdateEdgeProgressTool
+CreateNodeTool
+CreateEdgeTool
+CreateRiskNodeTool
+CreateTaskNodeTool
+```
+
+Memory tools:
+
+```text
 CreateMemoryEventTool
 CreateDecisionRecordTool
 AppendChangeLogTool
 AppendTraceTool
+ReadAiConstraintsTool
+ReadDoNotRepeatTool
+```
+
+Agent tools:
+
+```text
 BuildContextTool
 GeneratePlanTool
 GenerateCodingTaskTool
@@ -360,3 +392,66 @@ Claude Code 兼容逻辑
 ```
 
 Praxis Runtime 必须围绕 Development Graph 重写。
+
+---
+
+## 10. Runtime Agents
+
+v0.1 的 Agent Runtime 对外表现为多个受治理 agent，但它们共享同一条 runtime loop、tool registry、model router、prompt registry 和 trace recorder。
+
+```text
+Project Intake Agent
+  基于 RepositorySnapshot 和 ProjectProfile 生成 DevelopmentGraphCandidate、warnings、questions 和风险候选。
+
+Project Creation Agent
+  基于产品构想生成 requirements、architecture candidates、Development Graph、docs 和 .distinction。
+
+Graph Chat Agent
+  绑定选中的 node / edge / subgraph，解释职责、关系、进度、风险和缺口。
+
+Plan Agent
+  生成图谱变更计划、记忆事件候选、决策候选和 coding task 候选。
+
+Coding Task Agent
+  把已确认或待确认 plan 转为 CodingAgentTask。
+```
+
+这些 agent 都不能绕过 Tool Registry 写文件或改图谱。
+
+---
+
+## 11. Plan-to-Apply Boundary
+
+Praxis Plan 不是普通文本。Plan item 必须能落到受控动作之一：
+
+```text
+create_node
+create_edge
+update_node_progress
+update_edge_progress
+create_memory_event
+create_decision
+create_coding_task
+write_report
+```
+
+v0.1 Apply 只能执行：
+
+```text
+.distinction writes
+docs writes
+task markdown writes
+new project file writes
+```
+
+v0.1 Apply 必须拒绝：
+
+```text
+existing source edits
+build script edits
+production config edits
+test execution loops
+git commit / PR
+```
+
+每次拒绝都要记录 `permission.denied` trace。

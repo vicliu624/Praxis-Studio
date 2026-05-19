@@ -95,6 +95,41 @@ Plan → CodingAgentTask → TASK.md
 
 用户可以复制 TASK.md 给 Claude Code / Codex / CCB。
 
+Markdown 模板：
+
+```md
+# TASK-0001 Implement report-to-memory-event writer
+
+## Context
+
+Selected edge:
+Architecture Memory --records--> Local Knowledge
+
+## Allowed paths
+
+- packages/local-knowledge/src
+- packages/trace-recorder/src
+
+## Forbidden paths
+
+- apps/studio-desktop/src
+
+## Acceptance Criteria
+
+- Report can be converted into MemoryEvent
+- MemoryEvent is appended to .distinction/memory/changes.md
+- Trace event is recorded
+
+## Verification
+
+- npm run build
+- npm test
+
+## Instructions for external coding agent
+
+Work only inside the allowed paths. Return a patch summary, changed files, test result, progress suggestion, and memory suggestion.
+```
+
 ---
 
 ## 4. ClaudeCodeBestAdapter
@@ -118,9 +153,29 @@ export class ClaudeCodeBestAdapter implements CodingAgentAdapter {
 
 v0.2 再考虑自动调用。
 
+## 5. Additional v0.1 Skeletons
+
+v0.1 should also expose skeleton adapters for:
+
+```text
+CodexAdapter
+ClaudeCodeAdapter
+OpenCodeAdapter
+```
+
+They have the same boundary as `ClaudeCodeBestAdapter`:
+
+```text
+prepare task package
+produce manual command or instructions
+do not execute automatically
+do not edit source through Praxis
+do not run tests automatically
+```
+
 ---
 
-## 5. Result 回填
+## 6. Result 回填
 
 第一版支持手动回填：
 
@@ -147,3 +202,5 @@ interface CodingAgentResult {
 写入 memory event
 写入 trace
 ```
+
+If the external agent suggests source changes that exceed the original task scope, Praxis must record them as a candidate follow-up task instead of silently expanding the current task.

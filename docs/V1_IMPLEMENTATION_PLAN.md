@@ -26,6 +26,22 @@ CLI first, UI second.
 Schema first, prompt second.
 Facts first, AI candidates second.
 Plan first, Apply second.
+No demo-first workflow.
+External coding agents are workers, not the Praxis runtime foundation.
+```
+
+本计划的 v0.1 范围以以下规格为准：
+
+```text
+docs/PRODUCT_SPEC.md
+docs/PROJECT_INTAKE_SPEC.md
+docs/PROJECT_CREATION_SPEC.md
+docs/DEVELOPMENT_GRAPH_SPEC.md
+docs/AGENT_RUNTIME_SPEC.md
+docs/CODING_AGENT_ADAPTER_SPEC.md
+docs/MODEL_ROUTER_SPEC.md
+docs/LOCAL_KNOWLEDGE_SPEC.md
+docs/CLEAN_ROOM_BORROWING_SPEC.md
 ```
 
 ---
@@ -35,6 +51,8 @@ Plan first, Apply second.
 ### 目标
 
 启动后不显示 demo graph，而显示 HomePage。
+
+HomePage 是产品入口，不是营销页，也不是内置样例图入口。任何 graph workspace 都必须来自真实工程扫描、真实产品构想或已存在的 `.distinction`。
 
 ### 文件
 
@@ -61,6 +79,7 @@ Praxis Studio
 启动桌面端后可以看到 HomePage。
 点击 Open Existing Project 进入项目选择流程。
 点击 Create New Project 进入新建项目向导。
+没有内置 demo graph 作为主 workflow。
 ```
 
 ---
@@ -488,6 +507,8 @@ Accept Graph 后真实项目目录出现 .distinction。
 
 从产品构想创建真实工程。
 
+Create New Project 是 v0.1 的第二条完整闭环，不是后续功能。它必须能生成 requirements、architecture、Development Graph、docs 和 `.distinction`。
+
 ### 页面
 
 ```text
@@ -519,7 +540,12 @@ README.md
 docs/PRODUCT_SPEC.md
 docs/ARCHITECTURE.md
 docs/ROADMAP.md
-.distinction/*
+.distinction/graph/nodes.json
+.distinction/graph/edges.json
+.distinction/memory/changes.md
+.distinction/memory/decisions.md
+.distinction/rules/ai-constraints.md
+.distinction/models.yaml
 ```
 
 ### 验收
@@ -607,6 +633,7 @@ ManualAdapter
 ClaudeCodeBestAdapter skeleton
 CodexAdapter skeleton
 ClaudeCodeAdapter skeleton
+OpenCodeAdapter skeleton
 ```
 
 ### 验收
@@ -619,7 +646,52 @@ TASK.md 可以复制给 Claude Code / Codex / CCB。
 
 ---
 
-## 14. v0.1 完成定义
+## 14. CCB / External Agent Strategy
+
+v0.1 可以研究 Claude Code Best，但采用 clean-room borrowing：
+
+```text
+study mechanism
+define Praxis-owned interfaces
+rewrite around Development Graph
+keep questionable experiments outside main build
+use CCB as optional adapter, not runtime foundation
+```
+
+允许吸收：
+
+```text
+Agentic Loop
+Tool Registry
+Context Builder
+Permission / Plan Mode
+Project Memory / Rules
+Trace System
+MCP / ACP adapter shape
+Sub-Agent role pipeline
+```
+
+不允许吸收进主工程：
+
+```text
+Claude Code compatibility logic
+reverse-engineered core loop code
+login / account / remote-control code
+brand-specific behavior
+Anthropic Claude Code emulation
+```
+
+如需实验，放入：
+
+```text
+third_party_experiments/ccb-runtime-study/
+```
+
+并且不得进入主 build 或成为发布依赖。
+
+---
+
+## 15. v0.1 完成定义
 
 v0.1 完成时，必须能完成：
 

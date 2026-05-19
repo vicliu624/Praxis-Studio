@@ -4,6 +4,8 @@
 
 Project Intake 的目标是打开一个真实工程，生成可确认的 Development Graph Candidate。
 
+Project Intake 不是 demo graph 加载器，也不是让 Agent 直接猜项目结构。它必须先生成本地扫描事实，再让 Agent 只在事实边界内产生候选解释。
+
 流程：
 
 ```text
@@ -17,6 +19,15 @@ Open Existing Project
 → Intake Review
 → User Confirm
 → .distinction
+```
+
+事实边界：
+
+```text
+RepositoryScanner output = FACT
+ProjectProfiler rule output = FACT or evidence-backed CANDIDATE
+Agent output = CANDIDATE / INFERENCE
+User confirmation = CONFIRMED memory
 ```
 
 ---
@@ -71,6 +82,8 @@ src/*
 apps/*
 packages/*
 ```
+
+扫描器不能把文件名、目录名或 import 路径直接提升为架构事实。它只能记录证据，架构解释由 ProjectProfiler 和 Agent 在后续阶段产生。
 
 ---
 
@@ -165,6 +178,16 @@ unresolved question
 risk candidate
 ```
 
+Agent Prompt 必须包含以下规则：
+
+```text
+Local scan facts are FACT.
+Your interpretation is CANDIDATE or INFERENCE.
+Do not mark anything as CONFIRMED.
+Generate questions for uncertain module ownership.
+Do not invent source files, commands, dependencies, or manifests.
+```
+
 ---
 
 ## 6. Intake Review
@@ -216,3 +239,29 @@ packages/*
 ```
 
 并生成候选图谱。
+
+其中模块候选至少包括：
+
+```text
+apps/studio-desktop
+packages/core
+packages/development-graph
+packages/agent-runtime
+packages/model-router
+packages/local-knowledge
+packages/context-builder
+packages/tool-registry
+packages/trace-recorder
+```
+
+验收输出必须包含：
+
+```text
+module nodes
+relationship edges
+node progress candidates
+edge progress candidates
+warnings
+unresolved questions
+risk candidates
+```
