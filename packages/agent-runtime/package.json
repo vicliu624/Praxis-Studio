@@ -11,10 +11,15 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@praxis/context-builder": "workspace:*",
-    "@praxis/development-graph": "workspace:*",
-    "@praxis/model-router": "workspace:*",
-    "@praxis/tool-registry": "workspace:*",
-    "@praxis/trace-recorder": "workspace:*"
+    "@praxis/coding-agent-adapter": "0.1.0-alpha.0",
+    "@praxis/context-builder": "0.1.0-alpha.0",
+    "@praxis/development-graph": "0.1.0-alpha.0",
+    "@praxis/local-knowledge": "0.1.0-alpha.0",
+    "@praxis/model-router": "0.1.0-alpha.0",
+    "@praxis/plan-model": "0.1.0-alpha.0",
+    "@praxis/prompt-registry": "0.1.0-alpha.0",
+    "@praxis/provider-deepseek": "0.1.0-alpha.0",
+    "@praxis/tool-registry": "0.1.0-alpha.0",
+    "@praxis/trace-recorder": "0.1.0-alpha.0"
   }
 }

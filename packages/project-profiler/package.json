@@ -1,0 +1,17 @@
+{
+  "name": "@praxis/project-profiler",
+  "version": "0.1.0-alpha.0",
+  "private": true,
+  "type": "module",
+  "description": "Project profile generation from repository snapshots.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@praxis/core": "0.1.0-alpha.0",
+    "@praxis/repository-scanner": "0.1.0-alpha.0"
+  }
+}

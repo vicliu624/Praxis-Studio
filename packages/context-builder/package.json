@@ -11,6 +11,6 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@praxis/development-graph": "workspace:*"
+    "@praxis/development-graph": "0.1.0-alpha.0"
   }
 }

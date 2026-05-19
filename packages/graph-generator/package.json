@@ -1,0 +1,19 @@
+{
+  "name": "@praxis/graph-generator",
+  "version": "0.1.0-alpha.0",
+  "private": true,
+  "type": "module",
+  "description": "DevelopmentGraphCandidate generation.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@praxis/core": "0.1.0-alpha.0",
+    "@praxis/development-graph": "0.1.0-alpha.0",
+    "@praxis/project-profiler": "0.1.0-alpha.0",
+    "@praxis/repository-scanner": "0.1.0-alpha.0"
+  }
+}

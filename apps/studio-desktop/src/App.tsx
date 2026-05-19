@@ -4,9 +4,13 @@ import { ProjectIntakeReviewPage } from "./pages/ProjectIntakeReviewPage";
 import { CreateProjectWizardPage } from "./pages/CreateProjectWizardPage";
 import { DevelopmentGraphWorkspacePage } from "./pages/DevelopmentGraphWorkspacePage";
 import { type AppRoute, routes } from "./routes";
+import type { RuntimeGraph, RuntimeIntakeResult } from "./runtimeClient";
 
 export function App() {
   const [route, setRoute] = useState<AppRoute>("home");
+  const [projectRoot, setProjectRoot] = useState("");
+  const [intakeResult, setIntakeResult] = useState<RuntimeIntakeResult | null>(null);
+  const [graph, setGraph] = useState<RuntimeGraph | null>(null);
 
   return (
     <main className="app-shell">
@@ -39,9 +43,20 @@ export function App() {
           onOpenGraphWorkspace={() => setRoute("graph-workspace")}
         />
       ) : null}
-      {route === "project-intake" ? <ProjectIntakeReviewPage /> : null}
+      {route === "project-intake" ? (
+        <ProjectIntakeReviewPage
+          projectRoot={projectRoot}
+          intakeResult={intakeResult}
+          onProjectRootChange={setProjectRoot}
+          onIntakeResult={setIntakeResult}
+          onGraphAccepted={(acceptedGraph) => {
+            setGraph(acceptedGraph);
+            setRoute("graph-workspace");
+          }}
+        />
+      ) : null}
       {route === "create-project" ? <CreateProjectWizardPage /> : null}
-      {route === "graph-workspace" ? <DevelopmentGraphWorkspacePage /> : null}
+      {route === "graph-workspace" ? <DevelopmentGraphWorkspacePage projectRoot={projectRoot} graph={graph} onGraphLoaded={setGraph} /> : null}
     </main>
   );
 }

@@ -4,14 +4,6 @@ interface HomePageProps {
   onOpenGraphWorkspace: () => void;
 }
 
-const recentProjects = [
-  {
-    name: "Praxis Studio",
-    path: "C:/Users/VicLi/Documents/Projects/Praxis-Studio",
-    status: "No confirmed graph"
-  }
-];
-
 export function HomePage({ onOpenExistingProject, onCreateNewProject, onOpenGraphWorkspace }: HomePageProps) {
   return (
     <section className="home-layout" aria-labelledby="home-title">
@@ -37,13 +29,11 @@ export function HomePage({ onOpenExistingProject, onCreateNewProject, onOpenGrap
             </button>
           </div>
           <div className="recent-list">
-            {recentProjects.map((project) => (
-              <button className="recent-project" key={project.path} type="button" onClick={onOpenGraphWorkspace}>
-                <strong>{project.name}</strong>
-                <span>{project.path}</span>
-                <small>{project.status}</small>
-              </button>
-            ))}
+            <button className="recent-project" type="button" onClick={onOpenGraphWorkspace}>
+              <strong>No recent projects yet</strong>
+              <span>Open a repository to create the first recent entry.</span>
+              <small>Recent project storage lands after intake wiring.</small>
+            </button>
           </div>
         </section>
 

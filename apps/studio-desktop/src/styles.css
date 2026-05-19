@@ -16,7 +16,8 @@ body {
 }
 
 button,
-textarea {
+textarea,
+input {
   font: inherit;
 }
 
@@ -409,6 +410,90 @@ textarea {
   border-radius: 8px;
   background: #0f161e;
   color: #edf2f7;
+  padding: 12px;
+}
+
+.path-input {
+  width: 100%;
+  min-height: 40px;
+  border: 1px solid #2a394a;
+  border-radius: 8px;
+  background: #0f161e;
+  color: #edf2f7;
+  padding: 8px 10px;
+}
+
+.error-text {
+  color: #fca5a5;
+}
+
+.status-text {
+  color: #8deadd;
+}
+
+.table-list,
+.graph-preview-list,
+.outline-list,
+.graph-list {
+  display: grid;
+  gap: 10px;
+}
+
+.table-row,
+.edge-preview,
+.selected-summary {
+  display: grid;
+  gap: 4px;
+  border: 1px solid #2a394a;
+  border-radius: 8px;
+  background: #0f161e;
+  padding: 10px;
+}
+
+.table-row span,
+.edge-preview span,
+.selected-summary span {
+  color: #8ea0b5;
+}
+
+.edge-preview small,
+.table-row small {
+  color: #f6c36e;
+}
+
+.outline-item,
+.graph-edge-card {
+  display: grid;
+  width: 100%;
+  gap: 5px;
+  border: 1px solid #2a394a;
+  border-radius: 8px;
+  background: #0f161e;
+  color: #edf2f7;
+  padding: 10px;
+  text-align: left;
+}
+
+.outline-item span,
+.outline-item small,
+.graph-edge-card span,
+.graph-edge-card small {
+  color: #8ea0b5;
+}
+
+.outline-item.active,
+.graph-edge-card.active {
+  border-color: #e7a23c;
+}
+
+.agent-output {
+  max-height: 280px;
+  overflow: auto;
+  white-space: pre-wrap;
+  border: 1px solid #2a394a;
+  border-radius: 8px;
+  background: #0f161e;
+  color: #b7c4d4;
   padding: 12px;
 }
 

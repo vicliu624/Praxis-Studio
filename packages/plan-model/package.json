@@ -1,0 +1,16 @@
+{
+  "name": "@praxis/plan-model",
+  "version": "0.1.0-alpha.0",
+  "private": true,
+  "type": "module",
+  "description": "Structured plan models for Praxis agent actions.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@praxis/core": "0.1.0-alpha.0"
+  }
+}
