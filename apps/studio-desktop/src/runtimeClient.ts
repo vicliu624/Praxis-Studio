@@ -203,8 +203,8 @@ export async function recordRecentProject(root: string): Promise<RecentProject[]
 
 export async function readGraph(root: string): Promise<RuntimeGraph> {
   const [nodes, edges] = await Promise.all([
-    invoke<string>("read_file", { projectRoot: root, relativePath: ".distinction/graph/nodes.json" }),
-    invoke<string>("read_file", { projectRoot: root, relativePath: ".distinction/graph/edges.json" })
+    invoke<string>("read_project_distinction_file", { projectRoot: root, relativePath: ".distinction/graph/nodes.json" }),
+    invoke<string>("read_project_distinction_file", { projectRoot: root, relativePath: ".distinction/graph/edges.json" })
   ]);
   return {
     id: "graph:local",
@@ -259,7 +259,7 @@ export function renderModelsYaml(settings: ModelSettings): string {
 }
 
 export async function saveProjectModelSettings(projectRoot: string, settings: ModelSettings): Promise<void> {
-  await invoke<void>("write_file", {
+  await invoke<void>("write_project_distinction_file", {
     projectRoot,
     relativePath: ".distinction/models.yaml",
     content: renderModelsYaml(settings)

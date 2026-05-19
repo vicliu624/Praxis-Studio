@@ -556,6 +556,8 @@ async function createProjectPlanWithAgents(
   plan.assumptions = [
     ...plan.assumptions,
     ...normalizeStringRecords(requirements?.assumptions, "requirement-agent-assumption"),
+    ...normalizeStringRecords(requirements?.nonGoals, "requirement-agent-non-goal"),
+    ...normalizeStringRecords(requirements?.successCriteria, "requirement-agent-success-criterion"),
     ...normalizeStringRecords(architecture?.risks, "architecture-agent-risk")
   ];
   plan.questions = [
@@ -693,6 +695,10 @@ function refreshNewProjectPlanArtifacts(plan: NewProjectPlan): void {
       "## Requirements",
       "",
       ...plan.requirements.map((requirement) => `- ${requirement.id}: ${requirement.title} - ${requirement.description}`),
+      "",
+      "## Assumptions / Constraints",
+      "",
+      ...plan.assumptions.map((assumption) => `- ${assumption.summary}`),
       "",
       "## Questions",
       "",

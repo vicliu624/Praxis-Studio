@@ -74,6 +74,11 @@ function buildMockPayload(prompt: string, input: any): Record<string, unknown> {
         }
       ],
       assumptions: ["MockProvider generated requirements because no provider key was available."],
+      nonGoals: ["Do not generate production source code beyond the selected project template in v0.1."],
+      successCriteria: [
+        "Generated project contains README, product spec, architecture, roadmap, and .distinction graph files.",
+        "Generated project can open in the Development Graph Workspace."
+      ],
       questions: ["Which requirements should become CONFIRMED memory?"]
     };
   }

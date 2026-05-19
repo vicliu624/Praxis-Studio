@@ -29,13 +29,21 @@ export function DevelopmentGraphWorkspacePage({ projectRoot, graph, onGraphLoade
   const [selectedActionIds, setSelectedActionIds] = useState<string[]>([]);
   const [taskResultInput, setTaskResultInput] = useState(defaultTaskResultInput);
   const [showCodeUnits, setShowCodeUnits] = useState(false);
+  const [showRisks, setShowRisks] = useState(true);
+  const [showTasks, setShowTasks] = useState(true);
   const [status, setStatus] = useState("");
 
   const nodeById = useMemo(() => new Map((graph?.nodes ?? []).map((node) => [node.id, node])), [graph]);
   const edgeById = useMemo(() => new Map((graph?.edges ?? []).map((edge) => [edge.id, edge])), [graph]);
   const displayNodes = useMemo(
-    () => (graph?.nodes ?? []).filter((node) => showCodeUnits || node.kind !== "code_unit"),
-    [graph, showCodeUnits]
+    () =>
+      (graph?.nodes ?? []).filter((node) => {
+        if (!showCodeUnits && node.kind === "code_unit") return false;
+        if (!showRisks && node.kind === "risk") return false;
+        if (!showTasks && node.kind === "task") return false;
+        return true;
+      }),
+    [graph, showCodeUnits, showRisks, showTasks]
   );
   const displayNodeIds = useMemo(() => new Set(displayNodes.map((node) => node.id)), [displayNodes]);
   const displayEdges = useMemo(
@@ -89,7 +97,7 @@ export function DevelopmentGraphWorkspacePage({ projectRoot, graph, onGraphLoade
     if (!projectRoot) return;
     setStatus("Importing task result...");
     try {
-      const parsed = JSON.parse(taskResultInput);
+      const parsed = parseTaskResultInput(taskResultInput);
       const result = (await importTaskResult(projectRoot, parsed)) as { progressPlan?: RuntimeGraphPlan };
       setResponse(JSON.stringify(result, null, 2));
       if (result.progressPlan) {
@@ -119,6 +127,14 @@ export function DevelopmentGraphWorkspacePage({ projectRoot, graph, onGraphLoade
           <input type="checkbox" checked={showCodeUnits} onChange={(event) => setShowCodeUnits(event.target.checked)} />
           Show code units
         </label>
+        <label className="checkbox-row">
+          <input type="checkbox" checked={showRisks} onChange={(event) => setShowRisks(event.target.checked)} />
+          Show risks
+        </label>
+        <label className="checkbox-row">
+          <input type="checkbox" checked={showTasks} onChange={(event) => setShowTasks(event.target.checked)} />
+          Show tasks
+        </label>
         <div className="outline-list">
           {visibleNodes.map((node) => (
             <button
@@ -130,7 +146,7 @@ export function DevelopmentGraphWorkspacePage({ projectRoot, graph, onGraphLoade
               <strong>{node.title}</strong>
               <span>{node.kind}</span>
               <small>
-                {Math.round(node.progress * 100)}% {node.knowledgeKind}
+                {Math.round(node.progress * 100)}% {node.knowledgeKind} - {node.status}
               </small>
             </button>
           ))}
@@ -184,6 +200,12 @@ export function DevelopmentGraphWorkspacePage({ projectRoot, graph, onGraphLoade
           <strong>{selected ? selected.item.title ?? selected.item.id : "No target selected"}</strong>
           <span>{selected?.type ?? "Select a node or edge"}</span>
           {selected ? <small>{selected.item.id}</small> : null}
+          {selected ? (
+            <small>
+              {Math.round(selected.item.progress * 100)}% - {selected.item.status} - {selected.item.knowledgeKind}
+              {selected.type === "edge" ? ` - ${selected.item.riskLevel}` : ""}
+            </small>
+          ) : null}
         </div>
         <div className="mode-row" aria-label="Agent mode">
           <button className="active" type="button" disabled={!selected} onClick={() => submit("explain")}>
@@ -230,6 +252,7 @@ export function DevelopmentGraphWorkspacePage({ projectRoot, graph, onGraphLoade
         <section className="task-result-panel" aria-labelledby="task-result-title">
           <h2 id="task-result-title">Import Task Result</h2>
           <textarea value={taskResultInput} onChange={(event) => setTaskResultInput(event.target.value)} />
+          <p className="muted-copy compact">Paste JSON, Markdown, or a short external agent summary. Progress suggestions still require preview before apply.</p>
           <button className="secondary-action full-width" type="button" disabled={!projectRoot} onClick={importResult}>
             Import result
           </button>
@@ -272,6 +295,41 @@ function asGraphPlan(value: unknown): RuntimeGraphPlan | null {
   return Array.isArray(plan.actions) ? plan : null;
 }
 
+function parseTaskResultInput(input: string): unknown {
+  try {
+    return JSON.parse(input);
+  } catch {
+    const trimmed = input.trim();
+    const taskId = trimmed.match(/TASK-\d+/i)?.[0]?.toUpperCase() ?? "TASK-0001";
+    const lower = trimmed.toLowerCase();
+    const status = lower.includes("failed") || lower.includes("failure") ? "failed" : lower.includes("done") || lower.includes("pass") ? "done" : "partial";
+    const summary =
+      trimmed
+        .split(/\r?\n/)
+        .map((line) => line.replace(/^[#*\-\s]+/, "").trim())
+        .find(Boolean) ?? "External coding agent result imported from text.";
+    const changedFiles = Array.from(
+      new Set(
+        [...trimmed.matchAll(/(?:^|\s)([A-Za-z0-9_.\/\\-]+\.(?:ts|tsx|js|jsx|rs|md|json|yaml|yml|toml|css|html))/g)].map((match) =>
+          match[1].replace(/\\/g, "/")
+        )
+      )
+    );
+    const testResult = trimmed
+      .split(/\r?\n/)
+      .find((line) => line.toLowerCase().includes("test"))
+      ?.trim();
+    return {
+      taskId,
+      status,
+      summary,
+      changedFiles,
+      testResult,
+      memorySuggestion: trimmed
+    };
+  }
+}
+
 function buildFlowNodes(nodes: RuntimeNode[]): FlowNode[] {
   const laneCounts = new Map<string, number>();
   return nodes.slice(0, 160).map((node) => {
@@ -288,7 +346,7 @@ function buildFlowNodes(nodes: RuntimeNode[]): FlowNode[] {
             <strong>{node.title}</strong>
             <span>{node.kind}</span>
             <small>
-              {Math.round(node.progress * 100)}% {node.knowledgeKind}
+              {Math.round(node.progress * 100)}% {node.knowledgeKind} - {node.status}
             </small>
           </div>
         )

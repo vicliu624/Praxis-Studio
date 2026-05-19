@@ -46,6 +46,16 @@ fn write_file(project_root: String, relative_path: String, content: String) -> R
 }
 
 #[tauri::command]
+fn read_project_distinction_file(project_root: String, relative_path: String) -> Result<String, String> {
+    read_file(project_root, relative_path)
+}
+
+#[tauri::command]
+fn write_project_distinction_file(project_root: String, relative_path: String, content: String) -> Result<(), String> {
+    write_file(project_root, relative_path, content)
+}
+
+#[tauri::command]
 fn initialize_project_memory(app: tauri::AppHandle, project_root: String, candidate_json: String) -> Result<String, String> {
     let temp_path = std::env::temp_dir().join(format!("praxis-candidate-{}.json", chrono_like_stamp()));
     fs::write(&temp_path, candidate_json).map_err(|error| error.to_string())?;
@@ -341,6 +351,8 @@ fn main() {
             run_runtime_command,
             read_file,
             write_file,
+            read_project_distinction_file,
+            write_project_distinction_file,
             initialize_project_memory,
             generate_task_from_plan,
             apply_plan_actions,
