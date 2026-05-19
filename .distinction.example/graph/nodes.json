@@ -1,0 +1,23 @@
+[
+  {
+    "id": "node:intent",
+    "kind": "product_intent",
+    "title": "Product Intent",
+    "status": "draft",
+    "progress": 0.1
+  },
+  {
+    "id": "node:architecture-memory",
+    "kind": "architecture_component",
+    "title": "Architecture Memory",
+    "status": "wip",
+    "progress": 0.42
+  },
+  {
+    "id": "node:local-knowledge",
+    "kind": "architecture_component",
+    "title": "Local Knowledge",
+    "status": "wip",
+    "progress": 0.64
+  }
+]

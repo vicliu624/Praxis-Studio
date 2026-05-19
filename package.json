@@ -1,0 +1,17 @@
+{
+  "name": "praxis-studio",
+  "version": "0.1.0-alpha.0",
+  "private": true,
+  "description": "AI-native Product Development IDE centered on development graphs and project memory.",
+  "type": "module",
+  "workspaces": ["apps/*", "packages/*"],
+  "scripts": {
+    "build": "npm run build -ws --if-present",
+    "typecheck": "npm run typecheck -ws --if-present",
+    "dev:desktop": "npm run dev -w @praxis/studio-desktop",
+    "tauri:dev": "npm run tauri:dev -w @praxis/studio-desktop",
+    "tauri:build": "npm run tauri:build -w @praxis/studio-desktop"
+  },
+  "engines": { "node": ">=20" },
+  "devDependencies": { "typescript": "^5.8.0" }
+}

@@ -1,0 +1,13 @@
+[
+  {
+    "id": "edge:records",
+    "source": "node:architecture-memory",
+    "target": "node:local-knowledge",
+    "kind": "records",
+    "title": "records",
+    "status": "wip",
+    "progress": 0.4,
+    "riskLevel": "medium",
+    "blockedReason": "Memory event schema and stale detection are not fully defined."
+  }
+]
