@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { acceptGraph, readGraph, runProjectIntake, type RuntimeGraph, type RuntimeIntakeResult } from "../runtimeClient";
+import { useI18n } from "../i18n";
 
 interface ProjectIntakeReviewPageProps {
   projectRoot: string;
@@ -23,6 +24,7 @@ export function ProjectIntakeReviewPage({
   const [state, setState] = useState<IntakeState>(intakeResult ? "review" : "idle");
   const [error, setError] = useState("");
   const lastAutoIntakeToken = useRef(0);
+  const { t } = useI18n();
 
   useEffect(() => {
     if (!autoIntakeToken || autoIntakeToken === lastAutoIntakeToken.current || !projectRoot) return;
@@ -64,44 +66,46 @@ export function ProjectIntakeReviewPage({
   return (
     <section className="page-grid intake-layout" aria-labelledby="intake-title">
       <section className="panel">
-        <p className="eyebrow">Open Existing Project</p>
-        <h1 id="intake-title">Project Intake Review</h1>
-        <label htmlFor="project-root">Project root</label>
+        <p className="eyebrow">{t("intake.eyebrow")}</p>
+        <h1 id="intake-title">{t("intake.title")}</h1>
+        <label htmlFor="project-root">{t("intake.projectRoot")}</label>
         <input
           id="project-root"
           className="path-input"
           value={projectRoot}
-          placeholder="C:/path/to/repository"
+          placeholder={t("intake.projectRootPlaceholder")}
           onChange={(event) => onProjectRootChange(event.target.value)}
         />
         <button className="primary-action full-width" type="button" onClick={runIntake} disabled={!projectRoot || state === "scanning"}>
-          {state === "scanning" ? "Scanning..." : "Scan / Profile / Generate Graph"}
+          {state === "scanning" ? t("intake.scanning") : t("intake.scan")}
         </button>
         {error ? <p className="error-text">{error}</p> : null}
         <dl className="profile-list">
           <div>
-            <dt>Project kind</dt>
-            <dd>{profile?.projectKinds.join(", ") ?? "Pending scan"}</dd>
+            <dt>{t("intake.projectKind")}</dt>
+            <dd>{profile?.projectKinds.join(", ") ?? t("intake.pendingScan")}</dd>
           </div>
           <div>
-            <dt>Languages</dt>
-            <dd>{profile?.languages.join(", ") ?? "Pending scan"}</dd>
+            <dt>{t("intake.languages")}</dt>
+            <dd>{profile?.languages.join(", ") ?? t("intake.pendingScan")}</dd>
           </div>
           <div>
-            <dt>Frameworks</dt>
-            <dd>{profile?.frameworks.join(", ") ?? "Pending scan"}</dd>
+            <dt>{t("intake.frameworks")}</dt>
+            <dd>{profile?.frameworks.join(", ") ?? t("intake.pendingScan")}</dd>
           </div>
           <div>
-            <dt>Graph</dt>
-            <dd>{candidate ? `${candidate.graph.nodes.length} nodes / ${candidate.graph.edges.length} edges` : "Pending scan"}</dd>
+            <dt>{t("intake.graph")}</dt>
+            <dd>
+              {candidate ? t("intake.graphCount", { nodes: candidate.graph.nodes.length, edges: candidate.graph.edges.length }) : t("intake.pendingScan")}
+            </dd>
           </div>
         </dl>
       </section>
 
       <section className="panel">
         <div className="panel-heading">
-          <h2>Module Candidates</h2>
-          <span className="pill">{profile ? `${profile.moduleCandidates.length} modules` : "RepositorySnapshot required"}</span>
+          <h2>{t("intake.moduleCandidates")}</h2>
+          <span className="pill">{profile ? t("intake.moduleCount", { count: profile.moduleCandidates.length }) : t("intake.snapshotRequired")}</span>
         </div>
         <div className="table-list">
           {profile?.moduleCandidates.slice(0, 18).map((module) => (
@@ -112,8 +116,8 @@ export function ProjectIntakeReviewPage({
             </div>
           )) ?? (
             <div className="empty-state">
-              <strong>No repository selected</strong>
-              <span>Waiting for RepositorySnapshot</span>
+              <strong>{t("intake.noRepository")}</strong>
+              <span>{t("intake.waitingSnapshot")}</span>
             </div>
           )}
         </div>
@@ -121,8 +125,8 @@ export function ProjectIntakeReviewPage({
 
       <section className="panel">
         <div className="panel-heading">
-          <h2>Graph Candidate</h2>
-          <span className="pill">Candidate only</span>
+          <h2>{t("intake.graphCandidate")}</h2>
+          <span className="pill">{t("intake.candidateOnly")}</span>
         </div>
         <div className="graph-preview-list">
           {candidate?.graph.edges.slice(0, 16).map((edge) => (
@@ -143,7 +147,7 @@ export function ProjectIntakeReviewPage({
       </section>
 
       <aside className="panel review-panel">
-        <h2>Review</h2>
+        <h2>{t("intake.review")}</h2>
         <ul className="review-list">
           {(candidate?.warnings.slice(0, 8) ?? []).map((warning) => (
             <li key={warning.id}>{warning.summary}</li>
@@ -151,10 +155,10 @@ export function ProjectIntakeReviewPage({
           {(candidate?.unresolvedQuestions.slice(0, 5) ?? []).map((question) => (
             <li key={question.id}>{question.question}</li>
           ))}
-          {!candidate ? <li>Run intake to see warnings and questions.</li> : null}
+          {!candidate ? <li>{t("intake.runForWarnings")}</li> : null}
         </ul>
         <button className="primary-action full-width" type="button" disabled={!candidate || state === "saving"} onClick={accept}>
-          {state === "saving" ? "Writing .distinction..." : "Accept Graph"}
+          {state === "saving" ? t("intake.writing") : t("intake.acceptGraph")}
         </button>
       </aside>
     </section>

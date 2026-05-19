@@ -124,9 +124,9 @@ export async function runRuntimeCommand(command: string, args: string[]): Promis
   return invoke<string>("run_runtime_command", { command, args });
 }
 
-export async function openProjectDialog(): Promise<string | null> {
+export async function openProjectDialog(title = "Open Existing Project"): Promise<string | null> {
   try {
-    const selected = await open({ directory: true, multiple: false, title: "Open Existing Project" });
+    const selected = await open({ directory: true, multiple: false, title });
     if (typeof selected === "string") return selected;
     if (Array.isArray(selected)) return selected[0] ?? null;
     return null;

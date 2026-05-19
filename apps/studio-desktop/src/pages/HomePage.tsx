@@ -1,4 +1,5 @@
 import type { RecentProject } from "../runtimeClient";
+import { useI18n } from "../i18n";
 
 interface HomePageProps {
   onOpenExistingProject: () => void;
@@ -19,17 +20,19 @@ export function HomePage({
   onRefreshRecentProjects,
   onOpenRecentProject
 }: HomePageProps) {
+  const { t } = useI18n();
+
   return (
     <section className="home-layout" aria-labelledby="home-title">
       <section className="home-primary">
-        <p className="eyebrow">Project Intake + Graph Agent + Controlled Coding Task MVP</p>
-        <h1 id="home-title">Praxis Studio v0.1</h1>
-        <div className="action-row" aria-label="Project actions">
+        <p className="eyebrow">{t("home.eyebrow")}</p>
+        <h1 id="home-title">{t("home.title")}</h1>
+        <div className="action-row" aria-label={t("home.eyebrow")}>
           <button className="primary-action" type="button" onClick={onOpenExistingProject}>
-            Open Existing Project
+            {t("home.openExisting")}
           </button>
           <button className="secondary-action" type="button" onClick={onCreateNewProject}>
-            Create New Project
+            {t("home.createNew")}
           </button>
         </div>
       </section>
@@ -37,8 +40,8 @@ export function HomePage({
       <section className="home-grid">
         <section className="panel recent-panel" aria-labelledby="recent-title">
           <div className="panel-heading">
-            <h2 id="recent-title">Recent Projects</h2>
-            <button className="icon-button" type="button" aria-label="Refresh recent projects" onClick={onRefreshRecentProjects}>
+            <h2 id="recent-title">{t("home.recentProjects")}</h2>
+            <button className="icon-button" type="button" aria-label={t("home.refreshRecent")} onClick={onRefreshRecentProjects}>
               R
             </button>
           </div>
@@ -53,54 +56,54 @@ export function HomePage({
               ))
             ) : (
               <button className="recent-project" type="button" onClick={onOpenGraphWorkspace}>
-                <strong>No recent projects yet</strong>
-                <span>Open a repository to create the first recent entry.</span>
-                <small>Recent projects are stored in ~/.praxis-studio/recent-projects.json.</small>
+                <strong>{t("home.noRecentTitle")}</strong>
+                <span>{t("home.noRecentDescription")}</span>
+                <small>{t("home.noRecentStorage")}</small>
               </button>
             )}
           </div>
         </section>
 
         <section className="panel status-panel" aria-labelledby="status-title">
-          <h2 id="status-title">v0.1 Gates</h2>
+          <h2 id="status-title">{t("home.gates")}</h2>
           <ul className="gate-list">
             <li>
               <span className="gate-state active" />
-              HomePage
+              {t("home.gateHome")}
             </li>
             <li>
               <span className="gate-state" />
-              Runtime CLI
+              {t("home.gateRuntime")}
             </li>
             <li>
               <span className="gate-state" />
-              Repository Scanner
+              {t("home.gateScanner")}
             </li>
             <li>
               <span className="gate-state" />
-              Graph Workspace
+              {t("home.gateWorkspace")}
             </li>
           </ul>
         </section>
 
         <section className="panel model-panel" aria-labelledby="model-title">
           <div className="panel-heading">
-            <h2 id="model-title">Model Route</h2>
+            <h2 id="model-title">{t("home.modelRoute")}</h2>
             <button className="text-button" type="button" onClick={onOpenModelSettings}>
-              Settings
+              {t("home.settings")}
             </button>
           </div>
           <dl className="model-list">
             <div>
-              <dt>Default provider</dt>
+              <dt>{t("home.defaultProvider")}</dt>
               <dd>DeepSeek</dd>
             </div>
             <div>
-              <dt>Fallback</dt>
+              <dt>{t("home.fallback")}</dt>
               <dd>MockProvider</dd>
             </div>
             <div>
-              <dt>Policy</dt>
+              <dt>{t("home.policy")}</dt>
               <dd>Explain &gt; Plan &gt; Apply</dd>
             </div>
           </dl>

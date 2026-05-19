@@ -5,6 +5,7 @@ import { CreateProjectWizardPage } from "./pages/CreateProjectWizardPage";
 import { DevelopmentGraphWorkspacePage } from "./pages/DevelopmentGraphWorkspacePage";
 import { ModelSettingsPage } from "./pages/ModelSettingsPage";
 import { type AppRoute, routes } from "./routes";
+import { I18nProvider, type TranslationKey, useI18n } from "./i18n";
 import {
   openProjectDialog,
   readGraph,
@@ -16,12 +17,21 @@ import {
 } from "./runtimeClient";
 
 export function App() {
+  return (
+    <I18nProvider>
+      <AppContent />
+    </I18nProvider>
+  );
+}
+
+function AppContent() {
   const [route, setRoute] = useState<AppRoute>("home");
   const [projectRoot, setProjectRoot] = useState("");
   const [intakeResult, setIntakeResult] = useState<RuntimeIntakeResult | null>(null);
   const [graph, setGraph] = useState<RuntimeGraph | null>(null);
   const [autoIntakeToken, setAutoIntakeToken] = useState(0);
   const [recentProjects, setRecentProjects] = useState<RecentProject[]>([]);
+  const { locale, setLocale, t } = useI18n();
 
   useEffect(() => {
     void refreshRecentProjects();
@@ -33,7 +43,7 @@ export function App() {
   }
 
   async function openExistingProject() {
-    const selectedRoot = await openProjectDialog();
+    const selectedRoot = await openProjectDialog(t("home.openExisting"));
     if (selectedRoot) {
       setProjectRoot(selectedRoot);
       setIntakeResult(null);
@@ -75,7 +85,7 @@ export function App() {
             <small>v0.1</small>
           </span>
         </button>
-        <nav className="top-nav" aria-label="Primary">
+        <nav className="top-nav" aria-label={t("app.primaryNav")}>
           {routes.map((item) => (
             <button
               key={item.id}
@@ -83,10 +93,17 @@ export function App() {
               type="button"
               onClick={() => setRoute(item.id)}
             >
-              {item.label}
+              {t(routeLabelKeys[item.id])}
             </button>
           ))}
         </nav>
+        <label className="language-switch" aria-label={t("app.language")}>
+          <span>{t("app.language")}</span>
+          <select value={locale} onChange={(event) => setLocale(event.target.value === "zh-CN" ? "zh-CN" : "en")}>
+            <option value="en">{t("app.english")}</option>
+            <option value="zh-CN">{t("app.chinese")}</option>
+          </select>
+        </label>
       </header>
 
       {route === "home" ? (
@@ -124,3 +141,11 @@ export function App() {
     </main>
   );
 }
+
+const routeLabelKeys: Record<AppRoute, TranslationKey> = {
+  home: "route.home",
+  "project-intake": "route.projectIntake",
+  "create-project": "route.createProject",
+  "graph-workspace": "route.graphWorkspace",
+  "model-settings": "route.modelSettings"
+};

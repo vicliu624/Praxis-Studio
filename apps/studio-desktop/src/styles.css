@@ -87,6 +87,24 @@ button:disabled {
   gap: 8px;
 }
 
+.language-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #8ea0b5;
+  font-size: 0.86rem;
+  white-space: nowrap;
+}
+
+.language-switch select {
+  min-height: 38px;
+  border: 1px solid #2a394a;
+  border-radius: 8px;
+  background: #16202b;
+  color: #edf2f7;
+  padding: 6px 10px;
+}
+
 .nav-item,
 .text-button,
 .icon-button,

@@ -1,13 +1,13 @@
 import { useState } from "react";
 import { createProjectFromPlan, createProjectPlan, readGraph, type NewProjectPlan, type RuntimeGraph } from "../runtimeClient";
-
-const wizardSteps = ["Product Intent", "Generate Plan", "Review", "Apply", "Workspace"];
+import { useI18n } from "../i18n";
 
 interface CreateProjectWizardPageProps {
   onProjectCreated: (root: string, graph: RuntimeGraph) => void;
 }
 
 export function CreateProjectWizardPage({ onProjectCreated }: CreateProjectWizardPageProps) {
+  const { t } = useI18n();
   const [intent, setIntent] = useState("");
   const [projectName, setProjectName] = useState("praxis-new-project");
   const [targetRoot, setTargetRoot] = useState("");
@@ -15,9 +15,10 @@ export function CreateProjectWizardPage({ onProjectCreated }: CreateProjectWizar
   const [plan, setPlan] = useState<NewProjectPlan | null>(null);
   const [result, setResult] = useState("");
   const [status, setStatus] = useState("");
+  const wizardSteps = [t("create.stepIntent"), t("create.stepGenerate"), t("create.stepReview"), t("create.stepApply"), t("create.stepWorkspace")];
 
   async function generatePlan() {
-    setStatus("Generating plan...");
+    setStatus("generating");
     setResult("");
     try {
       const generated = await createProjectPlan(targetRoot || ".", projectName, intent, projectKind);
@@ -32,7 +33,7 @@ export function CreateProjectWizardPage({ onProjectCreated }: CreateProjectWizar
 
   async function applyPlan() {
     if (!plan) return;
-    setStatus("Applying project files...");
+    setStatus("applying");
     try {
       const output = await createProjectFromPlan(targetRoot, plan);
       setResult(JSON.stringify(output, null, 2));
@@ -48,8 +49,8 @@ export function CreateProjectWizardPage({ onProjectCreated }: CreateProjectWizar
   return (
     <section className="wizard-layout" aria-labelledby="wizard-title">
       <aside className="panel wizard-steps">
-        <p className="eyebrow">Create New Project</p>
-        <h1 id="wizard-title">Project Wizard</h1>
+        <p className="eyebrow">{t("create.eyebrow")}</p>
+        <h1 id="wizard-title">{t("create.title")}</h1>
         <ol>
           {wizardSteps.map((step, index) => (
             <li className={activeStep(plan, targetRoot) === index ? "active-step" : ""} key={step}>
@@ -61,38 +62,38 @@ export function CreateProjectWizardPage({ onProjectCreated }: CreateProjectWizar
       </aside>
 
       <section className="panel intent-panel">
-        <label htmlFor="project-name">Project name</label>
+        <label htmlFor="project-name">{t("create.projectName")}</label>
         <input id="project-name" className="path-input" value={projectName} onChange={(event) => setProjectName(event.target.value)} />
-        <label htmlFor="target-root">Target directory</label>
-        <input id="target-root" className="path-input" value={targetRoot} placeholder="C:/path/to/new-project" onChange={(event) => setTargetRoot(event.target.value)} />
-        <label htmlFor="product-intent">Product Intent</label>
-        <textarea id="product-intent" value={intent} placeholder="Describe the product intent..." onChange={(event) => setIntent(event.target.value)} />
-        <div className="segmented-control" aria-label="Project type">
+        <label htmlFor="target-root">{t("create.targetDirectory")}</label>
+        <input id="target-root" className="path-input" value={targetRoot} placeholder={t("create.targetPlaceholder")} onChange={(event) => setTargetRoot(event.target.value)} />
+        <label htmlFor="product-intent">{t("create.productIntent")}</label>
+        <textarea id="product-intent" value={intent} placeholder={t("create.intentPlaceholder")} onChange={(event) => setIntent(event.target.value)} />
+        <div className="segmented-control" aria-label={t("create.projectType")}>
           <button className={projectKind === "documentation-first" ? "active" : ""} type="button" onClick={() => setProjectKind("documentation-first")}>
-            Documentation-first
+            {t("create.documentationFirst")}
           </button>
           <button className={projectKind === "tauri-desktop-minimal" ? "active" : ""} type="button" onClick={() => setProjectKind("tauri-desktop-minimal")}>
-            Tauri Desktop
+            {t("create.tauriDesktop")}
           </button>
         </div>
         <div className="action-row">
           <button className="primary-action" type="button" disabled={!intent || !projectName || Boolean(status)} onClick={generatePlan}>
-            {status === "Generating plan..." ? status : "Generate Plan"}
+            {status === "generating" ? t("create.generating") : t("create.generatePlan")}
           </button>
           <button className="secondary-action" type="button" disabled={!plan || !targetRoot || Boolean(status)} onClick={applyPlan}>
-            {status === "Applying project files..." ? status : "Apply Files"}
+            {status === "applying" ? t("create.applying") : t("create.applyFiles")}
           </button>
         </div>
       </section>
 
       <section className="panel generated-files">
         <div className="panel-heading">
-          <h2>Review Plan</h2>
-          <span className="pill">{plan ? `${plan.files.length} files` : "No plan"}</span>
+          <h2>{t("create.reviewPlan")}</h2>
+          <span className="pill">{plan ? t("create.fileCount", { count: plan.files.length }) : t("create.noPlan")}</span>
         </div>
         {plan ? (
           <div className="review-plan">
-            <h3>Requirements</h3>
+            <h3>{t("create.requirements")}</h3>
             <ul>
               {plan.requirements.map((requirement) => (
                 <li key={requirement.id}>
@@ -101,7 +102,7 @@ export function CreateProjectWizardPage({ onProjectCreated }: CreateProjectWizar
                 </li>
               ))}
             </ul>
-            <h3>Architecture</h3>
+            <h3>{t("create.architecture")}</h3>
             <ul>
               {plan.architecture.map((component) => (
                 <li key={component.id}>
@@ -110,7 +111,7 @@ export function CreateProjectWizardPage({ onProjectCreated }: CreateProjectWizar
                 </li>
               ))}
             </ul>
-            <h3>Files</h3>
+            <h3>{t("create.files")}</h3>
             <ul>
               {plan.files.slice(0, 12).map((file) => (
                 <li key={file.path}>{file.path}</li>
@@ -128,7 +129,7 @@ export function CreateProjectWizardPage({ onProjectCreated }: CreateProjectWizar
             <li>.distinction/models.yaml</li>
           </ul>
         )}
-        <pre className="agent-output">{result || "Generated plan result will appear here."}</pre>
+        <pre className="agent-output">{result || t("create.planOutput")}</pre>
       </section>
     </section>
   );

@@ -12,6 +12,7 @@ import {
   type RuntimeGraphPlan,
   type RuntimeNode
 } from "../runtimeClient";
+import { useI18n } from "../i18n";
 
 interface DevelopmentGraphWorkspacePageProps {
   projectRoot: string;
@@ -22,12 +23,13 @@ interface DevelopmentGraphWorkspacePageProps {
 type SelectedTarget = { type: "node"; item: RuntimeNode } | { type: "edge"; item: RuntimeEdge };
 
 export function DevelopmentGraphWorkspacePage({ projectRoot, graph, onGraphLoaded }: DevelopmentGraphWorkspacePageProps) {
+  const { t } = useI18n();
   const [selected, setSelected] = useState<SelectedTarget | null>(null);
-  const [instruction, setInstruction] = useState("Explain the selected target.");
+  const [instruction, setInstruction] = useState(() => t("workspace.defaultInstruction"));
   const [response, setResponse] = useState("");
   const [plan, setPlan] = useState<RuntimeGraphPlan | null>(null);
   const [selectedActionIds, setSelectedActionIds] = useState<string[]>([]);
-  const [taskResultInput, setTaskResultInput] = useState(defaultTaskResultInput);
+  const [taskResultInput, setTaskResultInput] = useState(() => buildDefaultTaskResultInput(t));
   const [showCodeUnits, setShowCodeUnits] = useState(false);
   const [showRisks, setShowRisks] = useState(true);
   const [showTasks, setShowTasks] = useState(true);
@@ -56,7 +58,7 @@ export function DevelopmentGraphWorkspacePage({ projectRoot, graph, onGraphLoade
 
   async function loadGraph() {
     if (!projectRoot) return;
-    setStatus("Loading graph...");
+    setStatus(t("workspace.loadingGraph"));
     const loaded = await readGraph(projectRoot);
     onGraphLoaded(loaded);
     setStatus("");
@@ -64,7 +66,7 @@ export function DevelopmentGraphWorkspacePage({ projectRoot, graph, onGraphLoade
 
   async function submit(mode: "explain" | "plan") {
     if (!selected || !projectRoot) return;
-    setStatus(mode === "plan" ? "Planning..." : "Explaining...");
+    setStatus(mode === "plan" ? t("workspace.planning") : t("workspace.explaining"));
     const result = await runChat(projectRoot, selected.item.id, mode, instruction);
     setResponse(result.message);
     if (mode === "plan") {
@@ -77,7 +79,7 @@ export function DevelopmentGraphWorkspacePage({ projectRoot, graph, onGraphLoade
 
   async function applySelectedActions() {
     if (!plan || !projectRoot || !selectedActionIds.length) return;
-    setStatus("Applying selected actions...");
+    setStatus(t("workspace.applyingActions"));
     const result = await applyPlan(projectRoot, plan, selectedActionIds);
     setResponse(JSON.stringify(result, null, 2));
     const loaded = await readGraph(projectRoot);
@@ -87,7 +89,7 @@ export function DevelopmentGraphWorkspacePage({ projectRoot, graph, onGraphLoade
 
   async function createTask() {
     if (!plan || !projectRoot) return;
-    setStatus("Generating TASK.md...");
+    setStatus(t("workspace.generatingTask"));
     const result = await generateTask(projectRoot, plan);
     setResponse(result);
     setStatus("");
@@ -95,9 +97,9 @@ export function DevelopmentGraphWorkspacePage({ projectRoot, graph, onGraphLoade
 
   async function importResult() {
     if (!projectRoot) return;
-    setStatus("Importing task result...");
+    setStatus(t("workspace.importingResult"));
     try {
-      const parsed = parseTaskResultInput(taskResultInput);
+      const parsed = parseTaskResultInput(taskResultInput, t("workspace.importedTextSummary"));
       const result = (await importTaskResult(projectRoot, parsed)) as { progressPlan?: RuntimeGraphPlan };
       setResponse(JSON.stringify(result, null, 2));
       if (result.progressPlan) {
@@ -118,22 +120,22 @@ export function DevelopmentGraphWorkspacePage({ projectRoot, graph, onGraphLoade
   return (
     <section className="workspace-layout" aria-labelledby="workspace-title">
       <aside className="panel outline-panel">
-        <p className="eyebrow">Development Graph</p>
-        <h1 id="workspace-title">Workspace</h1>
+        <p className="eyebrow">{t("workspace.eyebrow")}</p>
+        <h1 id="workspace-title">{t("workspace.title")}</h1>
         <button className="secondary-action full-width" type="button" disabled={!projectRoot} onClick={loadGraph}>
-          Load .distinction Graph
+          {t("workspace.loadGraph")}
         </button>
         <label className="checkbox-row">
           <input type="checkbox" checked={showCodeUnits} onChange={(event) => setShowCodeUnits(event.target.checked)} />
-          Show code units
+          {t("workspace.showCodeUnits")}
         </label>
         <label className="checkbox-row">
           <input type="checkbox" checked={showRisks} onChange={(event) => setShowRisks(event.target.checked)} />
-          Show risks
+          {t("workspace.showRisks")}
         </label>
         <label className="checkbox-row">
           <input type="checkbox" checked={showTasks} onChange={(event) => setShowTasks(event.target.checked)} />
-          Show tasks
+          {t("workspace.showTasks")}
         </label>
         <div className="outline-list">
           {visibleNodes.map((node) => (
@@ -152,8 +154,8 @@ export function DevelopmentGraphWorkspacePage({ projectRoot, graph, onGraphLoade
           ))}
           {!graph ? (
             <div className="empty-state compact">
-              <strong>No confirmed graph</strong>
-              <span>Open a project or create one first.</span>
+              <strong>{t("workspace.noGraph")}</strong>
+              <span>{t("workspace.openProjectFirst")}</span>
             </div>
           ) : null}
         </div>
@@ -183,9 +185,9 @@ export function DevelopmentGraphWorkspacePage({ projectRoot, graph, onGraphLoade
             </ReactFlow>
           ) : (
             <div className="graph-empty">
-              <div className="graph-empty-node">Project</div>
-              <div className="graph-empty-node muted">Node</div>
-              <div className="graph-empty-edge">edge progress</div>
+              <div className="graph-empty-node">{t("workspace.project")}</div>
+              <div className="graph-empty-node muted">{t("workspace.node")}</div>
+              <div className="graph-empty-edge">{t("workspace.edgeProgress")}</div>
             </div>
           )}
         </div>
@@ -193,12 +195,12 @@ export function DevelopmentGraphWorkspacePage({ projectRoot, graph, onGraphLoade
 
       <aside className="panel inspector-panel">
         <div className="panel-heading">
-          <h2>Inspector</h2>
-          <span className="pill">Target-bound</span>
+          <h2>{t("workspace.inspector")}</h2>
+          <span className="pill">{t("workspace.targetBound")}</span>
         </div>
         <div className="selected-summary">
-          <strong>{selected ? selected.item.title ?? selected.item.id : "No target selected"}</strong>
-          <span>{selected?.type ?? "Select a node or edge"}</span>
+          <strong>{selected ? selected.item.title ?? selected.item.id : t("workspace.noTarget")}</strong>
+          <span>{selected?.type ?? t("workspace.selectTarget")}</span>
           {selected ? <small>{selected.item.id}</small> : null}
           {selected ? (
             <small>
@@ -207,28 +209,28 @@ export function DevelopmentGraphWorkspacePage({ projectRoot, graph, onGraphLoade
             </small>
           ) : null}
         </div>
-        <div className="mode-row" aria-label="Agent mode">
+        <div className="mode-row" aria-label={t("workspace.agentMode")}>
           <button className="active" type="button" disabled={!selected} onClick={() => submit("explain")}>
-            Explain
+            {t("workspace.explain")}
           </button>
           <button type="button" disabled={!selected} onClick={() => submit("plan")}>
-            Plan
+            {t("workspace.plan")}
           </button>
           <button type="button" disabled={!plan} onClick={createTask}>
-            Task
+            {t("workspace.task")}
           </button>
         </div>
         <textarea value={instruction} onChange={(event) => setInstruction(event.target.value)} />
         <button className="primary-action full-width" type="button" disabled={!selected} onClick={() => submit("explain")}>
-          Send
+          {t("workspace.send")}
         </button>
         {status ? <p className="status-text">{status}</p> : null}
 
         {plan ? (
           <section className="plan-preview" aria-labelledby="plan-actions-title">
             <div className="panel-heading tight">
-              <h2 id="plan-actions-title">Plan Actions</h2>
-              <span className="pill">{selectedActionIds.length} selected</span>
+              <h2 id="plan-actions-title">{t("workspace.planActions")}</h2>
+              <span className="pill">{t("workspace.selectedCount", { count: selectedActionIds.length })}</span>
             </div>
             <div className="action-list">
               {plan.actions.map((action) => (
@@ -237,57 +239,59 @@ export function DevelopmentGraphWorkspacePage({ projectRoot, graph, onGraphLoade
                   <span>
                     <strong>{action.title}</strong>
                     <small>
-                      {action.type} · {action.targetEdgeIds[0] ?? action.targetNodeIds[0] ?? "project"}
+                      {action.type} - {action.targetEdgeIds[0] ?? action.targetNodeIds[0] ?? "project"}
                     </small>
                   </span>
                 </label>
               ))}
             </div>
             <button className="secondary-action full-width" type="button" disabled={!selectedActionIds.length} onClick={applySelectedActions}>
-              Apply selected
+              {t("workspace.applySelected")}
             </button>
           </section>
         ) : null}
 
         <section className="task-result-panel" aria-labelledby="task-result-title">
-          <h2 id="task-result-title">Import Task Result</h2>
+          <h2 id="task-result-title">{t("workspace.importTaskResult")}</h2>
           <textarea value={taskResultInput} onChange={(event) => setTaskResultInput(event.target.value)} />
-          <p className="muted-copy compact">Paste JSON, Markdown, or a short external agent summary. Progress suggestions still require preview before apply.</p>
+          <p className="muted-copy compact">{t("workspace.taskResultHelp")}</p>
           <button className="secondary-action full-width" type="button" disabled={!projectRoot} onClick={importResult}>
-            Import result
+            {t("workspace.importResult")}
           </button>
         </section>
 
-        <pre className="agent-output">{response || "Agent output will appear here."}</pre>
+        <pre className="agent-output">{response || t("workspace.agentOutput")}</pre>
       </aside>
 
       <section className="panel timeline-panel">
         <div className="panel-heading tight">
-          <h2>Trace / Memory Timeline</h2>
+          <h2>{t("workspace.timeline")}</h2>
           <span className="pill">.distinction/memory</span>
         </div>
-        <p className="muted-copy">Runtime calls, plan apply events, task imports, and memory records are persisted to traces.jsonl and changes.md.</p>
+        <p className="muted-copy">{t("workspace.timelineCopy")}</p>
       </section>
     </section>
   );
 }
 
-const defaultTaskResultInput = JSON.stringify(
-  {
-    taskId: "TASK-0001",
-    status: "partial",
-    summary: "External coding agent returned a patch summary and progress suggestion.",
-    changedFiles: [],
-    testResult: "Not run",
-    progressSuggestion: {
-      nodeUpdates: [],
-      edgeUpdates: []
+function buildDefaultTaskResultInput(t: (key: "workspace.defaultTaskSummary" | "workspace.testNotRun") => string): string {
+  return JSON.stringify(
+    {
+      taskId: "TASK-0001",
+      status: "partial",
+      summary: t("workspace.defaultTaskSummary"),
+      changedFiles: [],
+      testResult: t("workspace.testNotRun"),
+      progressSuggestion: {
+        nodeUpdates: [],
+        edgeUpdates: []
+      },
+      memorySuggestion: ""
     },
-    memorySuggestion: ""
-  },
-  null,
-  2
-);
+    null,
+    2
+  );
+}
 
 function asGraphPlan(value: unknown): RuntimeGraphPlan | null {
   if (!value || typeof value !== "object") return null;
@@ -295,7 +299,7 @@ function asGraphPlan(value: unknown): RuntimeGraphPlan | null {
   return Array.isArray(plan.actions) ? plan : null;
 }
 
-function parseTaskResultInput(input: string): unknown {
+function parseTaskResultInput(input: string, fallbackSummary: string): unknown {
   try {
     return JSON.parse(input);
   } catch {
@@ -307,7 +311,7 @@ function parseTaskResultInput(input: string): unknown {
       trimmed
         .split(/\r?\n/)
         .map((line) => line.replace(/^[#*\-\s]+/, "").trim())
-        .find(Boolean) ?? "External coding agent result imported from text.";
+        .find(Boolean) ?? fallbackSummary;
     const changedFiles = Array.from(
       new Set(
         [...trimmed.matchAll(/(?:^|\s)([A-Za-z0-9_.\/\\-]+\.(?:ts|tsx|js|jsx|rs|md|json|yaml|yml|toml|css|html))/g)].map((match) =>
