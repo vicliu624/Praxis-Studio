@@ -1,11 +1,24 @@
+import type { RecentProject } from "../runtimeClient";
+
 interface HomePageProps {
   onOpenExistingProject: () => void;
   onCreateNewProject: () => void;
   onOpenGraphWorkspace: () => void;
   onOpenModelSettings: () => void;
+  recentProjects: RecentProject[];
+  onRefreshRecentProjects: () => void;
+  onOpenRecentProject: (root: string) => void;
 }
 
-export function HomePage({ onOpenExistingProject, onCreateNewProject, onOpenGraphWorkspace, onOpenModelSettings }: HomePageProps) {
+export function HomePage({
+  onOpenExistingProject,
+  onCreateNewProject,
+  onOpenGraphWorkspace,
+  onOpenModelSettings,
+  recentProjects,
+  onRefreshRecentProjects,
+  onOpenRecentProject
+}: HomePageProps) {
   return (
     <section className="home-layout" aria-labelledby="home-title">
       <section className="home-primary">
@@ -25,16 +38,26 @@ export function HomePage({ onOpenExistingProject, onCreateNewProject, onOpenGrap
         <section className="panel recent-panel" aria-labelledby="recent-title">
           <div className="panel-heading">
             <h2 id="recent-title">Recent Projects</h2>
-            <button className="icon-button" type="button" aria-label="Refresh recent projects">
+            <button className="icon-button" type="button" aria-label="Refresh recent projects" onClick={onRefreshRecentProjects}>
               R
             </button>
           </div>
           <div className="recent-list">
-            <button className="recent-project" type="button" onClick={onOpenGraphWorkspace}>
-              <strong>No recent projects yet</strong>
-              <span>Open a repository to create the first recent entry.</span>
-              <small>Recent project storage lands after intake wiring.</small>
-            </button>
+            {recentProjects.length ? (
+              recentProjects.map((project) => (
+                <button className="recent-project" type="button" key={project.root} onClick={() => onOpenRecentProject(project.root)}>
+                  <strong>{project.name}</strong>
+                  <span>{project.root}</span>
+                  <small>{formatRecentTime(project.lastOpenedAt)}</small>
+                </button>
+              ))
+            ) : (
+              <button className="recent-project" type="button" onClick={onOpenGraphWorkspace}>
+                <strong>No recent projects yet</strong>
+                <span>Open a repository to create the first recent entry.</span>
+                <small>Recent projects are stored in ~/.praxis-studio/recent-projects.json.</small>
+              </button>
+            )}
           </div>
         </section>
 
@@ -85,4 +108,11 @@ export function HomePage({ onOpenExistingProject, onCreateNewProject, onOpenGrap
       </section>
     </section>
   );
+}
+
+function formatRecentTime(value: string): string {
+  const numeric = Number(value);
+  if (Number.isFinite(numeric)) return new Date(numeric).toLocaleString();
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
 }

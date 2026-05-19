@@ -17,7 +17,8 @@
     "tauri:build": "npm run package:desktop",
     "package:desktop": "npm run build:packages && npm run build -w @praxis/runtime-cli && npm run tauri:build -w @praxis/studio-desktop",
     "package:desktop:debug": "npm run build:packages && npm run build -w @praxis/runtime-cli && npm run tauri:build:debug -w @praxis/studio-desktop",
-    "dist:desktop": "npm run package:desktop"
+    "dist:desktop": "npm run package:desktop",
+    "smoke:self-intake": "node scripts/smoke-self-intake.mjs"
   },
   "engines": { "node": ">=20" },
   "devDependencies": {

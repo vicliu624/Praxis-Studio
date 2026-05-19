@@ -42,6 +42,19 @@ export interface CodingAgentResult {
   memorySuggestion?: string;
 }
 
+export interface CodingAgentResultInput {
+  taskId: string;
+  status: "done" | "partial" | "failed";
+  summary: string;
+  changedFiles: string[];
+  testResult?: string;
+  progressSuggestion?: {
+    nodeUpdates?: { nodeId: string; progress: number }[];
+    edgeUpdates?: { edgeId: string; progress: number }[];
+  };
+  memorySuggestion?: string;
+}
+
 export interface CodingAgentPreparedTask {
   kind: "markdown" | "manual_command";
   markdown?: string;

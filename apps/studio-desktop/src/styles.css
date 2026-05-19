@@ -210,6 +210,10 @@ h2 {
   margin-bottom: 14px;
 }
 
+.panel-heading.tight {
+  margin-bottom: 8px;
+}
+
 .icon-button {
   width: 36px;
   height: 36px;
@@ -226,7 +230,8 @@ h2 {
 .profile-list,
 .review-list,
 .generated-files ul,
-.wizard-steps ol {
+.wizard-steps ol,
+.review-plan ul {
   margin: 0;
   padding: 0;
 }
@@ -258,7 +263,8 @@ dt {
 .gate-list,
 .review-list,
 .generated-files ul,
-.wizard-steps ol {
+.wizard-steps ol,
+.review-plan ul {
   display: grid;
   gap: 10px;
   list-style: none;
@@ -267,7 +273,8 @@ dt {
 .gate-list li,
 .review-list li,
 .generated-files li,
-.wizard-steps li {
+.wizard-steps li,
+.review-plan li {
   display: flex;
   align-items: center;
   gap: 10px;
@@ -518,6 +525,7 @@ textarea {
 .workspace-layout {
   display: grid;
   grid-template-columns: 260px minmax(360px, 1fr) 340px;
+  grid-template-rows: minmax(620px, 1fr) auto;
   gap: 18px;
   min-height: calc(100vh - 124px);
 }
@@ -552,6 +560,11 @@ textarea {
   display: grid;
   align-content: start;
   gap: 16px;
+}
+
+.inspector-panel {
+  max-height: calc(100vh - 124px);
+  overflow: auto;
 }
 
 .graph-workspace-panel {
@@ -599,6 +612,63 @@ textarea {
 
 .flow-node-label small {
   color: #f6c36e;
+}
+
+.checkbox-row,
+.action-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  color: #b7c4d4;
+}
+
+.checkbox-row input,
+.action-check input {
+  margin-top: 3px;
+}
+
+.plan-preview,
+.task-result-panel,
+.review-plan {
+  display: grid;
+  gap: 12px;
+}
+
+.action-list {
+  display: grid;
+  gap: 8px;
+}
+
+.action-check {
+  border: 1px solid #2a394a;
+  border-radius: 8px;
+  background: #0f161e;
+  padding: 10px;
+}
+
+.action-check span {
+  display: grid;
+  gap: 4px;
+}
+
+.action-check small,
+.selected-summary small {
+  color: #8ea0b5;
+  overflow-wrap: anywhere;
+}
+
+.task-result-panel textarea {
+  min-height: 160px;
+}
+
+.timeline-panel {
+  grid-column: 1 / -1;
+}
+
+.review-plan h3 {
+  margin: 6px 0 0;
+  font-size: 14px;
+  color: #8deadd;
 }
 
 .graph-empty {

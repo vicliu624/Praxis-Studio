@@ -4,6 +4,13 @@ version = "0.1.0"
 description = "Praxis Studio desktop host"
 authors = ["Praxis Studio"]
 edition = "2021"
+
+[package.metadata.winresource]
+ProductName = "Praxis Studio"
+FileDescription = "Praxis Studio desktop host"
+OriginalFilename = "Praxis Studio.exe"
+LegalCopyright = "Copyright (c) Praxis Studio"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 [dependencies]

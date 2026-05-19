@@ -6,6 +6,7 @@ target/
 .env
 .env.local
 apps/studio-desktop/src-tauri/target/
+apps/studio-desktop/src-tauri/gen/
 .distinction/
 .distinction.backup-*/
 .distinction.previous-*/

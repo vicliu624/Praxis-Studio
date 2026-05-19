@@ -1,20 +1,49 @@
 #!/usr/bin/env node
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { scanRepository } from "@praxis/repository-scanner";
 import { profileProject } from "@praxis/project-profiler";
 import { generateDevelopmentGraphCandidate } from "@praxis/graph-generator";
-import { appendChange, appendTrace, initializeLocalKnowledge, readDevelopmentGraph, writeCodingTask } from "@praxis/local-knowledge";
+import {
+  appendChange,
+  appendTrace,
+  getLocalKnowledgePaths,
+  initializeLocalKnowledge,
+  readDevelopmentGraph,
+  writeCodingTask,
+  writeDevelopmentGraph
+} from "@praxis/local-knowledge";
 import { PraxisAgentRuntime } from "@praxis/agent-runtime";
 import { ManualAdapter, createCodingAgentTask } from "@praxis/coding-agent-adapter";
 import { applyNewProjectPlan, createNewProjectPlan, type NewProjectPlan } from "@praxis/project-wizard";
-import { findEdge, findNode, type DevelopmentEdge, type DevelopmentGraph, type DevelopmentGraphCandidate, type DevelopmentNode } from "@praxis/development-graph";
-import type { GraphPlan } from "@praxis/plan-model";
+import {
+  findEdge,
+  findNode,
+  normalizeProgress,
+  type DevelopmentEdge,
+  type DevelopmentGraph,
+  type DevelopmentGraphCandidate,
+  type DevelopmentNode
+} from "@praxis/development-graph";
+import type { GraphPlan, PlanAction } from "@praxis/plan-model";
 import { loadModelConfig, resolveModelRoute } from "@praxis/model-router";
 import { createProvider } from "@praxis/provider-deepseek";
 import { getPrompt } from "@praxis/prompt-registry";
 
 type Args = Record<string, string | boolean>;
+
+interface CodingAgentResultInput {
+  taskId: string;
+  status: "done" | "partial" | "failed";
+  summary: string;
+  changedFiles: string[];
+  testResult?: string;
+  progressSuggestion?: {
+    nodeUpdates?: { nodeId: string; progress: number }[];
+    edgeUpdates?: { edgeId: string; progress: number }[];
+  };
+  memorySuggestion?: string;
+}
 
 async function main(argv: string[]): Promise<void> {
   const [command, ...rest] = argv;
@@ -27,6 +56,8 @@ async function main(argv: string[]): Promise<void> {
     if (command === "init-memory") return await commandInitMemory(args);
     if (command === "chat") return await commandChat(args);
     if (command === "generate-task") return await commandGenerateTask(args);
+    if (command === "apply-plan") return await commandApplyPlan(args);
+    if (command === "import-task-result") return await commandImportTaskResult(args);
     if (command === "create-project-plan") return await commandCreateProjectPlan(args);
     if (command === "create-project") return await commandCreateProject(args);
     throw new Error(`Unknown command: ${command ?? "(missing)"}`);
@@ -146,6 +177,193 @@ async function commandGenerateTask(args: Args): Promise<void> {
   outputJson({ ok: true, taskPath, task });
 }
 
+async function commandApplyPlan(args: Args): Promise<void> {
+  const projectRoot = required(args, "project-root");
+  const plan = (await readJson(required(args, "plan"))) as GraphPlan;
+  const actionIds = typeof args.actions === "string" ? new Set(args.actions.split(",").map((item) => item.trim()).filter(Boolean)) : undefined;
+  const graph = await readDevelopmentGraph(projectRoot);
+  const result = await applyPlanActions(projectRoot, graph, plan, actionIds);
+  outputJson({ ok: true, ...result });
+}
+
+async function commandImportTaskResult(args: Args): Promise<void> {
+  const projectRoot = required(args, "project-root");
+  const result = (await readJson(required(args, "result"))) as CodingAgentResultInput;
+  const normalized = normalizeTaskResultInput(result);
+  const paths = getLocalKnowledgePaths(projectRoot);
+  await mkdir(paths.tasksDir, { recursive: true });
+  const resultPath = path.join(paths.tasksDir, `${safeFilePart(normalized.taskId)}.result.json`);
+  await writeFile(resultPath, `${JSON.stringify(normalized, null, 2)}\n`, "utf8");
+
+  const progressPlan = progressPlanFromTaskResult(normalized);
+  if (progressPlan) {
+    await mkdir(paths.reportsDir, { recursive: true });
+    await writeFile(path.join(paths.reportsDir, `${normalized.taskId}.progress-preview.json`), `${JSON.stringify(progressPlan, null, 2)}\n`, "utf8");
+  }
+
+  await appendChange(projectRoot, {
+    title: `Imported result for ${normalized.taskId}`,
+    summary: `${normalized.status}: ${normalized.summary}`,
+    kind: "CANDIDATE"
+  });
+  await appendTrace(projectRoot, {
+    id: `trace-event:task-result:${Date.now()}`,
+    traceId: `trace:task-result:${Date.now()}`,
+    timestamp: new Date().toISOString(),
+    kind: "memory.recorded",
+    target: { type: "project" },
+    summary: `Imported task result ${normalized.taskId}`,
+    data: { taskId: normalized.taskId, status: normalized.status, resultPath, progressPlan }
+  });
+
+  outputJson({ ok: true, resultPath, progressPlan });
+}
+
+async function applyPlanActions(projectRoot: string, graph: DevelopmentGraph, plan: GraphPlan, actionIds?: Set<string>) {
+  const selectedActions = plan.actions.filter((action) => !actionIds || actionIds.has(action.id));
+  const appliedActions: { id: string; type: string; summary: string }[] = [];
+  const skippedActions: { id: string; type: string; reason: string }[] = [];
+  let graphChanged = false;
+
+  for (const action of selectedActions) {
+    let graphChangedByAction = false;
+    if (!isSupportedApplyAction(action)) {
+      skippedActions.push({ id: action.id, type: action.type, reason: "Action is not supported by v0.1 limited Apply." });
+      continue;
+    }
+    if (action.type === "update_edge") {
+      const edge = action.targetEdgeIds.map((edgeId) => findEdge(graph, edgeId)).find(Boolean) as DevelopmentEdge | undefined;
+      if (!edge) {
+        skippedActions.push({ id: action.id, type: action.type, reason: "Target edge was not found." });
+        continue;
+      }
+      edge.blockedReason = stringOr(action.data?.blockedReason, action.description || plan.summary);
+      edge.metadata = {
+        ...(edge.metadata ?? {}),
+        lastAppliedPlanId: plan.id,
+        lastAppliedActionId: action.id,
+        appliedBy: "user-confirmed"
+      };
+      graphChanged = true;
+      graphChangedByAction = true;
+      appliedActions.push({ id: action.id, type: action.type, summary: `Updated ${edge.id}` });
+    } else if (action.type === "update_node_progress") {
+      const progress = progressFromAction(action);
+      const node = action.targetNodeIds.map((nodeId) => findNode(graph, nodeId)).find(Boolean) as DevelopmentNode | undefined;
+      if (!node || progress === undefined) {
+        skippedActions.push({ id: action.id, type: action.type, reason: "Target node or progress was not found." });
+        continue;
+      }
+      node.progress = progress;
+      node.metadata = { ...(node.metadata ?? {}), lastAppliedPlanId: plan.id, lastAppliedActionId: action.id, appliedBy: "user-confirmed" };
+      graphChanged = true;
+      graphChangedByAction = true;
+      appliedActions.push({ id: action.id, type: action.type, summary: `Updated ${node.id} progress to ${Math.round(progress * 100)}%` });
+    } else if (action.type === "update_edge_progress") {
+      const progress = progressFromAction(action);
+      const edge = action.targetEdgeIds.map((edgeId) => findEdge(graph, edgeId)).find(Boolean) as DevelopmentEdge | undefined;
+      if (!edge || progress === undefined) {
+        skippedActions.push({ id: action.id, type: action.type, reason: "Target edge or progress was not found." });
+        continue;
+      }
+      edge.progress = progress;
+      edge.metadata = { ...(edge.metadata ?? {}), lastAppliedPlanId: plan.id, lastAppliedActionId: action.id, appliedBy: "user-confirmed" };
+      graphChanged = true;
+      graphChangedByAction = true;
+      appliedActions.push({ id: action.id, type: action.type, summary: `Updated ${edge.id} progress to ${Math.round(progress * 100)}%` });
+    } else if (action.type === "create_memory_event") {
+      await appendChange(projectRoot, {
+        title: action.title,
+        summary: `${action.description}\n\nPlan: ${plan.summary}`,
+        kind: "CONFIRMED"
+      });
+      appliedActions.push({ id: action.id, type: action.type, summary: "Recorded memory event." });
+    } else if (action.type === "create_decision") {
+      await appendDecision(projectRoot, action, plan);
+      appliedActions.push({ id: action.id, type: action.type, summary: "Recorded decision." });
+    } else if (action.type === "create_task" || action.type === "create_coding_task") {
+      const taskId = `TASK-${String(Date.now()).slice(-6)}`;
+      const taskPath = await writeCodingTask(projectRoot, {
+        id: taskId,
+        markdown: [`# ${taskId} ${action.title}`, "", action.description, "", `Plan: ${plan.id}`, "", "Target nodes:", ...list(action.targetNodeIds), "", "Target edges:", ...list(action.targetEdgeIds), ""].join("\n")
+      });
+      appliedActions.push({ id: action.id, type: action.type, summary: `Wrote ${taskPath}` });
+    } else if (action.type === "write_report") {
+      const reportPath = await writeActionReport(projectRoot, action, plan);
+      appliedActions.push({ id: action.id, type: action.type, summary: `Wrote ${reportPath}` });
+    }
+
+    await appendTrace(projectRoot, {
+      id: `trace-event:apply:${Date.now()}:${action.id}`,
+      traceId: `trace:apply:${Date.now()}`,
+      timestamp: new Date().toISOString(),
+      kind: graphChangedByAction ? "graph.updated" : "memory.recorded",
+      target: traceTargetFromAction(action),
+      summary: `Applied plan action ${action.title}`,
+      data: { planId: plan.id, action }
+    });
+  }
+
+  if (graphChanged) await writeDevelopmentGraph(projectRoot, graph);
+  if (appliedActions.length) {
+    await appendChange(projectRoot, {
+      title: `Applied ${appliedActions.length} plan action(s)`,
+      summary: appliedActions.map((action) => `${action.type}: ${action.summary}`).join("\n"),
+      kind: "CONFIRMED"
+    });
+  }
+
+  return { appliedActions, skippedActions, graphUpdated: graphChanged };
+}
+
+function normalizeTaskResultInput(value: CodingAgentResultInput): CodingAgentResultInput {
+  if (!value || typeof value !== "object") throw new Error("Task result must be a JSON object.");
+  if (!value.taskId) throw new Error("Task result requires taskId.");
+  if (!["done", "partial", "failed"].includes(value.status)) throw new Error("Task result status must be done, partial, or failed.");
+  return {
+    taskId: value.taskId,
+    status: value.status,
+    summary: value.summary || "",
+    changedFiles: Array.isArray(value.changedFiles) ? value.changedFiles.filter((item) => typeof item === "string") : [],
+    testResult: value.testResult,
+    progressSuggestion: value.progressSuggestion,
+    memorySuggestion: value.memorySuggestion
+  };
+}
+
+function progressPlanFromTaskResult(result: CodingAgentResultInput): GraphPlan | undefined {
+  const nodeActions =
+    result.progressSuggestion?.nodeUpdates?.map((update, index) => ({
+      id: `action:${result.taskId}:node-progress:${index + 1}`,
+      type: "update_node_progress" as const,
+      title: `Apply suggested node progress for ${update.nodeId}`,
+      description: result.summary,
+      targetNodeIds: [update.nodeId],
+      targetEdgeIds: [],
+      data: { progress: update.progress }
+    })) ?? [];
+  const edgeActions =
+    result.progressSuggestion?.edgeUpdates?.map((update, index) => ({
+      id: `action:${result.taskId}:edge-progress:${index + 1}`,
+      type: "update_edge_progress" as const,
+      title: `Apply suggested edge progress for ${update.edgeId}`,
+      description: result.summary,
+      targetNodeIds: [],
+      targetEdgeIds: [update.edgeId],
+      data: { progress: update.progress }
+    })) ?? [];
+  const actions = [...nodeActions, ...edgeActions];
+  if (!actions.length) return undefined;
+  return {
+    id: `plan:${result.taskId}:progress-preview`,
+    summary: `Progress suggestions imported from ${result.taskId}. Confirm before Apply.`,
+    missingGluePoints: [],
+    actions,
+    codingTasks: [],
+    questions: ["Which progress suggestions should Praxis apply to the Development Graph?"]
+  };
+}
+
 function buildCodingTaskContext(graph: DevelopmentGraph, plan: GraphPlan, action?: GraphPlan["actions"][number]) {
   const targetEdgeIds = unique([
     ...(action?.targetEdgeIds ?? []),
@@ -213,6 +431,67 @@ function buildCodingTaskContext(graph: DevelopmentGraph, plan: GraphPlan, action
 
 function unique(values: string[]): string[] {
   return Array.from(new Set(values.filter(Boolean)));
+}
+
+function list(values: string[]): string[] {
+  return values.length ? values.map((value) => `- ${value}`) : ["- None"];
+}
+
+function isSupportedApplyAction(action: PlanAction): boolean {
+  return [
+    "update_edge",
+    "update_node_progress",
+    "update_edge_progress",
+    "create_memory_event",
+    "create_decision",
+    "create_task",
+    "create_coding_task",
+    "write_report"
+  ].includes(action.type);
+}
+
+function progressFromAction(action: PlanAction): number | undefined {
+  const raw = action.data?.progress ?? action.data?.value;
+  if (typeof raw !== "number" || !Number.isFinite(raw)) return undefined;
+  return normalizeProgress(raw > 1 ? raw / 100 : raw);
+}
+
+async function appendDecision(projectRoot: string, action: PlanAction, plan: GraphPlan): Promise<void> {
+  const paths = getLocalKnowledgePaths(projectRoot);
+  await mkdir(paths.memoryDir, { recursive: true });
+  await import("node:fs/promises").then(({ appendFile }) =>
+    appendFile(
+      path.join(paths.memoryDir, "decisions.md"),
+      [`## ${new Date().toISOString()} ${action.title}`, "", action.description, "", `Plan: ${plan.id}`, "", ""].join("\n"),
+      "utf8"
+    )
+  );
+}
+
+async function writeActionReport(projectRoot: string, action: PlanAction, plan: GraphPlan): Promise<string> {
+  const paths = getLocalKnowledgePaths(projectRoot);
+  await mkdir(paths.reportsDir, { recursive: true });
+  const reportPath = path.join(paths.reportsDir, `${slug(action.id)}.md`);
+  await writeFile(
+    reportPath,
+    [`# ${action.title}`, "", action.description, "", `Plan: ${plan.id}`, "", "## Plan Summary", "", plan.summary, ""].join("\n"),
+    "utf8"
+  );
+  return reportPath;
+}
+
+function traceTargetFromAction(action: PlanAction) {
+  if (action.targetEdgeIds[0]) return { type: "edge" as const, id: action.targetEdgeIds[0] };
+  if (action.targetNodeIds[0]) return { type: "node" as const, id: action.targetNodeIds[0] };
+  return { type: "project" as const };
+}
+
+function slug(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "report";
+}
+
+function safeFilePart(value: string): string {
+  return value.replace(/[^A-Za-z0-9_.-]+/g, "-").replace(/^-|-$/g, "") || "TASK-result";
 }
 
 async function commandCreateProject(args: Args): Promise<void> {

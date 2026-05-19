@@ -61,6 +61,43 @@ export interface RuntimeChatResult {
   structured?: unknown;
 }
 
+export interface RuntimePlanAction {
+  id: string;
+  type: string;
+  title: string;
+  description: string;
+  targetNodeIds: string[];
+  targetEdgeIds: string[];
+  data?: Record<string, unknown>;
+}
+
+export interface RuntimeGraphPlan {
+  id: string;
+  summary: string;
+  missingGluePoints: { title: string; reason: string; kind: string }[];
+  actions: RuntimePlanAction[];
+  codingTasks: { title: string; allowedPaths: string[]; forbiddenPaths: string[]; acceptanceCriteria: string[] }[];
+  questions: string[];
+}
+
+export interface RecentProject {
+  root: string;
+  name: string;
+  lastOpenedAt: string;
+}
+
+export interface NewProjectPlan {
+  projectName: string;
+  productIdea: string;
+  projectKind: string;
+  requirements: { id: string; title: string; description: string }[];
+  architecture: { id: string; title: string; responsibility: string }[];
+  graph: RuntimeGraph;
+  files: { path: string; content: string }[];
+  assumptions: { id: string; summary: string }[];
+  questions: { id: string; question: string }[];
+}
+
 export interface ModelSettings {
   defaultProvider: string;
   baseUrl: string;
@@ -123,10 +160,51 @@ export async function generateTask(root: string, plan: unknown): Promise<string>
   });
 }
 
+export async function applyPlan(root: string, plan: unknown, actionIds: string[]): Promise<unknown> {
+  const stdout = await invoke<string>("apply_plan_actions", {
+    projectRoot: root,
+    planJson: JSON.stringify(plan),
+    actionIds
+  });
+  return JSON.parse(stdout) as unknown;
+}
+
+export async function importTaskResult(root: string, result: unknown): Promise<unknown> {
+  const stdout = await invoke<string>("import_task_result", {
+    projectRoot: root,
+    resultJson: typeof result === "string" ? result : JSON.stringify(result)
+  });
+  return JSON.parse(stdout) as unknown;
+}
+
+export async function createProjectPlan(root: string, name: string, intent: string, kind: string): Promise<NewProjectPlan> {
+  const stdout = await runRuntimeCommand("create-project-plan", ["--root", root || ".", "--name", name, "--intent", intent, "--kind", kind]);
+  const payload = JSON.parse(stdout) as { plan: NewProjectPlan };
+  return payload.plan;
+}
+
+export async function createProjectFromPlan(root: string, plan: NewProjectPlan): Promise<unknown> {
+  const stdout = await invoke<string>("create_project_from_plan", {
+    projectRoot: root,
+    planJson: JSON.stringify(plan)
+  });
+  return JSON.parse(stdout) as unknown;
+}
+
+export async function readRecentProjects(): Promise<RecentProject[]> {
+  const stdout = await invoke<string>("read_recent_projects");
+  return JSON.parse(stdout) as RecentProject[];
+}
+
+export async function recordRecentProject(root: string): Promise<RecentProject[]> {
+  const stdout = await invoke<string>("write_recent_project", { projectRoot: root });
+  return JSON.parse(stdout) as RecentProject[];
+}
+
 export async function readGraph(root: string): Promise<RuntimeGraph> {
   const [nodes, edges] = await Promise.all([
-    invoke<string>("read_file", { path: `${root}/.distinction/graph/nodes.json` }),
-    invoke<string>("read_file", { path: `${root}/.distinction/graph/edges.json` })
+    invoke<string>("read_file", { projectRoot: root, relativePath: ".distinction/graph/nodes.json" }),
+    invoke<string>("read_file", { projectRoot: root, relativePath: ".distinction/graph/edges.json" })
   ]);
   return {
     id: "graph:local",
@@ -182,7 +260,8 @@ export function renderModelsYaml(settings: ModelSettings): string {
 
 export async function saveProjectModelSettings(projectRoot: string, settings: ModelSettings): Promise<void> {
   await invoke<void>("write_file", {
-    path: `${projectRoot}/.distinction/models.yaml`,
+    projectRoot,
+    relativePath: ".distinction/models.yaml",
     content: renderModelsYaml(settings)
   });
 }

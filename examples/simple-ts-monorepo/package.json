@@ -1,0 +1,13 @@
+{
+  "name": "simple-ts-monorepo",
+  "private": true,
+  "type": "module",
+  "workspaces": ["apps/*", "packages/*"],
+  "scripts": {
+    "build": "tsc -b",
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.0"
+  }
+}
