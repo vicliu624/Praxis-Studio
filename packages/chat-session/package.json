@@ -1,0 +1,17 @@
+{
+  "name": "@praxis/chat-session",
+  "version": "0.1.0-alpha.0",
+  "private": true,
+  "type": "module",
+  "description": "Target-bound agent chat session persistence for Praxis Studio.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@praxis/coding-agent-adapter": "0.1.0-alpha.0",
+    "@praxis/plan-model": "0.1.0-alpha.0"
+  }
+}

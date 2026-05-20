@@ -80,6 +80,97 @@ export interface RuntimeGraphPlan {
   questions: string[];
 }
 
+export type RuntimeChatTarget =
+  | { type: "project" }
+  | { type: "node"; id: string }
+  | { type: "edge"; id: string }
+  | { type: "subgraph"; nodeIds: string[]; edgeIds: string[] };
+
+export interface RuntimeChatSession {
+  id: string;
+  projectRoot: string;
+  title: string;
+  target: RuntimeChatTarget;
+  mode: "explain" | "plan" | "apply" | "task";
+  modelRoute?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type RuntimeChatIntent = "explain" | "plan" | "generate_task" | "apply" | "import_result";
+
+export type RuntimeChatMessageRole = "user" | "assistant" | "system" | "tool" | "permission" | "result" | "error";
+
+export interface RuntimeToolCallView {
+  id: string;
+  name: string;
+  status: "pending" | "running" | "success" | "failed";
+  inputSummary: string;
+  outputSummary?: string;
+  riskLevel: "read" | "plan" | "write_memory" | "write_docs" | "write_source" | "shell" | "network";
+}
+
+export interface RuntimePermissionRequestView {
+  id: string;
+  title: string;
+  description: string;
+  actionType: "apply_plan" | "write_memory" | "write_graph" | "generate_task" | "import_task_result" | "run_external_agent";
+  affectedPaths: string[];
+  affectedNodeIds: string[];
+  affectedEdgeIds: string[];
+  options: { id: "approve" | "reject" | "modify"; label: string }[];
+}
+
+export interface RuntimeCodingAgentTask {
+  id: string;
+  title: string;
+  instruction: string;
+  source: {
+    planId?: string;
+    targetNodeIds: string[];
+    targetEdgeIds: string[];
+  };
+  context: {
+    architectureContext: string;
+    graphContext: string;
+    memoryContext: string[];
+    constraints: string[];
+  };
+  scope: {
+    relatedFiles: string[];
+    allowedPaths: string[];
+    forbiddenPaths: string[];
+  };
+  acceptanceCriteria: string[];
+  verificationCommands: string[];
+  expectedOutput: Record<string, boolean>;
+}
+
+export interface RuntimeChatMessage {
+  id: string;
+  sessionId: string;
+  role: RuntimeChatMessageRole;
+  createdAt: string;
+  content: string;
+  status?: "streaming" | "done" | "failed" | "cancelled";
+  structured?: unknown;
+  toolCall?: RuntimeToolCallView;
+  permissionRequest?: RuntimePermissionRequestView;
+  plan?: RuntimeGraphPlan;
+  task?: RuntimeCodingAgentTask;
+  traceIds?: string[];
+}
+
+export interface RuntimeChatTranscriptResult {
+  ok: boolean;
+  sessionId?: string;
+  session: RuntimeChatSession;
+  messages: RuntimeChatMessage[];
+  appendedMessages?: RuntimeChatMessage[];
+  pendingPermission?: RuntimePermissionRequestView;
+  plan?: RuntimeGraphPlan;
+}
+
 export interface RecentProject {
   root: string;
   name: string;
@@ -153,6 +244,59 @@ export async function runChat(root: string, targetId: string, mode: "explain" | 
   return JSON.parse(stdout) as RuntimeChatResult;
 }
 
+export async function createChatSession(root: string, target: RuntimeChatTarget): Promise<RuntimeChatTranscriptResult> {
+  const stdout = await runRuntimeCommand("chat-session-create", ["--project-root", root, ...chatTargetArgs(target)]);
+  return JSON.parse(stdout) as RuntimeChatTranscriptResult;
+}
+
+export async function readChatSession(root: string, sessionId: string): Promise<RuntimeChatTranscriptResult> {
+  const stdout = await runRuntimeCommand("chat-session-read", ["--project-root", root, "--session", sessionId]);
+  return JSON.parse(stdout) as RuntimeChatTranscriptResult;
+}
+
+export async function sendChatMessage(
+  root: string,
+  sessionId: string,
+  target: RuntimeChatTarget,
+  message: string,
+  intent?: RuntimeChatIntent,
+  actionIds?: string[]
+): Promise<RuntimeChatTranscriptResult> {
+  const args = ["--project-root", root, "--session", sessionId, ...chatTargetArgs(target), "--message", message];
+  if (intent) args.push("--intent", intent);
+  if (actionIds?.length) args.push("--actions", actionIds.join(","));
+  const stdout = await runRuntimeCommand("chat-send", args);
+  return JSON.parse(stdout) as RuntimeChatTranscriptResult;
+}
+
+export async function respondToChatPermission(
+  root: string,
+  sessionId: string,
+  target: RuntimeChatTarget,
+  permissionId: string,
+  approval: "approve" | "reject" | "modify",
+  actionIds: string[] = []
+): Promise<RuntimeChatTranscriptResult> {
+  const args = [
+    "--project-root",
+    root,
+    "--session",
+    sessionId,
+    ...chatTargetArgs(target),
+    "--intent",
+    "apply",
+    "--approval",
+    approval,
+    "--permission-id",
+    permissionId,
+    "--message",
+    approval === "approve" ? "Approve selected plan actions." : approval === "reject" ? "Reject this Apply request." : "Modify this Apply request."
+  ];
+  if (actionIds.length) args.push("--actions", actionIds.join(","));
+  const stdout = await runRuntimeCommand("chat-send", args);
+  return JSON.parse(stdout) as RuntimeChatTranscriptResult;
+}
+
 export async function generateTask(root: string, plan: unknown): Promise<string> {
   return invoke<string>("generate_task_from_plan", {
     projectRoot: root,
@@ -213,6 +357,12 @@ export async function readGraph(root: string): Promise<RuntimeGraph> {
     nodes: JSON.parse(nodes) as RuntimeNode[],
     edges: JSON.parse(edges) as RuntimeEdge[]
   };
+}
+
+function chatTargetArgs(target: RuntimeChatTarget): string[] {
+  if (target.type === "project") return ["--target-type", "project"];
+  if (target.type === "node" || target.type === "edge") return ["--target-type", target.type, "--target-id", target.id];
+  return ["--target-json", JSON.stringify(target)];
 }
 
 export function renderModelsYaml(settings: ModelSettings): string {

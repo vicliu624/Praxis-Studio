@@ -1,17 +1,8 @@
 import { useMemo, useState } from "react";
 import { Background, Controls, MiniMap, ReactFlow, type Edge as FlowEdge, type Node as FlowNode } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import {
-  applyPlan,
-  generateTask,
-  importTaskResult,
-  readGraph,
-  runChat,
-  type RuntimeEdge,
-  type RuntimeGraph,
-  type RuntimeGraphPlan,
-  type RuntimeNode
-} from "../runtimeClient";
+import { readGraph, type RuntimeEdge, type RuntimeGraph, type RuntimeNode } from "../runtimeClient";
+import { AgentChatPanel } from "../chat/AgentChatPanel";
 import { useI18n } from "../i18n";
 
 interface DevelopmentGraphWorkspacePageProps {
@@ -25,11 +16,6 @@ type SelectedTarget = { type: "node"; item: RuntimeNode } | { type: "edge"; item
 export function DevelopmentGraphWorkspacePage({ projectRoot, graph, onGraphLoaded }: DevelopmentGraphWorkspacePageProps) {
   const { t } = useI18n();
   const [selected, setSelected] = useState<SelectedTarget | null>(null);
-  const [instruction, setInstruction] = useState(() => t("workspace.defaultInstruction"));
-  const [response, setResponse] = useState("");
-  const [plan, setPlan] = useState<RuntimeGraphPlan | null>(null);
-  const [selectedActionIds, setSelectedActionIds] = useState<string[]>([]);
-  const [taskResultInput, setTaskResultInput] = useState(() => buildDefaultTaskResultInput(t));
   const [showCodeUnits, setShowCodeUnits] = useState(false);
   const [showRisks, setShowRisks] = useState(true);
   const [showTasks, setShowTasks] = useState(true);
@@ -64,59 +50,6 @@ export function DevelopmentGraphWorkspacePage({ projectRoot, graph, onGraphLoade
     setStatus("");
   }
 
-  async function submit(mode: "explain" | "plan") {
-    if (!selected || !projectRoot) return;
-    setStatus(mode === "plan" ? t("workspace.planning") : t("workspace.explaining"));
-    const result = await runChat(projectRoot, selected.item.id, mode, instruction);
-    setResponse(result.message);
-    if (mode === "plan") {
-      const nextPlan = asGraphPlan(result.structured);
-      setPlan(nextPlan);
-      setSelectedActionIds(nextPlan?.actions.map((action) => action.id) ?? []);
-    }
-    setStatus("");
-  }
-
-  async function applySelectedActions() {
-    if (!plan || !projectRoot || !selectedActionIds.length) return;
-    setStatus(t("workspace.applyingActions"));
-    const result = await applyPlan(projectRoot, plan, selectedActionIds);
-    setResponse(JSON.stringify(result, null, 2));
-    const loaded = await readGraph(projectRoot);
-    onGraphLoaded(loaded);
-    setStatus("");
-  }
-
-  async function createTask() {
-    if (!plan || !projectRoot) return;
-    setStatus(t("workspace.generatingTask"));
-    const result = await generateTask(projectRoot, plan);
-    setResponse(result);
-    setStatus("");
-  }
-
-  async function importResult() {
-    if (!projectRoot) return;
-    setStatus(t("workspace.importingResult"));
-    try {
-      const parsed = parseTaskResultInput(taskResultInput, t("workspace.importedTextSummary"));
-      const result = (await importTaskResult(projectRoot, parsed)) as { progressPlan?: RuntimeGraphPlan };
-      setResponse(JSON.stringify(result, null, 2));
-      if (result.progressPlan) {
-        setPlan(result.progressPlan);
-        setSelectedActionIds(result.progressPlan.actions.map((action) => action.id));
-      }
-    } catch (error) {
-      setResponse(error instanceof Error ? error.message : String(error));
-    } finally {
-      setStatus("");
-    }
-  }
-
-  function toggleAction(actionId: string) {
-    setSelectedActionIds((current) => (current.includes(actionId) ? current.filter((id) => id !== actionId) : [...current, actionId]));
-  }
-
   return (
     <section className="workspace-layout" aria-labelledby="workspace-title">
       <aside className="panel outline-panel">
@@ -125,6 +58,7 @@ export function DevelopmentGraphWorkspacePage({ projectRoot, graph, onGraphLoade
         <button className="secondary-action full-width" type="button" disabled={!projectRoot} onClick={loadGraph}>
           {t("workspace.loadGraph")}
         </button>
+        {status ? <p className="status-text">{status}</p> : null}
         <label className="checkbox-row">
           <input type="checkbox" checked={showCodeUnits} onChange={(event) => setShowCodeUnits(event.target.checked)} />
           {t("workspace.showCodeUnits")}
@@ -193,75 +127,7 @@ export function DevelopmentGraphWorkspacePage({ projectRoot, graph, onGraphLoade
         </div>
       </section>
 
-      <aside className="panel inspector-panel">
-        <div className="panel-heading">
-          <h2>{t("workspace.inspector")}</h2>
-          <span className="pill">{t("workspace.targetBound")}</span>
-        </div>
-        <div className="selected-summary">
-          <strong>{selected ? selected.item.title ?? selected.item.id : t("workspace.noTarget")}</strong>
-          <span>{selected?.type ?? t("workspace.selectTarget")}</span>
-          {selected ? <small>{selected.item.id}</small> : null}
-          {selected ? (
-            <small>
-              {Math.round(selected.item.progress * 100)}% - {selected.item.status} - {selected.item.knowledgeKind}
-              {selected.type === "edge" ? ` - ${selected.item.riskLevel}` : ""}
-            </small>
-          ) : null}
-        </div>
-        <div className="mode-row" aria-label={t("workspace.agentMode")}>
-          <button className="active" type="button" disabled={!selected} onClick={() => submit("explain")}>
-            {t("workspace.explain")}
-          </button>
-          <button type="button" disabled={!selected} onClick={() => submit("plan")}>
-            {t("workspace.plan")}
-          </button>
-          <button type="button" disabled={!plan} onClick={createTask}>
-            {t("workspace.task")}
-          </button>
-        </div>
-        <textarea value={instruction} onChange={(event) => setInstruction(event.target.value)} />
-        <button className="primary-action full-width" type="button" disabled={!selected} onClick={() => submit("explain")}>
-          {t("workspace.send")}
-        </button>
-        {status ? <p className="status-text">{status}</p> : null}
-
-        {plan ? (
-          <section className="plan-preview" aria-labelledby="plan-actions-title">
-            <div className="panel-heading tight">
-              <h2 id="plan-actions-title">{t("workspace.planActions")}</h2>
-              <span className="pill">{t("workspace.selectedCount", { count: selectedActionIds.length })}</span>
-            </div>
-            <div className="action-list">
-              {plan.actions.map((action) => (
-                <label className="action-check" key={action.id}>
-                  <input type="checkbox" checked={selectedActionIds.includes(action.id)} onChange={() => toggleAction(action.id)} />
-                  <span>
-                    <strong>{action.title}</strong>
-                    <small>
-                      {action.type} - {action.targetEdgeIds[0] ?? action.targetNodeIds[0] ?? "project"}
-                    </small>
-                  </span>
-                </label>
-              ))}
-            </div>
-            <button className="secondary-action full-width" type="button" disabled={!selectedActionIds.length} onClick={applySelectedActions}>
-              {t("workspace.applySelected")}
-            </button>
-          </section>
-        ) : null}
-
-        <section className="task-result-panel" aria-labelledby="task-result-title">
-          <h2 id="task-result-title">{t("workspace.importTaskResult")}</h2>
-          <textarea value={taskResultInput} onChange={(event) => setTaskResultInput(event.target.value)} />
-          <p className="muted-copy compact">{t("workspace.taskResultHelp")}</p>
-          <button className="secondary-action full-width" type="button" disabled={!projectRoot} onClick={importResult}>
-            {t("workspace.importResult")}
-          </button>
-        </section>
-
-        <pre className="agent-output">{response || t("workspace.agentOutput")}</pre>
-      </aside>
+      <AgentChatPanel projectRoot={projectRoot} graph={graph} selectedTarget={selected} onGraphChanged={onGraphLoaded} />
 
       <section className="panel timeline-panel">
         <div className="panel-heading tight">
@@ -272,66 +138,6 @@ export function DevelopmentGraphWorkspacePage({ projectRoot, graph, onGraphLoade
       </section>
     </section>
   );
-}
-
-function buildDefaultTaskResultInput(t: (key: "workspace.defaultTaskSummary" | "workspace.testNotRun") => string): string {
-  return JSON.stringify(
-    {
-      taskId: "TASK-0001",
-      status: "partial",
-      summary: t("workspace.defaultTaskSummary"),
-      changedFiles: [],
-      testResult: t("workspace.testNotRun"),
-      progressSuggestion: {
-        nodeUpdates: [],
-        edgeUpdates: []
-      },
-      memorySuggestion: ""
-    },
-    null,
-    2
-  );
-}
-
-function asGraphPlan(value: unknown): RuntimeGraphPlan | null {
-  if (!value || typeof value !== "object") return null;
-  const plan = value as RuntimeGraphPlan;
-  return Array.isArray(plan.actions) ? plan : null;
-}
-
-function parseTaskResultInput(input: string, fallbackSummary: string): unknown {
-  try {
-    return JSON.parse(input);
-  } catch {
-    const trimmed = input.trim();
-    const taskId = trimmed.match(/TASK-\d+/i)?.[0]?.toUpperCase() ?? "TASK-0001";
-    const lower = trimmed.toLowerCase();
-    const status = lower.includes("failed") || lower.includes("failure") ? "failed" : lower.includes("done") || lower.includes("pass") ? "done" : "partial";
-    const summary =
-      trimmed
-        .split(/\r?\n/)
-        .map((line) => line.replace(/^[#*\-\s]+/, "").trim())
-        .find(Boolean) ?? fallbackSummary;
-    const changedFiles = Array.from(
-      new Set(
-        [...trimmed.matchAll(/(?:^|\s)([A-Za-z0-9_.\/\\-]+\.(?:ts|tsx|js|jsx|rs|md|json|yaml|yml|toml|css|html))/g)].map((match) =>
-          match[1].replace(/\\/g, "/")
-        )
-      )
-    );
-    const testResult = trimmed
-      .split(/\r?\n/)
-      .find((line) => line.toLowerCase().includes("test"))
-      ?.trim();
-    return {
-      taskId,
-      status,
-      summary,
-      changedFiles,
-      testResult,
-      memorySuggestion: trimmed
-    };
-  }
 }
 
 function buildFlowNodes(nodes: RuntimeNode[]): FlowNode[] {

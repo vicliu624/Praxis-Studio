@@ -15,7 +15,9 @@
   },
   "dependencies": {
     "@praxis/agent-runtime": "0.1.0-alpha.0",
+    "@praxis/chat-session": "0.1.0-alpha.0",
     "@praxis/coding-agent-adapter": "0.1.0-alpha.0",
+    "@praxis/context-builder": "0.1.0-alpha.0",
     "@praxis/development-graph": "0.1.0-alpha.0",
     "@praxis/file-generator": "0.1.0-alpha.0",
     "@praxis/graph-generator": "0.1.0-alpha.0",

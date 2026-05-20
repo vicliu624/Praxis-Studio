@@ -542,10 +542,16 @@ textarea {
 
 .workspace-layout {
   display: grid;
-  grid-template-columns: 260px minmax(360px, 1fr) 340px;
+  grid-template-columns: minmax(240px, 280px) minmax(420px, 1fr) minmax(440px, 520px);
   grid-template-rows: minmax(620px, 1fr) auto;
   gap: 18px;
   min-height: calc(100vh - 124px);
+}
+
+@media (min-width: 1500px) {
+  .workspace-layout {
+    grid-template-columns: 280px minmax(560px, 1fr) 520px;
+  }
 }
 
 .settings-layout {
@@ -583,6 +589,276 @@ textarea {
 .inspector-panel {
   max-height: calc(100vh - 124px);
   overflow: auto;
+}
+
+.agent-chat-panel {
+  display: grid;
+  max-height: calc(100vh - 124px);
+  grid-template-rows: auto auto minmax(280px, 1fr) auto auto;
+  gap: 12px;
+  overflow: hidden;
+}
+
+.target-context-bar {
+  display: grid;
+  gap: 10px;
+}
+
+.target-context-card {
+  display: grid;
+  gap: 4px;
+  border: 1px solid #2a394a;
+  border-radius: 8px;
+  background: #0f161e;
+  padding: 10px;
+}
+
+.target-context-card span,
+.target-context-card small,
+.session-meta {
+  color: #8ea0b5;
+}
+
+.target-context-card small,
+.session-meta span {
+  overflow-wrap: anywhere;
+}
+
+.session-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12px;
+}
+
+.agent-mode-row {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.agent-mode-row button,
+.card-action-row button {
+  min-height: 36px;
+  border: 1px solid #2a394a;
+  border-radius: 8px;
+  background: #16202b;
+  color: #b7c4d4;
+  padding: 8px 10px;
+  font-weight: 700;
+}
+
+.agent-mode-row button:hover:not(:disabled),
+.card-action-row button:hover:not(:disabled) {
+  border-color: #8bb8ff;
+  color: #edf2f7;
+}
+
+.chat-transcript {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  min-height: 0;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.chat-empty-state {
+  display: grid;
+  min-height: 180px;
+  place-content: center;
+  gap: 6px;
+  border: 1px dashed #344356;
+  border-radius: 8px;
+  color: #edf2f7;
+  text-align: center;
+}
+
+.chat-empty-state span {
+  color: #8ea0b5;
+}
+
+.chat-message,
+.tool-call-card,
+.plan-card,
+.permission-card,
+.coding-task-card {
+  display: grid;
+  gap: 10px;
+  border: 1px solid #2a394a;
+  border-radius: 8px;
+  background: #0f161e;
+  padding: 12px;
+}
+
+.chat-message.user {
+  margin-left: 44px;
+  border-color: #31534d;
+  background: #10231f;
+}
+
+.chat-message.assistant,
+.chat-message.result {
+  margin-right: 22px;
+}
+
+.chat-message.error {
+  border-color: #7f2d2d;
+  background: #241212;
+  color: #fca5a5;
+}
+
+.chat-message-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: #8ea0b5;
+  font-size: 12px;
+}
+
+.chat-message-meta strong {
+  color: #edf2f7;
+  font-size: 13px;
+}
+
+.chat-message-content,
+.plan-card p,
+.permission-card p,
+.coding-task-card p {
+  margin: 0;
+  color: #d8e2ee;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.trace-chip,
+.tool-call-card small,
+.tool-footer,
+.plan-action-row small {
+  color: #8ea0b5;
+}
+
+.tool-call-card {
+  border-color: #29445d;
+  background: #101923;
+}
+
+.tool-status.success {
+  color: #8deadd;
+}
+
+.tool-status.failed {
+  color: #fca5a5;
+}
+
+.tool-footer,
+.card-action-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.tool-footer {
+  justify-content: space-between;
+  font-size: 12px;
+}
+
+.plan-card {
+  border-color: #4c3f25;
+  background: #17150f;
+}
+
+.plan-section,
+.plan-action-list,
+.permission-grid,
+.result-summary {
+  display: grid;
+  gap: 8px;
+}
+
+.plan-section {
+  border-top: 1px solid #2a394a;
+  padding-top: 10px;
+}
+
+.plan-section span,
+.permission-grid span,
+.result-summary span {
+  color: #b7c4d4;
+  overflow-wrap: anywhere;
+}
+
+.plan-action-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  border: 1px solid #2a394a;
+  border-radius: 8px;
+  background: #0f161e;
+  padding: 10px;
+}
+
+.plan-action-row input {
+  margin-top: 3px;
+}
+
+.plan-action-row span {
+  display: grid;
+  gap: 4px;
+}
+
+.permission-card {
+  border-color: #7c4a20;
+  background: #1b140d;
+}
+
+.permission-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.permission-grid div {
+  display: grid;
+  align-content: start;
+  gap: 5px;
+  min-width: 0;
+}
+
+.approve-button {
+  border-color: #e7a23c !important;
+  background: #e7a23c !important;
+  color: #171006 !important;
+}
+
+.coding-task-card {
+  border-color: #31534d;
+  background: #101c1a;
+}
+
+.coding-task-card h3 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.chat-status {
+  margin: 0;
+}
+
+.chat-composer {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: end;
+}
+
+.chat-composer textarea {
+  min-height: 78px;
+  max-height: 180px;
+}
+
+.chat-composer .primary-action {
+  min-width: 82px;
 }
 
 .graph-workspace-panel {

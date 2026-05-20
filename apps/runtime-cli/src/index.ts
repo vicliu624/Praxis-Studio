@@ -5,6 +5,20 @@ import { scanRepository } from "@praxis/repository-scanner";
 import { profileProject } from "@praxis/project-profiler";
 import { generateDevelopmentGraphCandidate } from "@praxis/graph-generator";
 import {
+  appendMessage,
+  createSessionForTarget,
+  loadSessions,
+  readMessages,
+  readSession,
+  readSessionTranscript,
+  type ChatMessage,
+  type ChatTarget,
+  type NewChatMessage,
+  type PermissionRequestView,
+  type ToolCallView
+} from "@praxis/chat-session";
+import { buildContext, type SelectionTarget } from "@praxis/context-builder";
+import {
   appendChange,
   appendTrace,
   getLocalKnowledgePaths,
@@ -25,7 +39,7 @@ import {
   type DevelopmentGraphCandidate,
   type DevelopmentNode
 } from "@praxis/development-graph";
-import type { GraphPlan, PlanAction } from "@praxis/plan-model";
+import { isGraphPlan, type GraphPlan, type PlanAction } from "@praxis/plan-model";
 import { loadModelConfig, resolveModelRoute } from "@praxis/model-router";
 import { createProvider } from "@praxis/provider-deepseek";
 import { getPrompt } from "@praxis/prompt-registry";
@@ -55,6 +69,10 @@ async function main(argv: string[]): Promise<void> {
     if (command === "intake") return await commandIntake(args);
     if (command === "init-memory") return await commandInitMemory(args);
     if (command === "chat") return await commandChat(args);
+    if (command === "chat-session-create") return await commandChatSessionCreate(args);
+    if (command === "chat-session-list") return await commandChatSessionList(args);
+    if (command === "chat-session-read") return await commandChatSessionRead(args);
+    if (command === "chat-send") return await commandChatSend(args);
     if (command === "generate-task") return await commandGenerateTask(args);
     if (command === "apply-plan") return await commandApplyPlan(args);
     if (command === "import-task-result") return await commandImportTaskResult(args);
@@ -124,9 +142,209 @@ async function commandChat(args: Args): Promise<void> {
   outputJson(result);
 }
 
+async function commandChatSessionCreate(args: Args): Promise<void> {
+  const projectRoot = required(args, "project-root");
+  const graph = await readDevelopmentGraph(projectRoot);
+  const target = chatTargetFromArgs(args);
+  const session = await createSessionForTarget(projectRoot, target, {
+    title: sessionTitleForTarget(graph, target),
+    mode: chatModeFromArgs(args)
+  });
+  outputJson({ ok: true, session, messages: await readMessages(projectRoot, session.id) });
+}
+
+async function commandChatSessionList(args: Args): Promise<void> {
+  const projectRoot = required(args, "project-root");
+  outputJson({ ok: true, sessions: await loadSessions(projectRoot) });
+}
+
+async function commandChatSessionRead(args: Args): Promise<void> {
+  const projectRoot = required(args, "project-root");
+  const sessionId = required(args, "session");
+  outputJson({ ok: true, ...(await readSessionTranscript(projectRoot, sessionId)) });
+}
+
+async function commandChatSend(args: Args): Promise<void> {
+  const projectRoot = required(args, "project-root");
+  const graph = await readDevelopmentGraph(projectRoot);
+  const target = chatTargetFromArgs(args);
+  const session =
+    typeof args.session === "string" && (await readSession(projectRoot, args.session))
+      ? (await readSession(projectRoot, args.session))!
+      : await createSessionForTarget(projectRoot, target, { title: sessionTitleForTarget(graph, target), mode: chatModeFromArgs(args) });
+  const sessionId = session.id;
+  const runtimeTarget = selectionTargetFromChatTarget(graph, target);
+  const message = String(args.message ?? "");
+  const intent = inferChatIntent(message, args.intent ?? args.mode);
+
+  if (typeof args.approval === "string") {
+    return await handlePermissionResponse({ projectRoot, graph, sessionId, target: runtimeTarget, message, approval: args.approval, args });
+  }
+
+  const appended: ChatMessage[] = [];
+  appended.push(
+    await appendMessage(projectRoot, {
+      sessionId,
+      role: "user",
+      content: message || quickInstructionForIntent(intent),
+      structured: { intent, target }
+    })
+  );
+
+  try {
+    if (intent === "apply") {
+      const latest = latestPlan(await readMessages(projectRoot, sessionId));
+      if (!latest) {
+        appended.push(
+          await appendMessage(projectRoot, {
+            sessionId,
+            role: "assistant",
+            content: "I need a plan in this session before I can request Apply approval."
+          })
+        );
+        return await outputChatSendResult(projectRoot, sessionId, appended);
+      }
+      const selectedActionIds = actionIdsFromArgs(args) ?? latest.actions.map((action) => action.id);
+      const permission = permissionRequestForPlan(latest, selectedActionIds);
+      appended.push(
+        await appendMessage(projectRoot, {
+          sessionId,
+          role: "permission",
+          content: "Praxis needs confirmation before applying selected plan actions.",
+          permissionRequest: permission,
+          structured: { plan: latest, selectedActionIds }
+        })
+      );
+      return await outputChatSendResult(projectRoot, sessionId, appended, { pendingPermission: permission, plan: latest });
+    }
+
+    if (intent === "generate_task") {
+      const latest = latestPlan(await readMessages(projectRoot, sessionId));
+      if (!latest) {
+        appended.push(
+          await appendMessage(projectRoot, {
+            sessionId,
+            role: "assistant",
+            content: "Generate a plan first, then I can turn it into a controlled coding task."
+          })
+        );
+        return await outputChatSendResult(projectRoot, sessionId, appended);
+      }
+      appended.push(await appendMessage(projectRoot, toolMessage(sessionId, "GenerateCodingTask", "Use latest graph plan", "Writing .distinction task file.", "write_docs")));
+      const taskResult = await generateTaskFromPlan(projectRoot, latest);
+      appended.push(
+        await appendMessage(projectRoot, {
+          sessionId,
+          role: "result",
+          content: `Generated ${taskResult.task.id} at ${taskResult.taskPath}`,
+          task: taskResult.task,
+          structured: taskResult
+        })
+      );
+      return await outputChatSendResult(projectRoot, sessionId, appended, taskResult);
+    }
+
+    if (intent === "import_result") {
+      appended.push(
+        await appendMessage(projectRoot, toolMessage(sessionId, "ImportTaskResult", "Normalize external agent result", "Recording task result candidate.", "write_memory"))
+      );
+      const resultInput = parseTaskResultMessage(message);
+      const importResult = await importTaskResultPayload(projectRoot, resultInput);
+      appended.push(
+        await appendMessage(projectRoot, {
+          sessionId,
+          role: "result",
+          content: `Imported result for ${resultInput.taskId}.`,
+          structured: importResult,
+          plan: importResult.progressPlan
+        })
+      );
+      if (importResult.progressPlan) {
+        appended.push(
+          await appendMessage(projectRoot, {
+            sessionId,
+            role: "result",
+            content: "Progress suggestions are ready for review before Apply.",
+            plan: importResult.progressPlan
+          })
+        );
+      }
+      return await outputChatSendResult(projectRoot, sessionId, appended, importResult);
+    }
+
+    const context = buildContext(graph, runtimeTarget);
+    appended.push(await appendMessage(projectRoot, toolMessage(sessionId, "BuildTargetContext", targetSummary(target), context.summary, "read")));
+
+    const mode = intent === "plan" ? "plan" : "explain";
+    const runtime = new PraxisAgentRuntime();
+    const result = await runtime.run({
+      mode,
+      projectRoot,
+      graph,
+      target: runtimeTarget,
+      instruction: message || quickInstructionForIntent(intent),
+      taskType: taskTypeForTarget(runtimeTarget, mode)
+    });
+    appended.push(
+      await appendMessage(projectRoot, toolMessage(sessionId, "AgentRuntime", `${mode} selected target`, `Used ${result.selectedModel}`, "network", [result.traceId]))
+    );
+
+    if (mode === "plan") {
+      const plan = isGraphPlan(result.structured) ? result.structured : undefined;
+      appended.push(
+        await appendMessage(projectRoot, {
+          sessionId,
+          role: "assistant",
+          content: plan?.summary ?? result.message,
+          structured: result.structured,
+          traceIds: [result.traceId]
+        })
+      );
+      if (plan) {
+        appended.push(
+          await appendMessage(projectRoot, {
+            sessionId,
+            role: "result",
+            content: `Plan created with ${plan.actions.length} action(s).`,
+            plan,
+            traceIds: [result.traceId]
+          })
+        );
+      }
+      return await outputChatSendResult(projectRoot, sessionId, appended, { plan });
+    }
+
+    appended.push(
+      await appendMessage(projectRoot, {
+        sessionId,
+        role: "assistant",
+        content: readableAssistantContent(result.message, result.structured),
+        structured: result.structured,
+        traceIds: [result.traceId]
+      })
+    );
+    return await outputChatSendResult(projectRoot, sessionId, appended);
+  } catch (error) {
+    appended.push(
+      await appendMessage(projectRoot, {
+        sessionId,
+        role: "error",
+        content: error instanceof Error ? error.message : String(error),
+        status: "failed"
+      })
+    );
+    return await outputChatSendResult(projectRoot, sessionId, appended);
+  }
+}
+
 async function commandGenerateTask(args: Args): Promise<void> {
   const projectRoot = required(args, "project-root");
   const plan = (await readJson(required(args, "plan"))) as GraphPlan;
+  const result = await generateTaskFromPlan(projectRoot, plan);
+  outputJson({ ok: true, ...result });
+}
+
+async function generateTaskFromPlan(projectRoot: string, plan: GraphPlan): Promise<{ taskPath: string; task: ReturnType<typeof createCodingAgentTask> }> {
   const graph = await readDevelopmentGraph(projectRoot);
   const draft = plan.codingTasks[0];
   const action = plan.actions.find((item) => item.type === "create_coding_task" || item.type === "create_task");
@@ -174,7 +392,7 @@ async function commandGenerateTask(args: Args): Promise<void> {
     summary: `Generated ${task.id}`,
     data: { taskPath, planId: plan.id, targetNodeIds: context.targetNodeIds, targetEdgeIds: context.targetEdgeIds }
   });
-  outputJson({ ok: true, taskPath, task });
+  return { taskPath, task };
 }
 
 async function commandApplyPlan(args: Args): Promise<void> {
@@ -189,6 +407,10 @@ async function commandApplyPlan(args: Args): Promise<void> {
 async function commandImportTaskResult(args: Args): Promise<void> {
   const projectRoot = required(args, "project-root");
   const result = (await readJson(required(args, "result"))) as CodingAgentResultInput;
+  outputJson({ ok: true, ...(await importTaskResultPayload(projectRoot, result)) });
+}
+
+async function importTaskResultPayload(projectRoot: string, result: CodingAgentResultInput): Promise<{ resultPath: string; progressPlan?: GraphPlan }> {
   const normalized = normalizeTaskResultInput(result);
   const paths = getLocalKnowledgePaths(projectRoot);
   await mkdir(paths.tasksDir, { recursive: true });
@@ -216,7 +438,315 @@ async function commandImportTaskResult(args: Args): Promise<void> {
     data: { taskId: normalized.taskId, status: normalized.status, resultPath, progressPlan }
   });
 
-  outputJson({ ok: true, resultPath, progressPlan });
+  return { resultPath, progressPlan };
+}
+
+type ChatIntent = "explain" | "plan" | "generate_task" | "apply" | "import_result";
+
+async function handlePermissionResponse(input: {
+  projectRoot: string;
+  graph: DevelopmentGraph;
+  sessionId: string;
+  target: SelectionTarget;
+  message: string;
+  approval: string;
+  args: Args;
+}): Promise<void> {
+  const appended: ChatMessage[] = [];
+  const approval = input.approval.toLowerCase();
+  const userContent =
+    input.message ||
+    (approval === "approve" ? "Approved selected actions." : approval === "reject" ? "Rejected apply request." : "Modify apply request.");
+  appended.push(
+    await appendMessage(input.projectRoot, {
+      sessionId: input.sessionId,
+      role: "user",
+      content: userContent,
+      structured: { approval }
+    })
+  );
+
+  try {
+    const messages = await readMessages(input.projectRoot, input.sessionId);
+    const permissionId = typeof input.args["permission-id"] === "string" ? input.args["permission-id"] : undefined;
+    const permissionMessage = [...messages]
+      .reverse()
+      .find((message) => message.role === "permission" && (!permissionId || message.permissionRequest?.id === permissionId));
+    if (!permissionMessage) throw new Error("No pending permission request was found in this chat session.");
+    const plan = planFromMessage(permissionMessage) ?? latestPlan(messages);
+    if (!plan) throw new Error("Permission request does not contain an applyable plan.");
+
+    if (approval === "reject") {
+      appended.push(
+        await appendMessage(input.projectRoot, {
+          sessionId: input.sessionId,
+          role: "result",
+          content: "Apply request rejected. No graph or memory changes were written.",
+          structured: { permissionId: permissionMessage.permissionRequest?.id, rejected: true }
+        })
+      );
+      return await outputChatSendResult(input.projectRoot, input.sessionId, appended);
+    }
+
+    if (approval === "modify") {
+      appended.push(
+        await appendMessage(input.projectRoot, {
+          sessionId: input.sessionId,
+          role: "assistant",
+          content: "Tell me which actions to keep, remove, or change, and I will prepare a revised Apply request.",
+          structured: { permissionId: permissionMessage.permissionRequest?.id, modifyRequested: true }
+        })
+      );
+      return await outputChatSendResult(input.projectRoot, input.sessionId, appended);
+    }
+
+    if (approval !== "approve") throw new Error(`Unknown approval response: ${input.approval}`);
+    const selectedActionIds = actionIdsFromArgs(input.args) ?? selectedActionIdsFromPermission(permissionMessage) ?? plan.actions.map((action) => action.id);
+    const actionIdSet = new Set(selectedActionIds);
+    const result = await applyPlanActions(input.projectRoot, input.graph, plan, actionIdSet);
+    appended.push(
+      await appendMessage(
+        input.projectRoot,
+        toolMessage(input.sessionId, "ApplyPlan", `${selectedActionIds.length} selected action(s)`, "Graph and memory apply completed.", "write_memory")
+      )
+    );
+    appended.push(
+      await appendMessage(input.projectRoot, {
+        sessionId: input.sessionId,
+        role: "result",
+        content: [
+          `Applied ${result.appliedActions.length} action(s).`,
+          result.skippedActions.length ? `Skipped ${result.skippedActions.length} action(s).` : "",
+          result.graphUpdated ? "Development Graph updated." : "No graph fields changed."
+        ]
+          .filter(Boolean)
+          .join(" "),
+        structured: { ...result, permissionId: permissionMessage.permissionRequest?.id, selectedActionIds }
+      })
+    );
+    return await outputChatSendResult(input.projectRoot, input.sessionId, appended, result);
+  } catch (error) {
+    appended.push(
+      await appendMessage(input.projectRoot, {
+        sessionId: input.sessionId,
+        role: "error",
+        content: error instanceof Error ? error.message : String(error),
+        status: "failed"
+      })
+    );
+    return await outputChatSendResult(input.projectRoot, input.sessionId, appended);
+  }
+}
+
+async function outputChatSendResult(projectRoot: string, sessionId: string, appendedMessages: ChatMessage[], extra: Record<string, unknown> = {}): Promise<void> {
+  const transcript = await readSessionTranscript(projectRoot, sessionId);
+  outputJson({ ok: true, sessionId, appendedMessages, ...transcript, ...extra });
+}
+
+function chatTargetFromArgs(args: Args): ChatTarget {
+  if (typeof args["target-json"] === "string") {
+    const parsed = JSON.parse(args["target-json"]) as ChatTarget;
+    if (parsed.type === "project" || parsed.type === "node" || parsed.type === "edge" || parsed.type === "subgraph") return parsed;
+  }
+
+  const rawTarget = typeof args.target === "string" ? args.target : "";
+  const rawType = typeof args["target-type"] === "string" ? args["target-type"] : "";
+  const targetType = rawType || (rawTarget.startsWith("edge:") ? "edge" : rawTarget ? "node" : "project");
+  if (targetType === "project") return { type: "project" };
+  if (targetType === "node" || targetType === "edge") {
+    const id = String(args["target-id"] ?? rawTarget);
+    if (!id) throw new Error(`Missing --target-id for ${targetType} chat target.`);
+    return { type: targetType, id };
+  }
+  throw new Error(`Unsupported chat target type: ${targetType}`);
+}
+
+function chatModeFromArgs(args: Args): "explain" | "plan" | "apply" | "task" {
+  if (args.mode === "plan") return "plan";
+  if (args.mode === "apply") return "apply";
+  if (args.mode === "task" || args.intent === "generate_task") return "task";
+  return "explain";
+}
+
+function selectionTargetFromChatTarget(graph: DevelopmentGraph, target: ChatTarget): SelectionTarget {
+  if (target.type === "node" || target.type === "edge" || target.type === "subgraph") return target;
+  const nodeIds = graph.nodes.slice(0, 18).map((node) => node.id);
+  const nodeSet = new Set(nodeIds);
+  const edgeIds = graph.edges
+    .filter((edge) => nodeSet.has(edge.source) && nodeSet.has(edge.target))
+    .slice(0, 24)
+    .map((edge) => edge.id);
+  return { type: "subgraph", nodeIds, edgeIds };
+}
+
+function sessionTitleForTarget(graph: DevelopmentGraph, target: ChatTarget): string {
+  if (target.type === "node") return findNode(graph, target.id)?.title ?? target.id;
+  if (target.type === "edge") {
+    const edge = findEdge(graph, target.id);
+    if (!edge) return target.id;
+    const source = findNode(graph, edge.source)?.title ?? edge.source;
+    const destination = findNode(graph, edge.target)?.title ?? edge.target;
+    return `${source} -> ${destination}`;
+  }
+  if (target.type === "subgraph") return `Subgraph (${target.nodeIds.length}/${target.edgeIds.length})`;
+  return graph.title || "Project chat";
+}
+
+function inferChatIntent(message: string, explicit: string | boolean | undefined): ChatIntent {
+  if (explicit === "plan") return "plan";
+  if (explicit === "task" || explicit === "generate_task") return "generate_task";
+  if (explicit === "apply") return "apply";
+  if (explicit === "import_result") return "import_result";
+  if (explicit === "explain") return "explain";
+
+  const lower = message.toLowerCase();
+  if (message.includes("生成任务") || lower.includes("generate task") || lower.includes("task")) return "generate_task";
+  if (message.includes("应用") || message.includes("执行") || lower.includes("apply")) return "apply";
+  if (message.includes("导入") || message.includes("结果") || lower.includes("import result") || lower.includes("task result")) return "import_result";
+  if (message.includes("计划") || lower.includes("plan") || lower.includes("next step")) return "plan";
+  return "explain";
+}
+
+function quickInstructionForIntent(intent: ChatIntent): string {
+  if (intent === "plan") return "Plan next steps for the selected target.";
+  if (intent === "generate_task") return "Generate a controlled coding task from the latest plan.";
+  if (intent === "apply") return "Prepare an Apply permission request for the latest plan.";
+  if (intent === "import_result") return "Import an external coding agent result.";
+  return "Explain the selected target.";
+}
+
+function toolMessage(
+  sessionId: string,
+  name: string,
+  inputSummary: string,
+  outputSummary: string,
+  riskLevel: ToolCallView["riskLevel"],
+  traceIds?: string[]
+): NewChatMessage {
+  const toolCall: ToolCallView = {
+    id: `tool-${Date.now()}-${slug(name)}`,
+    name,
+    status: "success",
+    inputSummary,
+    outputSummary,
+    riskLevel
+  };
+  return {
+    sessionId,
+    role: "tool",
+    content: `${name}: ${outputSummary}`,
+    toolCall,
+    traceIds
+  };
+}
+
+function taskTypeForTarget(target: SelectionTarget, mode: "explain" | "plan") {
+  if (target.type === "edge") return mode === "plan" ? "graph.edge.plan" : "graph.edge.explain";
+  return mode === "plan" ? "graph.node.plan" : "graph.node.explain";
+}
+
+function latestPlan(messages: ChatMessage[]): GraphPlan | undefined {
+  for (const message of [...messages].reverse()) {
+    const plan = planFromMessage(message);
+    if (plan) return plan;
+  }
+  return undefined;
+}
+
+function planFromMessage(message?: ChatMessage): GraphPlan | undefined {
+  if (!message) return undefined;
+  if (isGraphPlan(message.plan)) return message.plan;
+  if (isRecord(message.structured) && isGraphPlan(message.structured.plan)) return message.structured.plan;
+  if (isGraphPlan(message.structured)) return message.structured;
+  return undefined;
+}
+
+function selectedActionIdsFromPermission(message: ChatMessage): string[] | undefined {
+  if (!isRecord(message.structured) || !Array.isArray(message.structured.selectedActionIds)) return undefined;
+  const values = message.structured.selectedActionIds.filter((value: unknown): value is string => typeof value === "string" && value.length > 0);
+  return values.length ? values : undefined;
+}
+
+function actionIdsFromArgs(args: Args): string[] | undefined {
+  if (typeof args.actions !== "string") return undefined;
+  const values = args.actions
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  return values.length ? values : undefined;
+}
+
+function permissionRequestForPlan(plan: GraphPlan, selectedActionIds: string[]): PermissionRequestView {
+  const selected = plan.actions.filter((action) => selectedActionIds.includes(action.id));
+  const actions = selected.length ? selected : plan.actions;
+  return {
+    id: `permission-${Date.now()}`,
+    title: "Apply selected plan actions",
+    description: plan.summary,
+    actionType: "apply_plan",
+    affectedPaths: unique(actions.flatMap(pathsForAction)),
+    affectedNodeIds: unique(actions.flatMap((action) => action.targetNodeIds)),
+    affectedEdgeIds: unique(actions.flatMap((action) => action.targetEdgeIds)),
+    options: [
+      { id: "approve", label: "Approve" },
+      { id: "reject", label: "Reject" },
+      { id: "modify", label: "Modify" }
+    ]
+  };
+}
+
+function pathsForAction(action: PlanAction): string[] {
+  if (action.type === "update_edge" || action.type === "update_edge_progress") {
+    return [".distinction/graph/edges.json", ".distinction/memory/changes.md", ".distinction/memory/traces.jsonl"];
+  }
+  if (action.type === "update_node_progress") {
+    return [".distinction/graph/nodes.json", ".distinction/memory/changes.md", ".distinction/memory/traces.jsonl"];
+  }
+  if (action.type === "create_task" || action.type === "create_coding_task") {
+    return [".distinction/tasks/*.md", ".distinction/memory/changes.md", ".distinction/memory/traces.jsonl"];
+  }
+  if (action.type === "write_report") {
+    return [".distinction/reports/*.md", ".distinction/memory/traces.jsonl"];
+  }
+  return [".distinction/memory/changes.md", ".distinction/memory/traces.jsonl"];
+}
+
+function targetSummary(target: ChatTarget): string {
+  if (target.type === "project") return "Project";
+  if (target.type === "subgraph") return `Subgraph with ${target.nodeIds.length} node(s) and ${target.edgeIds.length} edge(s)`;
+  return `${target.type}: ${target.id}`;
+}
+
+function readableAssistantContent(message: string, structured: unknown): string {
+  if (isRecord(structured) && typeof structured.summary === "string") return structured.summary;
+  return message;
+}
+
+function parseTaskResultMessage(message: string): CodingAgentResultInput {
+  const trimmed = message.trim();
+  const parsed = safeJson(trimmed);
+  if (isRecord(parsed) && typeof parsed.taskId === "string") return normalizeTaskResultInput(parsed as unknown as CodingAgentResultInput);
+
+  const taskId = trimmed.match(/TASK-\d+/i)?.[0]?.toUpperCase() ?? "TASK-0001";
+  const lower = trimmed.toLowerCase();
+  const status = lower.includes("failed") || lower.includes("failure") ? "failed" : lower.includes("done") || lower.includes("pass") ? "done" : "partial";
+  const summary =
+    trimmed
+      .split(/\r?\n/)
+      .map((line) => line.replace(/^[#*\-\s]+/, "").trim())
+      .find(Boolean) ?? "External coding agent result imported from chat.";
+  const changedFiles = Array.from(
+    new Set(
+      [...trimmed.matchAll(/(?:^|\s)([A-Za-z0-9_.\/\\-]+\.(?:ts|tsx|js|jsx|rs|md|json|yaml|yml|toml|css|html))/g)].map((match) =>
+        match[1].replace(/\\/g, "/")
+      )
+    )
+  );
+  const testResult = trimmed
+    .split(/\r?\n/)
+    .find((line) => line.toLowerCase().includes("test"))
+    ?.trim();
+  return { taskId, status, summary, changedFiles, testResult, memorySuggestion: trimmed };
 }
 
 async function applyPlanActions(projectRoot: string, graph: DevelopmentGraph, plan: GraphPlan, actionIds?: Set<string>) {
