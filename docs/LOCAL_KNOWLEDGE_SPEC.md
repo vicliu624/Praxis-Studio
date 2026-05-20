@@ -46,8 +46,6 @@ Reports
 ├─ reports/
 │  ├─ project-intake.md
 │  └─ graph-plan.md
-│
-└─ models.yaml
 ```
 
 ---
@@ -102,4 +100,4 @@ large model logs
 local secrets
 ```
 
-`models.yaml` 不应包含 API Key，只能引用环境变量。
+模型供应商凭证属于 Praxis Studio IDE 级设置，不属于项目 `.distinction` 记忆。

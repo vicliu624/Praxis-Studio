@@ -80,18 +80,6 @@ export async function initializeLocalKnowledge(projectRoot: string, candidate: D
       ""
     ].join("\n")
   );
-  await ensureFile(
-    path.join(paths.distinctionDir, "models.yaml"),
-    [
-      "default_provider: deepseek",
-      "providers:",
-      "  deepseek:",
-      "    type: openai-compatible",
-      "    base_url: https://api.deepseek.com",
-      "    api_key_env: DEEPSEEK_API_KEY",
-      ""
-    ].join("\n")
-  );
   return paths;
 }
 

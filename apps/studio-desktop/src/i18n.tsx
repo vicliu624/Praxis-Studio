@@ -128,21 +128,21 @@ const en = {
 
   "settings.eyebrow": "Model Settings",
   "settings.title": "DeepSeek Route",
-  "settings.copy": "Praxis stores the environment variable name, not the API key itself. Set the key before launching the app.",
+  "settings.copy": "Enter one DeepSeek API key for this Praxis Studio install. It is saved in IDE settings, not in the project .distinction directory.",
   "settings.defaultProvider": "Default provider",
   "settings.baseUrl": "DeepSeek base URL",
-  "settings.apiKeyEnv": "API key environment variable",
+  "settings.apiKey": "DeepSeek API key",
   "settings.intakeModel": "Project intake model",
   "settings.nodeExplainModel": "Node explain model",
   "settings.edgeExplainModel": "Edge explain model",
   "settings.edgePlanModel": "Edge plan model",
   "settings.taskModel": "Coding task model",
   "settings.save": "Save Model Settings",
-  "settings.savedSession": "Saved in this app session. Open or accept a project to write .distinction/models.yaml.",
-  "settings.savedProject": "Saved to .distinction/models.yaml.",
-  "settings.savedLocalOnly": "Saved locally, but could not write project models.yaml outside Tauri.",
-  "settings.preview": "models.yaml Preview",
-  "settings.localOnly": "Local only"
+  "settings.savedSession": "Saved to Praxis Studio IDE settings.",
+  "settings.savedProject": "Saved model routes.",
+  "settings.savedLocalOnly": "Could not save IDE model settings.",
+  "settings.preview": "Runtime route preview",
+  "settings.localOnly": "IDE settings"
 } as const;
 
 export type TranslationKey = keyof typeof en;
@@ -271,21 +271,21 @@ const zhCN: Record<TranslationKey, string> = {
 
   "settings.eyebrow": "模型设置",
   "settings.title": "DeepSeek 路由",
-  "settings.copy": "Praxis 只保存环境变量名称，不保存 API Key 本身。请在启动应用前设置密钥。",
+  "settings.copy": "DeepSeek API Key 属于这个 Praxis Studio IDE，不会写入项目的 .distinction 目录。",
   "settings.defaultProvider": "默认供应商",
   "settings.baseUrl": "DeepSeek Base URL",
-  "settings.apiKeyEnv": "API Key 环境变量",
+  "settings.apiKey": "DeepSeek API Key",
   "settings.intakeModel": "项目接入模型",
   "settings.nodeExplainModel": "节点解释模型",
   "settings.edgeExplainModel": "边解释模型",
   "settings.edgePlanModel": "边计划模型",
   "settings.taskModel": "代码任务模型",
   "settings.save": "保存模型设置",
-  "settings.savedSession": "已保存在当前应用会话中。打开或接受项目后可写入 .distinction/models.yaml。",
-  "settings.savedProject": "已保存到 .distinction/models.yaml。",
-  "settings.savedLocalOnly": "已保存到本地，但无法在 Tauri 外部写入项目 models.yaml。",
-  "settings.preview": "models.yaml 预览",
-  "settings.localOnly": "仅本地"
+  "settings.savedSession": "已保存到 Praxis Studio 的 IDE 设置。",
+  "settings.savedProject": "已保存模型路由。",
+  "settings.savedLocalOnly": "无法保存 IDE 模型设置。",
+  "settings.preview": "Runtime 路由预览",
+  "settings.localOnly": "IDE 设置"
 };
 
 const dictionaries: Record<Locale, Record<TranslationKey, string>> = {

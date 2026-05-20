@@ -43,7 +43,6 @@ providers:
   deepseek:
     type: openai-compatible
     base_url: https://api.deepseek.com
-    api_key_env: DEEPSEEK_API_KEY
 
 routes:
   project.intake.analyze:
@@ -99,7 +98,6 @@ routes:
 必须实现：
 
 ```text
-MockProvider
 DeepSeekProvider
 ```
 
@@ -122,7 +120,8 @@ ExternalAgentProvider
 ```text
 Open Existing Project 仍然可用
 本地规则生成基础图谱
-Chat 使用 MockProvider
+Chat / Plan / Create New Project AI steps fail explicitly.
+Synthetic AI responses are forbidden.
 Create New Project 可生成最小模板，但不能 AI 拆需求
 ```
 

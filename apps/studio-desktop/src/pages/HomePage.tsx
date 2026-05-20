@@ -100,7 +100,7 @@ export function HomePage({
             </div>
             <div>
               <dt>{t("home.fallback")}</dt>
-              <dd>MockProvider</dd>
+              <dd>None</dd>
             </div>
             <div>
               <dt>{t("home.policy")}</dt>

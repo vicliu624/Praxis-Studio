@@ -126,7 +126,6 @@ export function CreateProjectWizardPage({ onProjectCreated }: CreateProjectWizar
             <li>docs/ROADMAP.md</li>
             <li>.distinction/graph/nodes.json</li>
             <li>.distinction/graph/edges.json</li>
-            <li>.distinction/models.yaml</li>
           </ul>
         )}
         <pre className="agent-output">{result || t("create.planOutput")}</pre>

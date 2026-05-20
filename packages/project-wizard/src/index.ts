@@ -115,8 +115,7 @@ export function createNewProjectPlan(input: {
     { path: ".distinction/graph/edges.json", content: `${JSON.stringify(graph.edges, null, 2)}\n` },
     { path: ".distinction/memory/changes.md", content: "# Changes\n\n" },
     { path: ".distinction/memory/decisions.md", content: "# Decisions\n\n" },
-    { path: ".distinction/rules/ai-constraints.md", content: "# AI Constraints\n\n- Do not automatically modify existing source code in v0.1.\n" },
-    { path: ".distinction/models.yaml", content: "default_provider: deepseek\n" }
+    { path: ".distinction/rules/ai-constraints.md", content: "# AI Constraints\n\n- Do not automatically modify existing source code in v0.1.\n" }
   ];
   return {
     projectName: input.projectName,

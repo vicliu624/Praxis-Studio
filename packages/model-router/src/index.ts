@@ -41,9 +41,6 @@ export const defaultModelRouterConfig: ModelRouterConfig = {
       type: "openai-compatible",
       baseUrl: "https://api.deepseek.com",
       apiKeyEnv: "DEEPSEEK_API_KEY"
-    },
-    mock: {
-      type: "mock"
     }
   },
   routes: {
@@ -63,24 +60,25 @@ export const defaultModelRouterConfig: ModelRouterConfig = {
 
 export function resolveModelRoute(config: ModelRouterConfig, taskType: ModelTaskType): ModelRoute {
   const route = config.routes[taskType];
-  const provider = route?.provider ?? config.defaultProvider;
-  return route ?? { provider, model: "mock", reasoning: false };
+  if (!route) throw new Error(`No model route configured for task type: ${taskType}`);
+  return route;
 }
 
 export async function loadModelConfig(projectRoot: string): Promise<ModelRouterConfig> {
   const configPath = path.join(projectRoot, ".distinction", "models.yaml");
+  let config = defaultModelRouterConfig;
   try {
     const content = await readFile(configPath, "utf8");
-    return parseSimpleModelsYaml(content, defaultModelRouterConfig);
+    config = parseSimpleModelsYaml(content, defaultModelRouterConfig);
   } catch {
-    return defaultModelRouterConfig;
+    config = defaultModelRouterConfig;
   }
+  return applyIdeModelSettings(config, process.env.PRAXIS_MODEL_SETTINGS_JSON);
 }
 
 function parseSimpleModelsYaml(content: string, fallback: ModelRouterConfig): ModelRouterConfig {
   const defaultProvider = content.match(/^default_provider:\s*(\S+)/m)?.[1] ?? fallback.defaultProvider;
   const baseUrl = content.match(/base_url:\s*(\S+)/m)?.[1] ?? fallback.providers.deepseek?.baseUrl;
-  const apiKeyEnv = content.match(/api_key_env:\s*(\S+)/m)?.[1] ?? fallback.providers.deepseek?.apiKeyEnv;
   return {
     ...fallback,
     defaultProvider,
@@ -89,8 +87,56 @@ function parseSimpleModelsYaml(content: string, fallback: ModelRouterConfig): Mo
       deepseek: {
         type: "openai-compatible",
         baseUrl,
-        apiKeyEnv
+        apiKeyEnv: fallback.providers.deepseek?.apiKeyEnv
       }
     }
   };
+}
+
+function applyIdeModelSettings(config: ModelRouterConfig, settingsJson: string | undefined): ModelRouterConfig {
+  if (!settingsJson) return config;
+  const settings = safeJsonRecord(settingsJson);
+  if (!settings) return config;
+  const defaultProvider = stringValue(settings.defaultProvider) ?? config.defaultProvider;
+  const baseUrl = stringValue(settings.baseUrl) ?? config.providers.deepseek?.baseUrl;
+  return {
+    ...config,
+    defaultProvider,
+    providers: {
+      ...config.providers,
+      deepseek: {
+        ...(config.providers.deepseek ?? {}),
+        type: "openai-compatible",
+        baseUrl
+      }
+    },
+    routes: {
+      ...config.routes,
+      "project.intake.analyze": routeWithModel(config.routes["project.intake.analyze"], settings.intakeModel),
+      "graph.node.explain": routeWithModel(config.routes["graph.node.explain"], settings.nodeExplainModel),
+      "graph.edge.explain": routeWithModel(config.routes["graph.edge.explain"], settings.edgeExplainModel),
+      "graph.edge.plan": routeWithModel(config.routes["graph.edge.plan"], settings.edgePlanModel),
+      "coding.task.generate": routeWithModel(config.routes["coding.task.generate"], settings.codingTaskModel)
+    }
+  };
+}
+
+function routeWithModel(route: ModelRoute, value: unknown): ModelRoute {
+  return {
+    ...route,
+    model: stringValue(value) ?? route.model
+  };
+}
+
+function safeJsonRecord(value: string): Record<string, unknown> | undefined {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }

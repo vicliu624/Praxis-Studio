@@ -3,7 +3,7 @@ import { buildContext, type SelectionTarget } from "@praxis/context-builder";
 import { loadModelConfig, resolveModelRoute, type ModelTaskType } from "@praxis/model-router";
 import { createProvider } from "@praxis/provider-deepseek";
 import { getPrompt, type PromptName } from "@praxis/prompt-registry";
-import { normalizeGraphPlanDraft, type GraphPlan } from "@praxis/plan-model";
+import { isGraphPlan } from "@praxis/plan-model";
 import { appendTrace } from "@praxis/local-knowledge";
 import { InMemoryTraceRecorder } from "@praxis/trace-recorder";
 
@@ -63,7 +63,7 @@ export class PraxisAgentRuntime {
       kind: "model.called",
       target: targetForTrace(request.target),
       summary: `Called ${modelResponse.provider}/${modelResponse.model}`,
-      data: { usedMock: modelResponse.usedMock }
+      data: { provider: modelResponse.provider, model: modelResponse.model }
     });
     return {
       traceId,
@@ -106,18 +106,20 @@ export class PraxisAgentRuntime {
       kind: "model.called",
       target: targetForTrace(request.target),
       summary: `Called ${modelResponse.provider}/${modelResponse.model}`,
-      data: { usedMock: modelResponse.usedMock, taskType: planTaskType }
+      data: { provider: modelResponse.provider, model: modelResponse.model, taskType: planTaskType }
     });
 
     const parsed = safeJson(modelResponse.content);
-    const fallback = fallbackPlan(request, context.summary);
-    const plan = normalizeGraphPlanDraft(parsed, fallback);
+    if (!isGraphPlan(parsed)) {
+      throw new Error(`Model response for ${planTaskType} did not match GraphPlan schema.`);
+    }
+    const plan = parsed;
     await this.record(request.projectRoot, {
       traceId,
       kind: "plan.generated",
       target: targetForTrace(request.target),
       summary: plan.summary,
-      data: { plan, usedFallback: parsed === undefined }
+      data: { plan }
     });
     return {
       traceId,
@@ -150,62 +152,6 @@ function promptForTask(taskType: ModelTaskType): PromptName {
   if (taskType === "project.create.graph") return "project-create-graph";
   if (taskType === "memory.summarize") return "memory-summarize";
   return "project-intake-analyze";
-}
-
-function fallbackPlan(request: RuntimeRequest, contextSummary: string): GraphPlan {
-  const targetEdgeIds = request.target.type === "edge" ? [request.target.id] : [];
-  const targetNodeIds = request.target.type === "node" ? [request.target.id] : [];
-  return {
-    id: `plan:${Date.now()}`,
-    summary: `Plan for ${contextSummary}`,
-    missingGluePoints: [
-      {
-        title: "Confirm graph evidence",
-        reason: "Generated plans must preserve FACT / CANDIDATE / INFERENCE boundaries.",
-        kind: "INFERENCE"
-      },
-      {
-        title: "Generate controlled coding task",
-        reason: "v0.1 delegates source edits to external coding agents through TASK.md.",
-        kind: "CANDIDATE"
-      }
-    ],
-    actions: [
-      {
-        id: `action:${Date.now()}:update-edge`,
-        type: "update_edge",
-        title: "Update selected edge candidate",
-        description: "Record missing glue points and blocked reason on the selected edge after user confirmation.",
-        targetNodeIds,
-        targetEdgeIds
-      },
-      {
-        id: `action:${Date.now()}:memory`,
-        type: "create_memory_event",
-        title: "Create candidate memory event",
-        description: "Record this plan as candidate memory before any Apply action.",
-        targetNodeIds,
-        targetEdgeIds
-      },
-      {
-        id: `action:${Date.now()}:task`,
-        type: "create_task",
-        title: "Create controlled coding task",
-        description: request.instruction,
-        targetNodeIds,
-        targetEdgeIds
-      }
-    ],
-    codingTasks: [
-      {
-        title: request.instruction || "Implement controlled task",
-        allowedPaths: [".distinction", "packages"],
-        forbiddenPaths: ["apps/studio-desktop/src"],
-        acceptanceCriteria: ["Return patch summary", "Return changed files", "Return test result", "Return progress and memory suggestions"]
-      }
-    ],
-    questions: ["Which actions should be confirmed before Apply?"]
-  };
 }
 
 function targetForTrace(target: SelectionTarget) {

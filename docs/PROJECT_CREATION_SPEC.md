@@ -77,7 +77,6 @@ docs/ROADMAP.md
 .distinction/rules/ai-constraints.md
 .distinction/memory/changes.md
 .distinction/memory/decisions.md
-.distinction/models.yaml
 ```
 
 When useful, it may also generate:

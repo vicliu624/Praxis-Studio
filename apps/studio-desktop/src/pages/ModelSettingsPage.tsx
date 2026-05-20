@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
 import {
   defaultModelSettings,
-  renderModelsYaml,
-  saveProjectModelSettings,
+  readAppModelSettings,
+  renderRuntimeRoutePreview,
+  saveAppModelSettings,
   type ModelSettings
 } from "../runtimeClient";
 import { useI18n } from "../i18n";
@@ -11,22 +12,24 @@ interface ModelSettingsPageProps {
   projectRoot: string;
 }
 
-const storageKey = "praxis-studio:model-settings";
-
-export function ModelSettingsPage({ projectRoot }: ModelSettingsPageProps) {
+export function ModelSettingsPage(_props: ModelSettingsPageProps) {
   const { t } = useI18n();
   const [settings, setSettings] = useState<ModelSettings>(defaultModelSettings);
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
 
   useEffect(() => {
-    const saved = window.localStorage.getItem(storageKey);
-    if (!saved) return;
-    try {
-      setSettings({ ...defaultModelSettings, ...(JSON.parse(saved) as Partial<ModelSettings>) });
-    } catch {
-      setSettings(defaultModelSettings);
-    }
+    let active = true;
+    void readAppModelSettings()
+      .then((saved) => {
+        if (active && saved) setSettings(normalizeSavedSettings(saved));
+      })
+      .catch(() => {
+        if (active) setSettings(defaultModelSettings);
+      });
+    return () => {
+      active = false;
+    };
   }, []);
 
   function update<K extends keyof ModelSettings>(key: K, value: ModelSettings[K]) {
@@ -36,21 +39,16 @@ export function ModelSettingsPage({ projectRoot }: ModelSettingsPageProps) {
   async function save() {
     setStatus("");
     setError("");
-    window.localStorage.setItem(storageKey, JSON.stringify(settings));
-    if (!projectRoot) {
-      setStatus(t("settings.savedSession"));
-      return;
-    }
     try {
-      await saveProjectModelSettings(projectRoot, settings);
-      setStatus(t("settings.savedProject"));
+      await saveAppModelSettings(settings);
+      setStatus(t("settings.savedSession"));
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
       setStatus(t("settings.savedLocalOnly"));
     }
   }
 
-  const yaml = renderModelsYaml(settings);
+  const runtimePreview = renderRuntimeRoutePreview(settings);
 
   return (
     <section className="settings-layout" aria-labelledby="model-settings-title">
@@ -68,8 +66,8 @@ export function ModelSettingsPage({ projectRoot }: ModelSettingsPageProps) {
           <label htmlFor="base-url">{t("settings.baseUrl")}</label>
           <input id="base-url" className="path-input" value={settings.baseUrl} onChange={(event) => update("baseUrl", event.target.value)} />
 
-          <label htmlFor="api-key-env">{t("settings.apiKeyEnv")}</label>
-          <input id="api-key-env" className="path-input" value={settings.apiKeyEnv} onChange={(event) => update("apiKeyEnv", event.target.value)} />
+          <label htmlFor="api-key">{t("settings.apiKey")}</label>
+          <input id="api-key" className="path-input" type="password" value={settings.apiKey} onChange={(event) => update("apiKey", event.target.value)} />
 
           <label htmlFor="intake-model">{t("settings.intakeModel")}</label>
           <input id="intake-model" className="path-input" value={settings.intakeModel} onChange={(event) => update("intakeModel", event.target.value)} />
@@ -97,10 +95,26 @@ export function ModelSettingsPage({ projectRoot }: ModelSettingsPageProps) {
       <section className="panel settings-preview">
         <div className="panel-heading">
           <h2>{t("settings.preview")}</h2>
-          <span className="pill">{projectRoot ? ".distinction" : t("settings.localOnly")}</span>
+          <span className="pill">{t("settings.localOnly")}</span>
         </div>
-        <pre className="agent-output">{yaml}</pre>
+        <pre className="agent-output">{runtimePreview}</pre>
       </section>
     </section>
   );
+}
+
+type SavedModelSettings = Partial<ModelSettings> & { apiKeyEnv?: string };
+
+function normalizeSavedSettings(saved: SavedModelSettings): ModelSettings {
+  const { apiKeyEnv: legacyApiKeyEnv, ...savedSettings } = saved;
+  const apiKey = saved.apiKey || (legacyApiKeyEnv && looksLikeApiKey(legacyApiKeyEnv) ? legacyApiKeyEnv : "");
+  return {
+    ...defaultModelSettings,
+    ...savedSettings,
+    apiKey
+  };
+}
+
+function looksLikeApiKey(value: string): boolean {
+  return value.startsWith("sk-") || value.startsWith("sk_");
 }

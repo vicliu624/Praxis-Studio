@@ -159,6 +159,25 @@ fn write_recent_project(project_root: String) -> Result<String, String> {
     read_recent_projects()
 }
 
+#[tauri::command]
+fn read_app_model_settings() -> Result<String, String> {
+    let path = app_model_settings_path()?;
+    if !path.exists() {
+        return Ok("{}".to_string());
+    }
+    fs::read_to_string(path).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn write_app_model_settings(settings_json: String) -> Result<(), String> {
+    let value: serde_json::Value = serde_json::from_str(&settings_json).map_err(|error| error.to_string())?;
+    let path = app_model_settings_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    fs::write(path, serde_json::to_string_pretty(&value).map_err(|error| error.to_string())?).map_err(|error| error.to_string())
+}
+
 fn run_runtime(app: &tauri::AppHandle, command: &str, args: &[String]) -> Result<String, String> {
     let (cli_path, runtime_cwd) = locate_runtime_cli(app)?;
     if !cli_path.exists() {
@@ -167,11 +186,19 @@ fn run_runtime(app: &tauri::AppHandle, command: &str, args: &[String]) -> Result
             cli_path.display()
         ));
     }
-    let output = Command::new("node")
+    let mut process = Command::new("node");
+    process
         .arg(cli_path)
         .arg(command)
         .args(args)
-        .current_dir(runtime_cwd)
+        .current_dir(runtime_cwd);
+    if let Some(settings_json) = read_app_model_settings_content() {
+        process.env("PRAXIS_MODEL_SETTINGS_JSON", &settings_json);
+        if let Some(api_key) = deepseek_api_key_from_settings(&settings_json) {
+            process.env("DEEPSEEK_API_KEY", api_key);
+        }
+    }
+    let output = process
         .output()
         .map_err(|error| error.to_string())?;
     if output.status.success() {
@@ -290,6 +317,28 @@ fn recent_projects_path() -> Result<PathBuf, String> {
     Ok(Path::new(&home).join(".praxis-studio").join("recent-projects.json"))
 }
 
+fn app_model_settings_path() -> Result<PathBuf, String> {
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .map_err(|_| "Could not locate user home directory.".to_string())?;
+    Ok(Path::new(&home).join(".praxis-studio").join("model-settings.json"))
+}
+
+fn read_app_model_settings_content() -> Option<String> {
+    let path = app_model_settings_path().ok()?;
+    fs::read_to_string(path).ok()
+}
+
+fn deepseek_api_key_from_settings(settings_json: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(settings_json).ok()?;
+    let api_key = value.get("apiKey")?.as_str()?.trim();
+    if api_key.is_empty() {
+        None
+    } else {
+        Some(api_key.to_string())
+    }
+}
+
 fn find_repo_root() -> Option<PathBuf> {
     let mut current = std::env::current_dir().ok()?;
     loop {
@@ -359,7 +408,9 @@ fn main() {
             import_task_result,
             create_project_from_plan,
             read_recent_projects,
-            write_recent_project
+            write_recent_project,
+            read_app_model_settings,
+            write_app_model_settings
         ])
         .run(tauri::generate_context!())
         .expect("error while running Praxis Studio");

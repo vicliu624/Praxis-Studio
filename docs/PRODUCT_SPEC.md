@@ -132,7 +132,6 @@ docs/ROADMAP.md
 .distinction/memory/changes.md
 .distinction/memory/decisions.md
 .distinction/rules/ai-constraints.md
-.distinction/models.yaml
 ```
 
 ### 4.3 Context-bound Graph Collaboration

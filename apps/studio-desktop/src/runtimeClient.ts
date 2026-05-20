@@ -192,7 +192,7 @@ export interface NewProjectPlan {
 export interface ModelSettings {
   defaultProvider: string;
   baseUrl: string;
-  apiKeyEnv: string;
+  apiKey: string;
   intakeModel: string;
   nodeExplainModel: string;
   edgeExplainModel: string;
@@ -203,13 +203,15 @@ export interface ModelSettings {
 export const defaultModelSettings: ModelSettings = {
   defaultProvider: "deepseek",
   baseUrl: "https://api.deepseek.com",
-  apiKeyEnv: "DEEPSEEK_API_KEY",
+  apiKey: "",
   intakeModel: "deepseek-v4-pro",
   nodeExplainModel: "deepseek-v4-flash",
   edgeExplainModel: "deepseek-v4-pro",
   edgePlanModel: "deepseek-v4-pro",
   codingTaskModel: "deepseek-v4-pro"
 };
+
+const modelSettingsStorageKey = "praxis-studio:model-settings";
 
 export async function runRuntimeCommand(command: string, args: string[]): Promise<string> {
   return invoke<string>("run_runtime_command", { command, args });
@@ -365,7 +367,7 @@ function chatTargetArgs(target: RuntimeChatTarget): string[] {
   return ["--target-json", JSON.stringify(target)];
 }
 
-export function renderModelsYaml(settings: ModelSettings): string {
+export function renderRuntimeRoutePreview(settings: ModelSettings): string {
   return [
     `default_provider: ${settings.defaultProvider}`,
     "",
@@ -373,7 +375,6 @@ export function renderModelsYaml(settings: ModelSettings): string {
     "  deepseek:",
     "    type: openai-compatible",
     `    base_url: ${settings.baseUrl}`,
-    `    api_key_env: ${settings.apiKeyEnv}`,
     "",
     "routes:",
     "  project.intake.analyze:",
@@ -408,10 +409,34 @@ export function renderModelsYaml(settings: ModelSettings): string {
   ].join("\n");
 }
 
-export async function saveProjectModelSettings(projectRoot: string, settings: ModelSettings): Promise<void> {
-  await invoke<void>("write_project_distinction_file", {
-    projectRoot,
-    relativePath: ".distinction/models.yaml",
-    content: renderModelsYaml(settings)
-  });
+export async function readAppModelSettings(): Promise<Partial<ModelSettings> | null> {
+  if (hasTauriRuntime()) {
+    const content = await invoke<string>("read_app_model_settings");
+    const settings = JSON.parse(content) as Partial<ModelSettings>;
+    if (Object.keys(settings).length) return settings;
+    const legacySettings = readLocalModelSettings();
+    if (legacySettings) {
+      await invoke<void>("write_app_model_settings", { settingsJson: JSON.stringify(legacySettings) });
+      return legacySettings;
+    }
+    return settings;
+  }
+  return readLocalModelSettings();
+}
+
+export async function saveAppModelSettings(settings: ModelSettings): Promise<void> {
+  const content = JSON.stringify(settings);
+  window.localStorage.setItem(modelSettingsStorageKey, content);
+  if (hasTauriRuntime()) {
+    await invoke<void>("write_app_model_settings", { settingsJson: content });
+  }
+}
+
+function hasTauriRuntime(): boolean {
+  return typeof window !== "undefined" && ("__TAURI_INTERNALS__" in window || "__TAURI__" in window);
+}
+
+function readLocalModelSettings(): Partial<ModelSettings> | null {
+  const content = window.localStorage.getItem(modelSettingsStorageKey);
+  return content ? (JSON.parse(content) as Partial<ModelSettings>) : null;
 }

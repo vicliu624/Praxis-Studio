@@ -335,10 +335,9 @@ packages/provider-deepseek/
 ### 必须实现
 
 ```text
-MockProvider
 DeepSeekProvider
 ModelRouter
-models.yaml loading
+IDE model settings loading
 route resolution
 JSON response validation
 usage logging
@@ -347,8 +346,9 @@ usage logging
 ### 验收
 
 ```text
-没有 API Key 时使用 MockProvider。
-有 DEEPSEEK_API_KEY 时可以调用 DeepSeekProvider。
+Chat / Plan / Create New Project AI steps fail explicitly.
+Synthetic AI responses are forbidden.
+有 IDE 级 API key 或启动进程里的 DEEPSEEK_API_KEY 时可以调用 DeepSeekProvider。
 ```
 
 ---
@@ -480,8 +480,7 @@ packages/local-knowledge/
 ├─ rules/boundaries.md
 ├─ rules/ai-constraints.md
 ├─ tasks/
-├─ reports/project-intake.md
-└─ models.yaml
+└─ reports/project-intake.md
 ```
 
 ### 覆盖策略
@@ -545,7 +544,6 @@ docs/ROADMAP.md
 .distinction/memory/changes.md
 .distinction/memory/decisions.md
 .distinction/rules/ai-constraints.md
-.distinction/models.yaml
 ```
 
 ### 验收
