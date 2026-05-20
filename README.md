@@ -1,288 +1,464 @@
+# README.md
+
 # Praxis Studio
 
-**Praxis Studio** 是一个以 **开发图谱（Development Graph）** 和 **项目记忆（Project Memory）** 为中心的 **AI-native Product Development IDE**。
+**Praxis Studio** 是一个 **memory-first、model-driven、graph-projected、agent-governed** 的 AI 原生产品开发 IDE。
 
-它不是传统代码编辑器，也不是普通 coding agent。它的目标是帮助个人开发者从真实产品构想或真实代码工程出发，持续完成：
+中文定义：
+
+> Praxis Studio 是一个以可靠结构化项目记忆为源、以建模为核心、以图谱投影为界面、以可治理 Agent 为执行层的产品开发环境。
+
+Praxis Studio 不直接从代码仓库画图，也不直接从一个创意生成代码。它先从 **真实代码仓库** 或 **真实产品创意** 中构建可靠的结构化项目记忆，再从这些记忆中生长出模型、规格、图谱视图、计划、任务和受控施工流程。
 
 ```text
-产品构想
-→ 需求拆解
-→ 架构映射
-→ 模块拆分
-→ 胶水关系管理
-→ Agent 施工任务
-→ 验证反馈
-→ 项目记忆沉淀
+Idea / Repository
+      ↓
+Reliable Structured Project Memory
+      ↓
+Models
+      ↓
+Specifications
+      ↓
+Graph Projections
+      ↓
+Plans / Tasks
+      ↓
+Governed Agent Execution
 ```
-
-Praxis Studio 的核心不是“让 AI 更快写代码”，而是：
-
-> 让一个人借助 AI 稳定承担产品、架构、开发、测试、项目管理和运营反馈等多种角色，并让这些角色之间的上下文连续、可追踪、可治理。
 
 ---
 
-## 1. 为什么要做 Praxis Studio
+## 1. Praxis Studio 解决什么问题
 
-AI 降低了产品、架构、开发、测试、运营等角色的上手门槛，使得个人开发者可以承担过去由多人分工完成的工作。
-
-但是现有工具仍然是割裂的：
+AI 已经让个人开发者可以承担过去由产品经理、架构师、开发者、测试、项目经理和运营者共同承担的工作。但现有工具仍然割裂：
 
 - IDE 以文件和代码为中心。
-- Coding agent 以任务执行为中心。
+- Coding agent 以一次性任务执行为中心。
 - 项目管理工具以 ticket 为中心。
 - 文档工具以页面为中心。
 - 架构图工具以静态图为中心。
-- Git 记录代码变化，但不记录产品意图和架构原因。
+- Git 记录代码变化，但很难记录产品意图、领域模型和架构原因。
 - Chat 记录对话，但不能稳定约束后续实现。
 
-Praxis Studio 试图解决的问题是：
+Praxis Studio 要解决的问题是：
 
-> 当一个人同时扮演产品经理、架构师、开发者、测试、项目经理和运营者时，他需要一个怎样的开发环境来管理整个产品从构想到实现的连续过程？
+> 当一个人借助 AI 同时承担产品、架构、开发、测试、项目管理和运营反馈时，他需要一个怎样的开发环境来维持产品语义、架构边界、任务依赖和执行 trace 的连续性？
+
+Praxis Studio 的回答是：
+
+> 先构建可靠结构化项目记忆，再以建模组织这些记忆，并把记忆和模型投影成架构图、项目计划图、规格、任务和可治理 Agent 施工上下文。
 
 ---
 
-## 2. 产品定位
+## 2. 核心原则
 
-Praxis Studio 是：
-
-```text
-Graph-centered + Agent-runtime-governed AI-native Product Development IDE
-```
-
-中文：
+Praxis Studio 必须遵守以下原则：
 
 ```text
-以开发图谱为中心、以可治理 Agent 运行时为执行层的 AI 原生产品开发 IDE
-```
-
-它由三层组成：
-
-```text
-Visual IDE Shell
-  用户看见、选择、对话、确认
-
-Development Graph
-  表示需求、架构、模块、任务、代码、测试、记忆之间的关系
-
-Governed Agent Runtime
-  管理 AI 如何解释、计划、执行、留下痕迹
+1. Memory is primary.
+2. Graphs are projections from memory, not source of truth.
+3. Models organize memory into a buildable world.
+4. Specs are confirmed memory projected into document form.
+5. Plans and tasks are projected from specs, models and memory.
+6. Code is produced only after sufficient memory, modeling and specification.
+7. Local repository understanding produces FACT memory.
+8. Agent inference produces CANDIDATE or INFERENCE memory.
+9. User confirmation produces CONFIRMED memory.
+10. Explain before Plan. Plan before Apply.
+11. Existing source code is not modified automatically in v0.1.
+12. External coding agents are workers; Praxis owns memory, models, graphs, plans and trace.
 ```
 
 ---
 
-## 3. 和传统 IDE 的区别
+## 3. 为什么不是 Graph-first
 
-传统 IDE 的中心是：
-
-```text
-文件
-代码
-符号
-构建
-调试
-```
-
-Praxis Studio 的中心是：
+早期的 Development Graph 很容易退化为：
 
 ```text
-产品意图
-需求节点
-架构节点
-模块关系
-胶水进度
-Agent 任务
-项目记忆
+Project → Module → File → Warning → Task
 ```
 
-传统 IDE 回答：
+这种图既不能像 C4 / UML 一样帮助理解代码结构，也不能像 OmniPlan / 甘特图一样帮助理解项目推进。
+
+Praxis Studio 因此采用 **Memory-first, Graph-as-View**：
 
 ```text
-这个函数在哪里？
-这个类谁调用？
-这个文件怎么编译？
+Repository / Idea
+      ↓
+Structured Memory
+      ↓
+Projection Rules
+      ↓
+Graph Views
 ```
 
-Praxis Studio 回答：
-
-```text
-这个模块来自哪个需求？
-这个需求为什么存在？
-这个架构节点负责什么？
-这条边的胶水完成了吗？
-改这个节点会影响哪些任务？
-AI 施工时应该遵守哪些项目记忆？
-这次修改为什么发生？
-```
+图不是事实本身。图是对可靠结构化记忆的投影。
 
 ---
 
-## 4. 和 Claude Code / Codex 的区别
+## 4. 两条主入口
 
-Claude Code / Codex 的中心是：
+Praxis Studio v0.1 支持两条入口：
 
-```text
-任务执行
-代码修改
-命令运行
-测试修复
-```
+### 4.1 Open Existing Project
 
-Praxis Studio 的中心是：
-
-```text
-开发过程治理
-产品上下文
-架构上下文
-开发图谱
-长期记忆
-Agent 调度
-```
-
-Claude Code / Codex 是施工队。  
-Praxis Studio 是产品开发过程的调度中心。
-
-Praxis Studio 可以把任务交给 Claude Code / Codex / Claude Code Best / OpenCode 等外部 coding agent，但它自己必须拥有：
-
-- Development Graph
-- Project Memory
-- Context Builder
-- Model Router
-- Tool Registry
-- Trace Recorder
-- Plan / Apply Controller
-
----
-
-## 5. 第一版目标：Praxis Studio v0.1
-
-第一版不是 demo graph，不是静态概念图，也不是完整 coding agent。
-
-第一版目标是：
-
-> **Project Intake + Graph Agent + Controlled Coding Task MVP**
-
-也就是：
-
-```text
-1. 打开真实工程，生成 Development Graph Candidate
-2. 从产品构想创建新工程，生成需求、架构、图谱、文档和 .distinction
-3. 选中节点或边，通过 Agent 解释、计划、生成 coding task
-4. 把确认后的结果写入 .distinction 项目记忆
-```
-
----
-
-## 6. 第一版必须支持的两条入口
-
-### 6.1 Open Existing Project
-
-用户选择一个真实本地工程目录：
+从真实代码仓库出发：
 
 ```text
 Open Existing Project
-→ 扫描文件和配置
-→ 识别技术栈和项目类型
-→ 识别模块候选
-→ 生成 Project Profile
-→ Agent 分析模块职责、候选关系、风险和问题
-→ 生成 Development Graph Candidate
-→ 用户确认
-→ 写入 .distinction/
-→ 进入 Development Graph Workspace
+→ Scan repository
+→ Build repository FACT memory
+→ Infer structure memory
+→ Build architecture model candidate
+→ Build graph projections
+→ User review / confirm
+→ Write .distinction
+→ Enter workspace
 ```
 
-这里不能依赖内置 demo graph。  
-每一张图谱都必须来自真实工程。
+这条路径用于理解已有项目。
 
-### 6.2 Create New Project
+它必须回答：
 
-用户输入产品构想：
+```text
+这个项目由哪些系统 / 容器 / 组件组成？
+模块职责是什么？
+依赖关系是什么？
+哪些关系是事实？哪些是推断？
+哪些架构风险需要确认？
+哪些后续任务依赖这些架构理解？
+```
+
+### 4.2 Create New Project
+
+从产品创意出发：
 
 ```text
 Create New Project
-→ 输入产品构想
-→ 选择项目类型
-→ 选择技术栈
-→ Agent 生成需求拆解
-→ Agent 生成架构候选
-→ Agent 生成 Development Graph
-→ 生成 docs 和 .distinction
-→ 用户确认
-→ 创建工程目录
-→ 进入 Development Graph Workspace
+→ Capture idea memory
+→ Clarify product intent
+→ Build product model
+→ Build domain model
+→ Build interaction model
+→ Build state model
+→ Build architecture model
+→ Generate specifications
+→ Project graph views
+→ Generate project plan
+→ Create skeleton
+→ Generate controlled coding tasks
+```
+
+这条路径用于从创意生长出项目。
+
+它必须遵守：
+
+```text
+不要从一句创意直接生成代码。
+先构建记忆，再建模，再生成规格，再生成图和计划，最后才创建工程骨架和任务。
 ```
 
 ---
 
-## 7. 第一版必须实现的 Agent
+## 5. 记忆：Praxis 的第一性对象
 
-第一版必须有 Agent，但不是完整自动 coding agent。
+Praxis 的核心不是 Graph，而是 **Reliable Structured Project Memory**。
 
-### 第一版要做
+每条记忆必须有：
 
 ```text
-Project Intake Agent
-  基于真实工程扫描结果生成项目画像、候选图谱、风险和问题。
+id
+kind: FACT | INFERENCE | CANDIDATE | CONFIRMED
+type
+subject
+predicate
+object / value
+summary
+evidence[]
+source
+confidence
+status
+createdAt
+updatedAt
+```
 
-Project Creation Agent
-  基于产品构想生成需求、架构、图谱、文档和新工程骨架。
+### 5.1 Knowledge Kind
 
-Graph Chat Agent
-  选中节点或边后，解释它的职责、关系、进度、风险和缺口。
+```text
+FACT
+  来自本地扫描、静态分析、真实文件、真实 manifest、真实 import/export。
+
+INFERENCE
+  来自规则、启发式分析、静态结构推断。
+
+CANDIDATE
+  来自 Agent 的解释、计划、建模候选、规格候选。
+
+CONFIRMED
+  来自用户确认、显式接受、修正后的稳定约束。
+```
+
+### 5.2 记忆来源
+
+```text
+repository_scan
+static_analysis
+agent_inference
+user_confirmation
+external_agent_result
+runtime_trace
+manual_edit
+```
+
+---
+
+## 6. 建模：从记忆到可施工世界
+
+建模不是实现后的文档整理。建模是从意图走向规格、架构、图谱、任务和代码的桥梁。
+
+Praxis v0.1 至少需要以下模型：
+
+```text
+Product Model
+  产品目标、用户、场景、价值主张。
+
+Domain Model
+  核心概念、术语区分、实体、规则、生命周期。
+
+Interaction Model
+  用户流程、用例、操作路径、确认点。
+
+State Model
+  对象状态、状态转换、非法转换、触发事件。
+
+Architecture Model
+  系统边界、模块职责、依赖方向、外部系统。
+
+Plan Model
+  里程碑、任务、依赖、阻塞、交付物、进度。
+```
+
+其中 **Domain Model** 是核心。它负责把模糊创意或混乱代码中的概念区分清楚。
+
+典型区分包括：
+
+```text
+MemoryRecord ≠ GraphNode
+GraphView ≠ Source of Truth
+Model ≠ Specification
+Specification ≠ Plan
+Plan ≠ Apply
+Task ≠ Execution
+Candidate ≠ Confirmed
+Architecture Graph ≠ Project Plan Graph
+```
+
+这些区分一旦被用户确认，就必须成为后续 Agent 的硬约束。
+
+---
+
+## 7. 图谱：从记忆投影出来的视图
+
+Praxis 不使用一张万能 Development Graph。Praxis 使用一组从结构化记忆和模型投影出的图视图。
+
+```text
+Structured Memory + Models + Projection Rules
+      ↓
+Graph Views
+```
+
+### 7.1 Architecture Views
+
+用于理解代码结构和架构边界：
+
+```text
+C4 Context View
+C4 Container View
+Component View
+Dependency View
+Symbol / UML-like View
+```
+
+### 7.2 Project Plan Views
+
+用于理解项目推进、前后依赖和进度：
+
+```text
+Task Dependency Graph
+Timeline / Gantt View
+Milestone View
+Progress View
+Blocker View
+```
+
+### 7.3 Memory Views
+
+用于理解决策、规则和历史：
+
+```text
+Decision Map
+Do-Not-Repeat Map
+Incident Map
+Concept Distinction Map
+```
+
+### 7.4 Trace Views
+
+用于理解 Agent 做过什么：
+
+```text
+Agent Run Timeline
+Tool Call Graph
+Permission Flow
+Model Call Trace
+```
+
+---
+
+## 8. `.distinction` 项目记忆目录
+
+`.distinction` 是 Praxis 的项目级第二大脑。它借鉴 OpenWolf 的 `.wolf/` 思想，但更强调结构化、可靠性、建模和图谱投影。
+
+建议 v0.1 目录结构：
+
+```text
+.distinction/
+├─ memory/
+│  ├─ facts.jsonl
+│  ├─ inferences.jsonl
+│  ├─ candidates.jsonl
+│  ├─ confirmations.jsonl
+│  ├─ decisions.jsonl
+│  ├─ incidents.jsonl
+│  ├─ traces.jsonl
+│  └─ do-not-repeat.jsonl
+│
+├─ models/
+│  ├─ product-model.json
+│  ├─ domain-model.json
+│  ├─ interaction-model.json
+│  ├─ state-model.json
+│  ├─ architecture-model.json
+│  └─ plan-model.json
+│
+├─ specs/
+│  ├─ product-intent.md
+│  ├─ domain-model.md
+│  ├─ architecture-model.md
+│  ├─ memory-model.md
+│  └─ v0.1-scope.md
+│
+├─ views/
+│  ├─ architecture/
+│  │  ├─ c4-context.json
+│  │  ├─ c4-container.json
+│  │  ├─ component-view.json
+│  │  └─ dependency-view.json
+│  │
+│  ├─ project-plan/
+│  │  ├─ task-graph.json
+│  │  ├─ gantt.json
+│  │  └─ progress.json
+│  │
+│  ├─ memory/
+│  │  ├─ decision-map.json
+│  │  └─ distinction-map.json
+│  │
+│  └─ trace/
+│     └─ agent-run-graph.json
+│
+├─ tasks/
+│  └─ TASK-0001.md
+│
+├─ reports/
+│  ├─ project-intake.md
+│  ├─ model-review.md
+│  └─ projection-report.md
+│
+└─ rules/
+   ├─ architecture.md
+   ├─ modeling.md
+   ├─ boundaries.md
+   └─ ai-constraints.md
+```
+
+Source of truth：
+
+```text
+memory/*.jsonl
+models/*.json
+rules/*.md
+confirmed specs
+```
+
+Derived / projection cache：
+
+```text
+views/**/*.json
+reports/*.md
+```
+
+---
+
+## 9. Agent 的定位
+
+Praxis 的 Agent 不是直接施工的自动代码生成器。Praxis Agent 负责解释、建模、规格化、投影、计划和受控任务生成。
+
+v0.1 需要以下 Agent：
+
+```text
+Repository Understanding Agent
+  从真实仓库扫描结果生成结构化 FACT / INFERENCE memory。
+
+Idea Clarifier Agent
+  从用户创意中提取产品目标、用户、场景和约束。
+
+Domain Modeling Agent
+  提取核心概念、概念区分、实体、规则、状态候选。
+
+Architecture Modeling Agent
+  从产品模型和领域模型中生成架构候选。
+
+Specification Agent
+  从 confirmed memory 和 models 生成规格文档。
+
+Projection Agent
+  从 memory / models / specs 生成图谱视图。
 
 Plan Agent
-  把用户指令转成图谱变更计划、任务计划和记忆事件候选。
+  从规格、模型和图谱生成任务依赖和施工计划。
 
 Coding Task Agent
-  把 Plan 转成可交给外部 coding agent 的施工任务。
+  把受控计划转成外部 coding agent 可执行的任务文件。
 ```
 
-### 第一版不做
+v0.1 不做：
 
 ```text
-不自动大规模修改已有源码
-不自动运行测试并循环修复
-不自动 git commit
-不完整替代 Claude Code / Codex
-不把 shell 执行权限默认开放
+不自动大规模修改已有源码。
+不自动运行测试并循环修复。
+不自动 git commit。
+不完整替代 Claude Code / Codex。
+不默认开放 shell 执行权限。
 ```
 
 ---
 
-## 8. Claude Code Best 的定位
+## 10. 外部 Coding Agent 的定位
 
-`claude-code-best/claude-code` 可以作为重要参考，但不能成为 Praxis Studio 的产品中心。
-
-### 可以吸收
-
-- Agentic Loop
-- Tool Registry
-- Context Builder
-- Permission / Plan Mode
-- Trace
-- MCP / ACP 思路
-- 多模型 provider 结构
-- CLI command organization
-- coding agent task 执行经验
-
-### 不应该做
-
-- 不直接 fork 成 Praxis Studio 主工程。
-- 不让 Development Graph 成为它的插件。
-- 不把逆向/兼容 Claude Code 的逻辑作为 Praxis 主干。
-- 不把外部 coding agent 当成产品中心。
-
-### 正确关系
+Claude Code、Codex、Claude Code Best、OpenCode 等都是 Praxis 可以调度的施工队，但不是 Praxis 的地基。
 
 ```text
-Praxis Studio owns:
-  Development Graph
-  Project Memory
-  Agent Runtime
-  Context Builder
-  Trace
-  Progress
+Praxis owns:
+  Memory
+  Models
+  Specs
+  Graph Projections
   Plans
+  Tasks
+  Trace
+  Permission / Apply Controller
 
 External coding agents own:
   concrete code editing
@@ -290,197 +466,20 @@ External coding agents own:
   patch generation
 ```
 
-也就是说：
-
-> Claude Code / Codex / Claude Code Best / OpenCode 都是 Praxis 可以调度的施工队，而不是 Praxis 的地基。
+v0.1 中，Coding Task 只生成受控任务文件，不自动执行外部 agent。
 
 ---
 
-## 9. 核心原则
-
-第一版必须遵守以下原则：
+## 11. 技术路线
 
 ```text
-1. No demo-first workflow.
-2. Every graph comes from a real repo or real product intent.
-3. Local scan produces FACT.
-4. Agent produces CANDIDATE / INFERENCE.
-5. User confirmation produces CONFIRMED memory.
-6. Chat is bound to selected node / edge / subgraph.
-7. Explain before Plan.
-8. Plan before Apply.
-9. External coding agents are workers; Praxis owns graph, memory and progress.
-10. Existing source code is not modified automatically in v0.1.
+Desktop Shell: Tauri
+UI: React + TypeScript + Vite
+Graph UI: React Flow / xyflow
+Runtime: TypeScript packages + Node sidecar CLI
+Local Memory: .distinction/
+Future Runtime Cache: SQLite
+Default Model: DeepSeek
+Multi Model: Model Router
+External Coding Agent: ManualAdapter first, Codex / Claude Code adapters later
 ```
-
----
-
-## 10. 第一版完成后的界面
-
-### Home
-
-- Open Existing Project
-- Create New Project
-- Recent Projects
-- Model Settings
-
-### Project Intake Review
-
-- Project Profile
-- Module Candidates
-- Graph Candidate
-- Warnings
-- Questions
-- Ask AI Improve
-- Accept Graph
-
-### Development Graph Workspace
-
-- 左侧：Outline / 模块导航
-- 中间：Development Graph
-- 右侧：Selected Node / Edge Inspector + Context-bound Chat
-- 底部：Trace / Memory Timeline
-
----
-
-## 11. 项目记忆目录 `.distinction`
-
-第一版确认后的项目状态写入：
-
-```text
-.distinction/
-├─ graph/
-│  ├─ nodes.json
-│  ├─ edges.json
-│  ├─ progress.json
-│  └─ views.json
-│
-├─ memory/
-│  ├─ changes.md
-│  ├─ decisions.md
-│  ├─ traces.jsonl
-│  ├─ incidents.json
-│  └─ do-not-repeat.md
-│
-├─ rules/
-│  ├─ architecture.md
-│  ├─ boundaries.md
-│  └─ ai-constraints.md
-│
-├─ tasks/
-│  └─ TASK-0001.md
-│
-├─ reports/
-│  ├─ project-intake.md
-│  └─ graph-plan.md
-```
-
-DeepSeek API keys and model route overrides are IDE settings stored outside the project, under the Praxis Studio app settings directory. They must not be written into `.distinction`.
-
----
-
-## 12. 推荐工程结构
-
-```text
-praxis-studio/
-├─ apps/
-│  ├─ studio-desktop/
-│  └─ runtime-cli/
-│
-├─ packages/
-│  ├─ core/
-│  ├─ development-graph/
-│  ├─ graph-store/
-│  ├─ local-knowledge/
-│  ├─ repository-scanner/
-│  ├─ project-profiler/
-│  ├─ graph-generator/
-│  ├─ project-wizard/
-│  ├─ template-generator/
-│  ├─ agent-runtime/
-│  ├─ tool-registry/
-│  ├─ context-builder/
-│  ├─ prompt-registry/
-│  ├─ plan-model/
-│  ├─ file-generator/
-│  ├─ model-router/
-│  ├─ provider-deepseek/
-│  ├─ trace-recorder/
-│  ├─ coding-agent-adapter/
-│  └─ ui-kit/
-│
-├─ docs/
-└─ .distinction.example/
-```
-
----
-
-## 13. 技术路线
-
-- Desktop Shell: Tauri
-- UI: React + TypeScript + Vite
-- Graph UI: React Flow / xyflow
-- Runtime: TypeScript packages + Node sidecar CLI
-- Local Memory: `.distinction/`
-- Future Runtime Cache: SQLite
-- Default Model: DeepSeek
-- Multi Model: Model Router
-- External Coding Agent: ManualAdapter first, Codex / Claude Code / Claude Code Best adapters later
-
----
-
-## 14. 第一版验收标准
-
-### Open Existing Project
-
-以 Praxis Studio 自己作为验收工程：
-
-```text
-1. 启动桌面端
-2. 点击 Open Existing Project
-3. 选择 praxis-studio/
-4. 成功扫描 RepositorySnapshot
-5. 成功识别 Tauri + React + TypeScript + Rust
-6. 成功识别 apps/studio-desktop 和 packages/*
-7. 生成 DevelopmentGraphCandidate
-8. 展示 warnings/questions
-9. Accept Graph
-10. 写入 .distinction/
-11. 进入 DevelopmentGraphWorkspace
-12. 选中节点可 Explain
-13. 选中边可 Explain
-14. 可生成 Plan
-15. 可生成 CodingAgentTask
-```
-
-### Create New Project
-
-```text
-1. 输入产品构想
-2. 选择 Documentation-first 或 Tauri Desktop
-3. Agent 生成需求
-4. Agent 生成架构
-5. Agent 生成 Development Graph
-6. 生成 docs
-7. 生成 .distinction
-8. 进入 DevelopmentGraphWorkspace
-```
-
-### Agent Boundary
-
-```text
-1. Explain 不修改
-2. Plan 不应用
-3. Apply 只能修改 .distinction / docs / tasks / 新工程
-4. 不自动修改已有源码
-5. 所有模型调用有 trace
-6. 所有 apply 有 trace
-```
-
----
-
-## 15. 一句话总结
-
-Praxis Studio v0.1 要证明的不是“AI 能写代码”，而是：
-
-> 真实工程或真实构想可以被转化成可对话、可追踪、可治理、可交给 Agent 施工的 Development Graph。
