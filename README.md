@@ -21,9 +21,19 @@ Specifications
       ↓
 Graph Projections
       ↓
+Graph Anchor Selection
+      ↓
+ContextPacket
+      ↓
 Plans / Tasks
       ↓
 Governed Agent Execution
+      ↓
+Runtime Events / Results / Trace
+      ↓
+Memory Updates
+      ↺
+Live Graph Reprojection
 ```
 
 ---
@@ -67,6 +77,12 @@ Praxis Studio 必须遵守以下原则：
 10. Explain before Plan. Plan before Apply.
 11. Existing source code is not modified automatically in v0.1.
 12. External coding agents are workers; Praxis owns memory, models, graphs, plans and trace.
+13. Graph projections are live views. During agent construction, every approved memory / model / task / trace mutation must update or invalidate the relevant graph views.
+14. Graph nodes and edges are context anchors. Selecting a graph element produces a bounded ContextPacket for Agent discussion, planning and controlled construction.
+15. Agent must start from the anchored ContextPacket and expand scope only when necessary.
+16. AI must not directly edit graph views. AI reads code and proposes MemoryPatch / ModelPatch / PlanPatch; Praxis validates patches and regenerates UML / C4 / Gantt projections.
+17. Quality management is anti-pattern detection plus graph annotation plus finding-anchored resolution plus live reprojection.
+18. Praxis provides opinionated governance defaults. Users intervene at meaning, risk, priority and scope points; they are not forced to design architecture from scratch.
 ```
 
 ---
@@ -94,6 +110,170 @@ Graph Views
 ```
 
 图不是事实本身。图是对可靠结构化记忆的投影。
+
+---
+
+## Live Graph During Agent Construction
+
+Praxis graph views are not static diagrams generated once during intake. They are live projections over structured memory, models, specifications, plans, tasks and traces.
+
+When an Agent reads information, generates a plan, requests permission, applies changes, generates a task, imports an external construction result or records trace, Praxis emits runtime events. These events update memory, mutate model / plan / task state, or mark related projections stale. The workspace then refreshes affected graph views incrementally.
+
+```text
+Agent Construction
+      ↓
+Runtime Events
+      ↓
+Memory / Model / Plan / Task / Trace Updates
+      ↓
+Projection Invalidation
+      ↓
+Live Graph Reprojection
+      ↓
+Workspace UI Patch
+```
+
+Architecture views show changing understanding.
+Project plan views show task progress, dependencies and blockers.
+Trace views show the active construction path.
+Memory views show new candidates, confirmations, conflicts and corrections.
+
+Graph changes must not hide their source. Every live visual change must be traceable to memory, model, specification, plan, task or trace records.
+
+---
+
+## Graph as Context Anchor
+
+Graph projections are not only visual output. They are semantic entry points into structured memory.
+
+When the user selects a graph node, graph edge, Gantt task, requirement, architecture component or trace node, Praxis resolves the selected element back to source memory, models, specs, tasks, traces and source paths. It then builds a bounded `ContextPacket` for Agent discussion, planning and controlled construction.
+
+```text
+User selects graph anchor
+      ↓
+ContextPacket
+      ↓
+Scoped Agent Discussion / Plan / Construction
+      ↓
+Runtime Events
+      ↓
+Memory Updates
+      ↓
+Live Graph Reprojection
+```
+
+The Agent must use the anchored `ContextPacket` first. It should not search the wider repository unless the anchored context is insufficient. If it expands scope, it must explain why and record the expansion.
+
+For example, selecting a Gantt task should identify its related requirement, specs, architecture nodes, source paths, acceptance criteria, blockers and forbidden paths. This gives the Agent a pre-scoped work packet instead of forcing it to rediscover the project by searching the whole repository.
+
+---
+
+## AI Code Reading to UML / Gantt
+
+Praxis does not ask AI to draw authoritative diagrams.
+
+When AI reads code, it must produce structured patches:
+
+```text
+AI reads code
+      ↓
+RepositoryUnderstandingPatch
+      ↓
+MemoryPatch / ArchitectureModelPatch / UmlModelPatch / PlanModelPatch
+      ↓
+Patch Validation
+      ↓
+Memory / Model Update
+      ↓
+Projection Engine
+      ↓
+UML / C4 / Dependency / Gantt Views
+```
+
+UML diagrams are projections from `UmlModel`.
+Architecture diagrams are projections from `ArchitectureModel`.
+Gantt diagrams are projections from `PlanModel`.
+
+The AI may propose INFERENCE or CANDIDATE knowledge. Static analysis may produce FACT knowledge. Only user confirmation may produce CONFIRMED knowledge.
+
+Views remain derived cache:
+
+```text
+.distinction/views/**/*.json
+.distinction/views/**/*.mmd
+```
+
+They must be regenerated from memory and models, not directly edited by AI.
+
+---
+
+## Anti-pattern Quality Management
+
+Praxis quality management is not only lint, tests, coverage or static analyzer reports.
+
+Praxis detects anti-patterns from structured memory, models, UML, architecture graphs, Gantt views, trace graphs, source facts and plan state. Findings are written as structured memory, projected into graph views as annotations, and opened as context-bound chat anchors.
+
+```text
+Memory / Models / Specs / Graphs / Trace / Plan
+      ↓
+Anti-pattern Detection
+      ↓
+AntiPatternFinding Memory
+      ↓
+Graph Annotation
+      ↓
+Finding-anchored Chat
+      ↓
+Plan / Task / Apply
+      ↓
+Runtime Events
+      ↓
+Memory / Model / Plan Update
+      ↓
+Detector Rerun
+      ↓
+Live Graph Reprojection
+```
+
+Quality includes product clarity, domain modeling correctness, specification completeness, architecture boundary health, code structure, task dependency health, Agent construction discipline, memory consistency and projection consistency.
+
+The user should be able to click a warning on an architecture edge, UML class, Gantt task, trace node or memory node and enter a scoped chat that explains the anti-pattern, shows evidence, proposes a plan and generates a controlled improvement task.
+
+---
+
+## Opinionated Governance Playbooks
+
+Praxis must not stop at reporting anti-patterns.
+
+Most users should not be forced to make raw architecture, modeling or distinction decisions from a blank page. Praxis provides professional, opinionated and explainable governance defaults.
+
+```text
+Anti-pattern Detection
+      ↓
+Governance Playbook Selection
+      ↓
+Recommended Remediation
+      ↓
+User Intervention Points
+      ↓
+Controlled Plan / Task
+      ↓
+Agent Construction
+      ↓
+Verification / Detector Rerun
+      ↓
+Memory / Model / Graph Update
+```
+
+Praxis recommendations must be explainable through architecture taste principles, distinction decision rules, evidence and playbook steps.
+
+The user should normally confirm semantics, naming, priority, risk acceptance, remediation strength and scope expansion. The user should not have to invent the architecture boundary, task split or remediation strategy from scratch.
+
+Every remediation should produce one recommended path. Alternatives may be shown, but they must not be presented as equal when one path is professionally preferable.
+
+v0.1 defaults to conservative governance: record memory, clarify models/specs, generate plan actions and controlled tasks, but do not automatically modify existing source code.
+
+Prompt templates are only procedure executors. They must call into the same taste principles, distinction rules and governance playbooks instead of scattering product logic inside UI components.
 
 ---
 
@@ -330,6 +510,7 @@ Model Call Trace
 │  ├─ candidates.jsonl
 │  ├─ confirmations.jsonl
 │  ├─ decisions.jsonl
+│  ├─ findings.jsonl
 │  ├─ incidents.jsonl
 │  ├─ traces.jsonl
 │  └─ do-not-repeat.jsonl
@@ -340,6 +521,7 @@ Model Call Trace
 │  ├─ interaction-model.json
 │  ├─ state-model.json
 │  ├─ architecture-model.json
+│  ├─ uml-model.json
 │  └─ plan-model.json
 │
 ├─ specs/
@@ -354,7 +536,8 @@ Model Call Trace
 │  │  ├─ c4-context.json
 │  │  ├─ c4-container.json
 │  │  ├─ component-view.json
-│  │  └─ dependency-view.json
+│  │  ├─ dependency-view.json
+│  │  └─ class-diagram.mmd
 │  │
 │  ├─ project-plan/
 │  │  ├─ task-graph.json
@@ -380,7 +563,13 @@ Model Call Trace
    ├─ architecture.md
    ├─ modeling.md
    ├─ boundaries.md
-   └─ ai-constraints.md
+   ├─ ai-constraints.md
+   └─ playbooks/
+      ├─ architecture/
+      ├─ domain/
+      ├─ specification/
+      ├─ planning/
+      └─ agent/
 ```
 
 Source of truth：
@@ -389,6 +578,7 @@ Source of truth：
 memory/*.jsonl
 models/*.json
 rules/*.md
+rules/playbooks/**/*.md
 confirmed specs
 ```
 
@@ -396,6 +586,7 @@ Derived / projection cache：
 
 ```text
 views/**/*.json
+views/**/*.mmd
 reports/*.md
 ```
 
@@ -428,6 +619,9 @@ Projection Agent
 
 Plan Agent
   从规格、模型和图谱生成任务依赖和施工计划。
+
+Governance Agent
+  从 finding、ContextPacket 和治理剧本生成有主张的默认修复路径、用户介入点和受控计划。
 
 Coding Task Agent
   把受控计划转成外部 coding agent 可执行的任务文件。

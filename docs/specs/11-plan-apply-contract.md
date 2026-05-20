@@ -32,6 +32,8 @@ update_spec_section
 create_graph_projection
 create_task
 create_coding_task
+select_governance_playbook
+recommend_remediation
 write_report
 ```
 
@@ -44,6 +46,7 @@ write_report
 4. Apply must not modify existing source code in v0.1.
 5. Apply must report all skipped actions.
 6. Apply must preserve source memory IDs.
+7. Apply must not convert a governance recommendation into confirmed memory without explicit approval.
 ```
 
 ## 5. Coding task generation

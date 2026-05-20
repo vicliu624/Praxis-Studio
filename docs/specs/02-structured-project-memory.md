@@ -68,6 +68,7 @@ export interface Evidence {
 .distinction/memory/candidates.jsonl
 .distinction/memory/confirmations.jsonl
 .distinction/memory/decisions.jsonl
+.distinction/memory/findings.jsonl
 .distinction/memory/incidents.jsonl
 .distinction/memory/traces.jsonl
 .distinction/memory/do-not-repeat.jsonl
@@ -82,10 +83,12 @@ Authoritative:
   memory/*.jsonl
   models/*.json
   rules/*.md
+  rules/playbooks/**/*.md
   confirmed specs
 
 Derived:
   views/**/*.json
+  views/**/*.mmd
   reports/*.md
 ```
 
@@ -107,3 +110,54 @@ Import verified external task result
 ## 7. Staleness rule
 
 If repository facts change, related inferences, candidates, projections and specs must be marked stale or regenerated.
+
+## 8. Patch rule
+
+AI-assisted code reading must write structured patches, not confirmed memory and not view cache.
+
+```text
+static_analysis
+  may produce FACT memory when evidence is deterministic
+
+agent_code_reading
+  may produce INFERENCE or CANDIDATE memory
+
+user_confirmation
+  may produce CONFIRMED memory
+```
+
+Patch-derived memory must preserve evidence and source paths.
+
+## 9. Finding memory rule
+
+Anti-pattern findings are memory records. They must preserve affected memory/model/spec/task/source/trace links and evidence.
+
+Rule-based detectors may produce FACT or high-confidence INFERENCE findings when evidence is deterministic.
+
+AI-assisted detectors may produce CANDIDATE or INFERENCE findings.
+
+Only user confirmation may produce CONFIRMED quality memory.
+
+## 10. Governance recommendation rule
+
+Governance playbooks and prompt procedures may recommend remediation, but recommendations are not confirmed memory by themselves.
+
+```text
+playbook-selected recommendation
+  writes trace and candidate plan actions
+
+user-approved remediation
+  may write confirmed decision memory or approved plan state
+
+user-overridden recommendation
+  must record the override reason when provided
+```
+
+Praxis must preserve the difference between:
+
+```text
+professional default recommendation
+user-approved semantic decision
+approved construction task
+verified remediation result
+```

@@ -18,6 +18,9 @@ The roadmap is phased to avoid building a fragile runtime giant too early.
 | Tool calls | Governed Praxis tools | Deferred tool discovery and dynamic tool loading |
 | Permission | Apply graph / memory / task approval | Tool exposure rules, command approval, policy profiles |
 | Context | Target-scoped graph and memory context | Auto compact, microcompact, memory prefetch, tool result budgets |
+| Graph anchor | ContextPacket from selected graph/task/trace anchor | Scope expansion policy and adaptive context budgets |
+| Code reading patches | AI/static analysis produces MemoryPatch / ModelPatch / PlanPatch | Incremental SymbolDiff and patch preview workflows |
+| Quality management | Findings from basic anti-pattern detectors and conservative playbook recommendations | Finding-anchored chat, detector rerun workflows and richer governance playbooks |
 | Recovery | Abort, terminal reason, clear failure messages | Fallback model, transcript resume, synthetic tool result recovery |
 | Subagents | Specification and task lifecycle only | Background agents, named teams, isolated workers |
 | External coding | Generate task and manual import | Worktree / remote worker execution with approval |
@@ -32,6 +35,10 @@ Required:
 
 ```text
 target-bound sessions
+graph-anchored ContextPacket
+patch proposal cards
+quality finding cards
+governance recommendation cards
 multi-turn transcript
 messages not overwritten
 visible working status
@@ -98,6 +105,15 @@ Required:
 
 ```text
 target context builder
+graph anchor resolver
+ContextPacket builder
+RepositoryUnderstandingPatch builder
+ModelPatch validator
+SymbolExtractor / SymbolDiff
+AntiPatternDetector runner
+Finding context builder
+GovernancePlaybook selector
+Prompt procedure registry
 session transcript summary
 recent message window
 relevant memory recall
@@ -111,12 +127,17 @@ Praxis-specific context must prioritize:
 
 ```text
 selected target
+selected graph anchor
 graph relationships
 progress and blocked reasons
 product specifications
 confirmed memory
 open questions
 task lineage
+linked source paths before repository-wide search
+patches before projection cache updates
+findings before graph annotations
+playbooks before remediation prompts
 ```
 
 ## 7. Phase 5: Task and External Worker Runtime
@@ -190,5 +211,6 @@ Those features are useful later only if the governed runtime foundation already 
 8. Failed run has a meaningful terminal reason.
 9. Source code is not automatically modified in v0.1.
 10. External coding agents are workers, never Praxis' memory authority.
+11. Quality findings can resolve to conservative governance recommendations.
+12. Prompt templates execute playbooks instead of bypassing runtime governance.
 ```
-

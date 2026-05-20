@@ -6,6 +6,8 @@ Project Plan views help users understand task order, dependencies, blockers, pro
 
 They are inspired by OmniPlan, Gantt charts and task dependency graphs.
 
+Project Plan views are generated from `PlanModel`. AI may propose plan patches, but must not directly edit Gantt or task graph view cache.
+
 ## 2. Plan nodes
 
 ```text
@@ -48,6 +50,10 @@ export interface PlanTask {
   blockedReason?: string;
   relatedArchitectureNodeIds: string[];
   sourceMemoryIds: string[];
+  relatedSpecPaths: string[];
+  relatedSourcePaths: string[];
+  forbiddenPaths: string[];
+  relatedTraceIds: string[];
 }
 ```
 
@@ -69,3 +75,52 @@ It must show:
 ## 6. Gantt rule
 
 Gantt is a projection of task dependencies and progress. It is not a separate source of truth.
+
+The source of truth is:
+
+```text
+PlanModel.tasks
+PlanModel.dependencies
+confirmed task progress memory
+runtime event evidence
+```
+
+## 7. Task Anchor Rule
+
+A task node in Project Plan View is a graph-anchored context entry point.
+
+Selecting a task must produce a `ContextPacket` with:
+
+```text
+task goal
+task status and progress
+dependencies
+blockers
+deliverables
+acceptance criteria
+source memory
+related specs
+related architecture nodes
+related source paths
+forbidden paths
+related traces
+```
+
+When a task becomes a coding task, this packet becomes the default construction scope.
+
+The Agent must not inspect unrelated files unless the anchored task context is insufficient and scope expansion is recorded.
+
+## 8. Progress Update Rule
+
+Agent or external worker results must not directly update confirmed task progress.
+
+```text
+TaskResultImported
+→ CANDIDATE task_progress_update memory
+→ user confirmation
+→ PlanModel progress update
+→ Gantt projection invalidation
+→ Gantt regeneration
+```
+
+Suggested progress from AI or external workers remains CANDIDATE until confirmed.

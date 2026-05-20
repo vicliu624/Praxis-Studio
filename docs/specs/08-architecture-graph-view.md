@@ -6,6 +6,8 @@ Architecture views help users understand code structure, architecture boundaries
 
 They are inspired by C4 Model, UML and dependency graphs.
 
+Architecture views are generated from `ArchitectureModel` and `UmlModel`. AI may propose model patches, but must not directly write architecture view cache.
+
 ## 2. Views
 
 ```text
@@ -23,6 +25,16 @@ Dependency View
 
 Symbol View
   Shows key types, interfaces, classes and functions when available.
+```
+
+Source models:
+
+```text
+C4 / component / dependency views
+  projected from ArchitectureModel
+
+Symbol / UML-like views
+  projected from UmlModel
 ```
 
 ## 3. Architecture nodes
@@ -91,3 +103,51 @@ related files
 related tasks
 related decisions
 ```
+
+Selecting an architecture node or dependency edge must also produce a graph-anchored `ContextPacket`.
+
+Architecture node context:
+
+```text
+component responsibility
+source memory
+related model elements
+related specs
+incoming dependencies
+outgoing dependencies
+affected interfaces
+related source paths
+related tasks
+related traces
+forbidden dependency rules
+```
+
+Dependency edge context:
+
+```text
+source component
+target component
+dependency evidence
+import / call / persistence source paths
+risk level
+boundary rule status
+related tasks
+related traces
+```
+
+The Agent must use this packet before searching the wider repository.
+
+## 7. Code Reading Update Rule
+
+When code reading or static analysis discovers architecture structure, it must update architecture views through patches:
+
+```text
+RepositoryUnderstandingPatch
+→ MemoryPatch
+→ ArchitectureModelPatch / UmlModelPatch
+→ patch validation
+→ projection invalidation
+→ architecture view regeneration
+```
+
+Static analysis may produce FACT dependencies, symbols, imports and exports. AI may produce INFERENCE or CANDIDATE responsibilities, boundaries and risks.

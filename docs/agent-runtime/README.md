@@ -13,7 +13,7 @@ The target is:
 ```text
 Claude Code-like runtime quality
 Praxis-native object model
-Development Graph-centered interaction
+Memory-first, graph-projected interaction
 Project Memory as the durable authority
 Controlled external coding agents as workers
 ```
@@ -28,7 +28,7 @@ user goal
   -> agent asks permission when needed
   -> user approves / rejects / modifies
   -> agent continues
-  -> graph, memory, tasks, traces and transcript stay inspectable
+  -> memory, graph projections, tasks, traces and transcript stay inspectable
 ```
 
 ## 2. Core Distinction
@@ -46,10 +46,13 @@ Agent Loop
   the repeated model/tool/permission/context cycle inside one run
 
 Tool Runtime
-  governed capabilities that can read, plan, write memory, write graph, generate tasks or call external workers
+  governed capabilities that can read, plan, write memory, invalidate projections, generate tasks or call external workers
 
 Project Memory
   durable knowledge produced from facts, inferences and user confirmations
+
+Graph Projection
+  derived live views over memory, models, specs, plans, tasks and trace
 
 Trace
   low-level execution audit record, not the chat itself
@@ -58,14 +61,14 @@ Trace
 Praxis does not copy Claude Code's product center. Claude Code is file, command, patch and test centered. Praxis is:
 
 ```text
-nodes
-edges
+memory events
+models
+specifications
+graph projection views
 plans
 tasks
-memory events
 project intake
-graph changes
-product specifications
+projection invalidation
 confirmed development knowledge
 ```
 
@@ -91,7 +94,25 @@ docs/AGENT_RUNTIME_SPEC.md
   earlier runtime notes and v0.1 boundary
 
 docs/DEVELOPMENT_GRAPH_SPEC.md
-  graph object model
+  earlier graph object model; superseded by memory-first graph projection rules where conflicts exist
+
+docs/specs/13-live-projection-loop.md
+  canonical live projection loop for agent construction
+
+docs/specs/14-graph-anchored-context.md
+  graph element to ContextPacket rules for scoped discussion and construction
+
+docs/specs/15-code-reading-to-model-patches.md
+  AI/static analysis patch pipeline for UML, architecture and Gantt projections
+
+docs/specs/16-anti-pattern-quality-management.md
+  finding memory, graph annotations and finding-anchored quality resolution
+
+docs/specs/17-opinionated-governance-playbooks.md
+  professional default remediation, user intervention points and playbook-backed governance
+
+docs/prompts/
+  prompt procedures that execute playbooks without scattering prompt logic in UI components
 
 docs/LOCAL_KNOWLEDGE_SPEC.md
   .distinction and project memory model
@@ -115,9 +136,15 @@ The Agent Runtime must enforce the repository principles:
 5. Agent produces CANDIDATE / INFERENCE.
 6. User confirmation produces CONFIRMED memory.
 7. External coding agents are workers.
-8. Praxis owns graph, memory, progress, trace and task intent.
+8. Praxis owns memory, models, graph projections, progress, trace and task intent.
 9. v0.1 does not automatically modify existing source code.
 10. Writes must go through Tool Registry and Trace Recorder.
+11. Graph projections are live views and must be updated or invalidated by runtime events.
+12. Graph nodes, edges, tasks and trace nodes are context anchors that produce bounded ContextPacket.
+13. Agent must use ContextPacket before expanding to wider repository search.
+14. AI must propose MemoryPatch / ModelPatch / PlanPatch rather than directly editing UML / architecture / Gantt view cache.
+15. Anti-pattern findings are structured memory and can become graph/chat anchors.
+16. Governance recommendations must be playbook-backed, opinionated, explainable and user-overridable.
 ```
 
 ## 5. Maturity Levels
@@ -164,9 +191,15 @@ trace and recovery
 The product center must remain Praxis:
 
 ```text
-Development Graph is the object world.
+Structured Memory is the source of truth.
+Graph Projections are live workspace views.
+Graph Anchors are semantic entry points.
+ContextPacket is bounded working context, not new truth.
+Patches are proposed changes, not confirmed truth.
+UML / C4 / Gantt are deterministic projections from models.
+Quality Findings are memory-backed annotations, not disposable UI warnings.
 Agent Chat is the interaction entrance.
 Tool / Plan / Apply / Task are events inside the session.
-Trace / Memory are durable sediment after the session.
+Runtime Events update memory or invalidate projections.
+Trace is durable audit and a source for trace views.
 ```
-

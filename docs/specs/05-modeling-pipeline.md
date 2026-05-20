@@ -15,6 +15,7 @@ Interaction Model
 State Model
 Architecture Model
 Plan Model
+UML Model
 ```
 
 ## 3. Product Model
@@ -102,7 +103,41 @@ acceptance_criteria
 progress
 ```
 
-## 9. Modeling quality gate
+## 9. UML Model
+
+Must define:
+
+```text
+packages
+classes
+interfaces
+types
+functions
+methods
+fields
+relations
+source paths
+source memory ids
+```
+
+UML Model is fed primarily by static symbol extraction and may be enriched by AI-generated candidate relations. UML diagrams are projections of this model.
+
+## 10. Patch-based modeling
+
+Models must be changed through validated patches.
+
+```text
+RepositoryUnderstandingPatch
+→ MemoryPatch
+→ ArchitectureModelPatch
+→ UmlModelPatch
+→ PlanModelPatch
+→ Projection invalidation
+```
+
+AI must not directly edit view cache. It may propose model patches with evidence.
+
+## 11. Modeling quality gate
 
 Praxis must not proceed to code skeleton if:
 

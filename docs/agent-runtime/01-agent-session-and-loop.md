@@ -19,7 +19,7 @@ old response overwritten by new response
 Required shape:
 
 ```text
-target-bound transcript
+graph-anchored or target-bound transcript
 multi-turn conversation
 streaming or staged run events
 tool timeline
@@ -61,7 +61,7 @@ The Studio UI is a client. It must not own the core agent semantics.
 
 ### AgentSession
 
-An `AgentSession` is a durable conversation bound to a target.
+An `AgentSession` is a durable conversation bound to a context anchor. The anchor may be a project, graph node, graph edge, selected subgraph, task, trace, memory record, model element or spec section.
 
 ```ts
 export interface AgentSession {
@@ -74,6 +74,8 @@ export interface AgentSession {
     | { type: "node"; id: string }
     | { type: "edge"; id: string }
     | { type: "subgraph"; nodeIds: string[]; edgeIds: string[] };
+  contextAnchor?: ContextAnchor;
+  contextPacketId?: string;
 
   mode: "explain" | "plan" | "apply" | "task";
   modelRoute?: string;
@@ -123,12 +125,14 @@ Praxis must treat a model response as one phase of a loop, not the whole run.
 
 ```text
 while run is active:
-  prepare target-scoped context
+  prepare graph-anchored ContextPacket
+  use anchored context before repository search
   call model with current messages, tools and policy
   stream / collect assistant blocks
   detect tool calls
   execute allowed tools
   append tool results to context
+  record scope expansion when needed
   request permission when needed
   continue until no tool calls, failure, max turns or user abort
 ```
@@ -144,6 +148,7 @@ permission pause and resume
 user abort
 max turns
 context compaction
+scope expansion trace
 trace recording
 terminal reason
 ```
@@ -205,7 +210,10 @@ The Agent Session panel consists of:
 
 ```text
 Target Context Bar
-  selected target, status, progress, risk and session metadata
+  selected anchor, scope, status, progress, risk and session metadata
+
+Context Scope
+  memory, models, specs, source paths, tasks, traces and expansion controls
 
 Transcript
   user messages
@@ -250,13 +258,23 @@ import_result must never mark memory confirmed without user confirmation
 
 Later versions may let the model classify intent, but the decision must be traceable.
 
-## 9. Acceptance Criteria
+## 9. System Prompt Invariant
+
+Every graph-anchored agent run must include this instruction, expressed in the active prompt language:
+
+```text
+You are operating inside a graph-anchored context. Use the provided ContextPacket first. Do not search the wider repository unless the packet is insufficient. If you expand scope, explain why and record the expansion.
+```
+
+This instruction is not a UI hint. It is a runtime rule for context cost, traceability and safer construction.
+
+## 10. Acceptance Criteria
 
 The Agent Session layer is acceptable when:
 
 ```text
 1. Messages are not overwritten.
-2. A selected node / edge / subgraph gets a durable target-bound session.
+2. A selected graph node / edge / task / trace / subgraph gets a durable graph-anchored session.
 3. Explain / Plan / Task appear as transcript events.
 4. Tool calls are visible in the transcript or trace timeline.
 5. Permission prompts pause the run and show affected objects.
@@ -265,5 +283,6 @@ The Agent Session layer is acceptable when:
 8. Failed runs explain where the runtime stopped.
 9. Chat writes to .distinction/chat.
 10. Trace writes to .distinction/memory/traces.jsonl or .distinction/runs.
+11. Agent starts from ContextPacket before repository search.
+12. Scope expansion is explicit and traceable.
 ```
-

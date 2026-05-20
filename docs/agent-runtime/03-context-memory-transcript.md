@@ -21,6 +21,9 @@ Memory
 
 Context
   the selected subset prepared for the next model call
+
+ContextPacket
+  bounded structured context generated from a graph anchor or target
 ```
 
 These are related but not interchangeable.
@@ -104,15 +107,16 @@ Do not dump raw trace events into chat as if they were conversation.
 Each turn should build context through a staged pipeline.
 
 ```text
-1. Resolve selected target.
-2. Load session transcript summary and recent messages.
-3. Load graph context for target.
-4. Load relevant memory and decisions.
-5. Load relevant prior tool results.
-6. Apply current mode and permission policy.
-7. Apply token budget.
-8. Compact or summarize if needed.
-9. Produce model-ready messages and tool list.
+1. Resolve selected context anchor.
+2. Build ContextPacket from source memory, models, specs, tasks, traces and source paths.
+3. Load session transcript summary and recent messages.
+4. Load graph projection metadata for anchor.
+5. Load relevant memory and decisions.
+6. Load relevant prior tool results.
+7. Apply current mode, expansion level and permission policy.
+8. Apply token budget.
+9. Compact or summarize if needed.
+10. Produce model-ready messages and tool list.
 ```
 
 ## 5. Target Context
@@ -128,6 +132,46 @@ export interface ProjectAgentContext {
   openQuestions: string[];
   relevantTasks: string[];
 }
+```
+
+### ContextPacket
+
+`ContextPacket` is the preferred context object for graph-anchored discussion.
+
+```ts
+export interface AgentContextPacket {
+  id: string;
+  anchor:
+    | { type: "project" }
+    | { type: "memory"; id: string }
+    | { type: "model"; id: string }
+    | { type: "spec"; path: string; sectionId?: string }
+    | { type: "graph_node"; viewId: string; id: string }
+    | { type: "graph_edge"; viewId: string; id: string }
+    | { type: "task"; id: string }
+    | { type: "trace"; id: string };
+  expansionLevel: "anchor_only" | "one_hop" | "subgraph" | "repository_search";
+  sourceMemoryIds: string[];
+  relatedMemoryIds: string[];
+  modelElementIds: string[];
+  specPaths: string[];
+  taskIds: string[];
+  graphViewIds: string[];
+  sourcePaths: string[];
+  forbiddenPaths: string[];
+  traceIds: string[];
+  generatedAt: string;
+}
+```
+
+Rules:
+
+```text
+1. ContextPacket must be used before repository-wide search.
+2. Confirmed memory outranks inference and candidate memory.
+3. Linked source paths outrank broad file discovery.
+4. Scope expansion must be recorded when the packet is insufficient.
+5. New relevant discoveries should become CANDIDATE memory.
 ```
 
 ### Node Context
@@ -227,12 +271,13 @@ Memory recall should be target-scoped first.
 Priority:
 
 ```text
-1. confirmed decisions about selected target
-2. open risks and blockers on selected target
-3. recent related plan actions
-4. related source scan facts
-5. related prior chat summaries
-6. broader project principles
+1. confirmed decisions about selected anchor
+2. source memory behind selected graph element
+3. open risks and blockers on selected anchor
+4. related plan actions and tasks
+5. related source scan facts and linked source paths
+6. related prior chat summaries and trace events
+7. broader project principles
 ```
 
 Memory recall must distinguish evidence from interpretation.
@@ -246,5 +291,6 @@ Memory recall must distinguish evidence from interpretation.
 4. Prompt-too-long errors trigger compaction or a clear terminal reason.
 5. Reloading the project restores target-bound sessions.
 6. The user can inspect why a plan or explanation was produced.
+7. Graph-anchored ContextPacket limits source search before expansion.
+8. Scope expansion is traceable.
 ```
-
