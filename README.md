@@ -373,9 +373,9 @@ External coding agents own:
 ├─ reports/
 │  ├─ project-intake.md
 │  └─ graph-plan.md
-│
-└─ models.yaml
 ```
+
+DeepSeek API keys and model route overrides are IDE settings stored outside the project, under the Praxis Studio app settings directory. They must not be written into `.distinction`.
 
 ---
 

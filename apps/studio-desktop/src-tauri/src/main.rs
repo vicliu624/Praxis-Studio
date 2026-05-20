@@ -391,6 +391,49 @@ fn civil_from_days(days_since_epoch: i64) -> (i64, u32, u32) {
     (year, month as u32, day as u32)
 }
 
+
+#[tauri::command]
+fn cancel_agent_run(project_root: String) -> Result<String, String> {
+    let cancel_path = std::path::Path::new(&project_root).join(".distinction").join(".cancel-agent-run");
+    std::fs::write(&cancel_path, "cancel").map_err(|e| e.to_string())?;
+    Ok("{\"ok\":true}".to_string())
+}
+
+
+
+#[tauri::command]
+fn respond_to_permission(project_root: String, permission_id: String, approval: String) -> Result<String, String> {
+    let response_path = std::path::Path::new(&project_root)
+        .join(".distinction")
+        .join(format!(".perm-{}.json", permission_id));
+    let status = if approval == "approve" { "approved" } else { "rejected" };
+    let response = format!("{{\"status\":\"{}\",\"permId\":\"{}\"}}", status, permission_id);
+    std::fs::write(&response_path, response).map_err(|e| e.to_string())?;
+    Ok("{\"ok\":true}".to_string())
+}
+
+
+#[tauri::command]
+fn run_runtime_command_async(app: tauri::AppHandle, command: String, args: Vec<String>) -> Result<String, String> {
+    let (cli_path, runtime_cwd) = locate_runtime_cli(&app)?;
+    if !cli_path.exists() {
+        return Err(format!("runtime-cli not built at {}", cli_path.display()));
+    }
+    let mut process = std::process::Command::new("node");
+    process.arg(&cli_path).arg(&command).args(&args).current_dir(&runtime_cwd);
+    if let Some(settings_json) = read_app_model_settings_content() {
+        process.env("PRAXIS_MODEL_SETTINGS_JSON", &settings_json);
+        if let Some(api_key) = deepseek_api_key_from_settings(&settings_json) {
+            process.env("DEEPSEEK_API_KEY", api_key);
+        }
+    }
+    // Spawn without waiting — returns immediately
+    let child = process.spawn().map_err(|e| e.to_string())?;
+    let pid = child.id();
+    // Detach so the child runs independently
+    Ok(format!("{{\"ok\":true,\"pid\":{}}}", pid))
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -410,7 +453,10 @@ fn main() {
             read_recent_projects,
             write_recent_project,
             read_app_model_settings,
-            write_app_model_settings
+            write_app_model_settings,
+            cancel_agent_run,
+            respond_to_permission,
+            run_runtime_command_async
         ])
         .run(tauri::generate_context!())
         .expect("error while running Praxis Studio");

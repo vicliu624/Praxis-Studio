@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { scanRepository } from "@praxis/repository-scanner";
 import { profileProject } from "@praxis/project-profiler";
@@ -43,6 +43,9 @@ import { isGraphPlan, type GraphPlan, type PlanAction } from "@praxis/plan-model
 import { loadModelConfig, resolveModelRoute } from "@praxis/model-router";
 import { createProvider } from "@praxis/provider-deepseek";
 import { getPrompt } from "@praxis/prompt-registry";
+import { AgentLoop, persistRun, type AgentConversationMessage, type AgentRun, type AgentStep } from "@praxis/agent-loop";
+import { ToolRegistry } from "@praxis/tool-registry";
+import { registerAgentTools } from "@praxis/agent-loop/tools";
 
 type Args = Record<string, string | boolean>;
 
@@ -73,6 +76,7 @@ async function main(argv: string[]): Promise<void> {
     if (command === "chat-session-list") return await commandChatSessionList(args);
     if (command === "chat-session-read") return await commandChatSessionRead(args);
     if (command === "chat-send") return await commandChatSend(args);
+    if (command === "agent-run") return await commandAgentRun(args);
     if (command === "generate-task") return await commandGenerateTask(args);
     if (command === "apply-plan") return await commandApplyPlan(args);
     if (command === "import-task-result") return await commandImportTaskResult(args);
@@ -142,6 +146,176 @@ async function commandChat(args: Args): Promise<void> {
   outputJson(result);
 }
 
+async function commandAgentRun(args: Args): Promise<void> {
+  console.error("[agent-run] Starting agent run...");
+  const projectRoot = required(args, "project-root");
+  const graph = await readDevelopmentGraph(projectRoot);
+  const target = chatTargetFromArgs(args);
+  const instruction = String(args.instruction ?? args.message ?? "Explain the selected target.");
+  const mode = (args.mode === "plan" ? "plan" : "explain") as "explain" | "plan";
+  const requestedSessionId = typeof args.session === "string" ? args.session : undefined;
+  const existingSession = requestedSessionId ? await readSession(projectRoot, requestedSessionId) : undefined;
+  const session = existingSession ?? await createSessionForTarget(projectRoot, target, {
+    title: sessionTitleForTarget(graph, target),
+    mode: chatModeFromArgs(args)
+  });
+
+  const priorMessages = await readMessages(projectRoot, session.id);
+
+  // Save user message to session first (so it appears in transcript)
+  await appendMessage(projectRoot, {
+    sessionId: session.id,
+    role: "user",
+    content: instruction
+  });
+
+  const registry = new ToolRegistry();
+  registerAgentTools(registry);
+  console.error(`[agent-run] Session ${session.id}, mode=${mode}, instruction="${instruction.slice(0,60)}"`);
+
+  const loop = new AgentLoop();
+  console.error("[agent-run] Starting agent loop...");
+  const result = await loop.run({
+    projectRoot,
+    sessionId: session.id,
+    target: selectionTargetFromChatTarget(graph, target),
+    mode,
+    instruction,
+    graph,
+    registry,
+    conversationHistory: chatHistoryForAgent(priorMessages),
+    maxToolCalls: mode === "explain" ? 18 : 24,
+    onStep: async (step: AgentStep) => {
+      if (step.kind === "tool_call") {
+        await appendMessage(projectRoot, {
+          sessionId: session.id,
+          role: "tool",
+          content: `[${step.toolStatus}] ${step.toolName}: ${step.toolInputSummary ?? ""}`,
+          toolCall: {
+            id: step.id,
+            name: step.toolName ?? "unknown",
+            status: (step.toolStatus as "pending" | "running" | "success" | "failed") ?? "running",
+            inputSummary: step.toolInputSummary ?? "",
+            outputSummary: step.toolOutputSummary,
+            riskLevel: step.toolRiskLevel ?? "read"
+          }
+        });
+      } else if (step.kind === "tool_result") {
+        await appendMessage(projectRoot, {
+          sessionId: session.id,
+          role: "tool",
+          content: `[${step.toolStatus}] ${step.toolName}: ${step.toolOutputSummary ?? ""}`,
+          toolCall: {
+            id: step.toolCallId ?? step.id,
+            name: step.toolName ?? "unknown",
+            status: (step.toolStatus as "pending" | "running" | "success" | "failed") ?? "success",
+            inputSummary: "",
+            outputSummary: step.toolOutputSummary,
+            riskLevel: step.toolRiskLevel ?? "read"
+          }
+        });
+      } else if (step.kind === "model_response" && step.reasoningContent) {
+        await appendMessage(projectRoot, {
+          sessionId: session.id,
+          role: "system",
+          content: `Reasoning: ${step.reasoningContent?.slice(0, 2000) ?? ""}`,
+          structured: { reasoning: { content: step.reasoningContent, durationMs: step.reasoningDurationMs } }
+        });
+      } else if (step.kind === "context_compaction") {
+        await appendMessage(projectRoot, {
+          sessionId: session.id,
+          role: "system",
+          content: step.transitionReason === "reactive_compact_retry"
+            ? "Context was compacted after a prompt-too-long error; the agent is retrying with a summarized history."
+            : "Older conversation history was compacted into a summary for this agent run.",
+          structured: {
+            compaction: {
+              reason: step.transitionReason,
+              compactedMessageCount: step.compactedMessageCount,
+              compactedChars: step.compactedChars,
+              summary: step.compactSummary
+            }
+          }
+        });
+      } else if (step.kind === "error") {
+        await appendMessage(projectRoot, {
+          sessionId: session.id,
+          role: "error",
+          content: step.errorMessage ?? "Agent run failed.",
+          status: "failed"
+        });
+      } else if (step.kind === "permission_request") {
+        await appendMessage(projectRoot, {
+          sessionId: session.id,
+          role: "permission",
+          content: step.permissionDescription ?? "Permission required.",
+          permissionRequest: {
+            id: step.permissionId ?? `perm-${Date.now()}`,
+            title: step.permissionTitle ?? "Permission Required",
+            description: step.permissionDescription ?? "",
+            actionType: (step.permissionActionType as PermissionRequestView["actionType"]) ?? "tool_call",
+            affectedPaths: step.permissionAffectedPaths ?? [],
+            affectedNodeIds: [],
+            affectedEdgeIds: [],
+            options: (step.permissionOptions as { id: "approve" | "reject" | "modify"; label: string }[]) ?? [
+              { id: "approve" as const, label: "Approve once" },
+              { id: "reject" as const, label: "Reject" }
+            ]
+          }
+        });
+      }
+    },
+    onPermissionRequired: async (step: AgentStep) => {
+      const decision = await waitForPermissionDecision(projectRoot, step.permissionId ?? "");
+      await appendMessage(projectRoot, {
+        sessionId: session.id,
+        role: "result",
+        content: decision === "approve"
+          ? `Permission approved: ${step.toolName ?? "tool"}`
+          : decision === "modify"
+            ? `Permission modification requested: ${step.toolName ?? "tool"}`
+            : `Permission rejected: ${step.toolName ?? "tool"}`,
+        structured: { permissionId: step.permissionId, decision, toolName: step.toolName }
+      });
+      return decision;
+    }
+  });
+
+  if (result.run.status === "completed") {
+    await appendMessage(projectRoot, {
+      sessionId: session.id,
+      role: "assistant",
+      content: result.finalMessage,
+      structured: result.finalStructured,
+      traceIds: result.run.steps.filter((s) => s.kind === "model_response").map((s) => s.id)
+    });
+  } else if (!result.run.steps.some((step) => step.kind === "error" && step.errorMessage === result.finalMessage)) {
+    await appendMessage(projectRoot, {
+      sessionId: session.id,
+      role: "error",
+      content: result.finalMessage,
+      status: result.run.status === "cancelled" ? "cancelled" : "failed",
+      structured: { runStatus: result.run.status }
+    });
+  }
+
+  console.error(`[agent-run] Run completed: status=${result.run.status}, steps=${result.run.steps.length}`);
+  const runPath = await persistRun(projectRoot, result.run);
+
+  outputJson({
+    ok: true,
+    sessionId: session.id,
+    runId: result.run.id,
+    runPath,
+    runStatus: result.run.status,
+    terminalReason: result.terminalReason,
+    transitions: result.run.transitions,
+    stepCount: result.run.steps.length,
+    finalMessage: result.finalMessage,
+    finalStructured: result.finalStructured
+  });
+}
+
 async function commandChatSessionCreate(args: Args): Promise<void> {
   const projectRoot = required(args, "project-root");
   const graph = await readDevelopmentGraph(projectRoot);
@@ -151,6 +325,60 @@ async function commandChatSessionCreate(args: Args): Promise<void> {
     mode: chatModeFromArgs(args)
   });
   outputJson({ ok: true, session, messages: await readMessages(projectRoot, session.id) });
+}
+
+async function waitForPermissionDecision(projectRoot: string, permissionId: string): Promise<"approve" | "reject" | "modify"> {
+  if (!permissionId) return "reject";
+  const responsePath = path.join(projectRoot, ".distinction", `.perm-${permissionId}.json`);
+  const startedAt = Date.now();
+  const timeoutMs = 60 * 60 * 1000;
+  while (Date.now() - startedAt < timeoutMs) {
+    try {
+      const raw = await readFile(responsePath, "utf8");
+      await rm(responsePath, { force: true });
+      const parsed = JSON.parse(raw) as { status?: string; approval?: string };
+      const value = String(parsed.approval ?? parsed.status ?? "").toLowerCase();
+      if (value === "approved" || value === "approve") return "approve";
+      if (value === "modify") return "modify";
+      return "reject";
+    } catch {
+      await sleep(500);
+    }
+  }
+  throw new Error(`Permission request timed out: ${permissionId}`);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function chatHistoryForAgent(messages: ChatMessage[]): AgentConversationMessage[] {
+  return messages
+    .map((message) => ({
+      role: message.role,
+      content: chatHistoryContent(message)
+    }))
+    .filter((message) => message.content.trim().length > 0);
+}
+
+function chatHistoryContent(message: ChatMessage): string {
+  const sections = [message.content];
+  if (message.toolCall) {
+    sections.push(`Tool ${message.toolCall.name} ${message.toolCall.status}: ${message.toolCall.outputSummary ?? message.toolCall.inputSummary}`);
+  }
+  if (message.permissionRequest) {
+    sections.push(`Permission ${message.permissionRequest.id}: ${message.permissionRequest.actionType} (${message.permissionRequest.title})`);
+  }
+  if (message.plan) {
+    sections.push([
+      `Plan ${message.plan.id}: ${message.plan.summary}`,
+      ...message.plan.actions.map((action) => `- ${action.id}: ${action.title}`)
+    ].join("\n"));
+  }
+  if (message.task) {
+    sections.push(`Coding task ${message.task.id}: ${message.task.title}`);
+  }
+  return sections.filter(Boolean).join("\n\n");
 }
 
 async function commandChatSessionList(args: Args): Promise<void> {

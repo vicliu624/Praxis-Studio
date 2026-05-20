@@ -1,0 +1,20 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "src"
+  },
+  "include": ["src"],
+  "references": [
+    { "path": "../core" },
+    { "path": "../tool-registry" },
+    { "path": "../model-router" },
+    { "path": "../provider-deepseek" },
+    { "path": "../prompt-registry" },
+    { "path": "../context-builder" },
+    { "path": "../development-graph" },
+    { "path": "../local-knowledge" },
+    { "path": "../trace-recorder" },
+    { "path": "../plan-model" }
+  ]
+}

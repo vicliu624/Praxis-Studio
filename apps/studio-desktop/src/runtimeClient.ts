@@ -52,6 +52,59 @@ export interface RuntimeEdge {
   knowledgeKind: string;
 }
 
+
+// ─── Agent Run Types ─────────────────────────────────────────
+
+export interface RuntimeAgentStep {
+  id: string;
+  runId: string;
+  sequence: number;
+  timestamp: string;
+  kind: "tool_call" | "tool_result" | "permission_request" | "context_compaction" | "patch_preview" | "command_result" | "model_response" | "error";
+  toolName?: string;
+  toolInput?: unknown;
+  toolOutput?: unknown;
+  toolRiskLevel?: string;
+  toolStatus?: "pending" | "running" | "success" | "failed";
+  toolInputSummary?: string;
+  toolOutputSummary?: string;
+  toolCallId?: string;
+  permissionId?: string;
+  permissionTitle?: string;
+  permissionDescription?: string;
+  permissionActionType?: string;
+  permissionAffectedPaths?: string[];
+  permissionOptions?: { id: string; label: string }[];
+  patchFilePath?: string;
+  patchDiff?: string;
+  commandLine?: string;
+  commandStdout?: string;
+  commandStderr?: string;
+  commandExitCode?: number;
+  reasoningContent?: string;
+  reasoningDurationMs?: number;
+  modelContent?: string;
+  modelStructured?: unknown;
+  errorMessage?: string;
+  transitionReason?: string;
+  compactedMessageCount?: number;
+  compactedChars?: number;
+  compactSummary?: string;
+}
+
+export interface RuntimeAgentRunResult {
+  ok: boolean;
+  sessionId: string;
+  runId: string;
+  runPath: string;
+  runStatus: "running" | "waiting_for_permission" | "completed" | "failed" | "cancelled";
+  terminalReason?: string;
+  transitions?: Array<{ reason: string; timestamp: string; detail?: string }>;
+  stepCount: number;
+  finalMessage: string;
+  finalStructured?: unknown;
+}
+
 export interface RuntimeChatResult {
   traceId: string;
   mode: "explain" | "plan";
@@ -114,7 +167,20 @@ export interface RuntimePermissionRequestView {
   id: string;
   title: string;
   description: string;
-  actionType: "apply_plan" | "write_memory" | "write_graph" | "generate_task" | "import_task_result" | "run_external_agent";
+  actionType:
+    | "apply_plan"
+    | "tool_call"
+    | "read"
+    | "plan"
+    | "write_memory"
+    | "write_docs"
+    | "write_source"
+    | "shell"
+    | "network"
+    | "write_graph"
+    | "generate_task"
+    | "import_task_result"
+    | "run_external_agent";
   affectedPaths: string[];
   affectedNodeIds: string[];
   affectedEdgeIds: string[];
@@ -153,6 +219,7 @@ export interface RuntimeChatMessage {
   createdAt: string;
   content: string;
   status?: "streaming" | "done" | "failed" | "cancelled";
+  reasoning?: { content: string; durationMs?: number };
   structured?: unknown;
   toolCall?: RuntimeToolCallView;
   permissionRequest?: RuntimePermissionRequestView;
@@ -213,6 +280,11 @@ export const defaultModelSettings: ModelSettings = {
 
 const modelSettingsStorageKey = "praxis-studio:model-settings";
 
+
+export async function runRuntimeCommandAsync(command: string, args: string[]): Promise<string> {
+  return invoke<string>("run_runtime_command_async", { command, args });
+}
+
 export async function runRuntimeCommand(command: string, args: string[]): Promise<string> {
   return invoke<string>("run_runtime_command", { command, args });
 }
@@ -244,6 +316,117 @@ export async function acceptGraph(root: string, candidate: RuntimeIntakeResult["
 export async function runChat(root: string, targetId: string, mode: "explain" | "plan", instruction: string): Promise<RuntimeChatResult> {
   const stdout = await runRuntimeCommand("chat", ["--project-root", root, "--target", targetId, "--mode", mode, "--instruction", instruction]);
   return JSON.parse(stdout) as RuntimeChatResult;
+}
+
+
+
+
+export async function respondToPermission(root: string, permissionId: string, approval: "approve" | "reject"): Promise<void> {
+  await invoke("respond_to_permission", { projectRoot: root, permissionId, approval });
+}
+
+export async function cancelAgentRun(root: string): Promise<void> {
+  await invoke("cancel_agent_run", { projectRoot: root });
+}
+
+
+export async function startAgentRunAsync(
+  root: string,
+  target: RuntimeChatTarget,
+  mode: "explain" | "plan",
+  instruction: string,
+  sessionId: string,
+  onMessages: (messages: RuntimeChatMessage[]) => void,
+  signal?: AbortSignal
+): Promise<RuntimeAgentRunResult> {
+  const args = ["--project-root", root, "--session", sessionId, "--mode", mode, "--instruction", instruction, ...chatTargetArgs(target)];
+  
+  // Start agent in background
+  const spawnResult = JSON.parse(await runRuntimeCommandAsync("agent-run", args));
+  
+  // Poll for messages until done
+  let attempts = 0;
+  const maxAttempts = 3600; // 60 minutes at 1s intervals; permission waits can be long.
+  
+  while (attempts < maxAttempts) {
+    if (signal?.aborted) {
+      await cancelAgentRun(root);
+      return { ok: false, sessionId, runId: "", runPath: "", runStatus: "cancelled", stepCount: 0, finalMessage: "Cancelled" };
+    }
+    
+    await new Promise(r => setTimeout(r, 1000)); // Poll every 1 second
+    
+    try {
+      const transcript = await readChatSession(root, sessionId);
+      onMessages(transcript.messages);
+      
+      // Check if agent finished: look for a completed/failed run result file
+      // Or check if the last assistant message is from this run
+      const lastMsg = transcript.messages[transcript.messages.length - 1];
+      if (lastMsg && lastMsg.role === "assistant" && lastMsg.status !== "streaming") {
+        // Try reading the run result from .distinction/runs/
+        try {
+          const runsResult = await runRuntimeCommand("chat-session-read", ["--project-root", root, "--session", sessionId]);
+          const runsData = JSON.parse(runsResult);
+          if (runsData.ok) {
+            return {
+              ok: true,
+              sessionId,
+              runId: spawnResult.runId || "",
+              runPath: spawnResult.runPath || "",
+              runStatus: "completed",
+              stepCount: 0,
+              finalMessage: lastMsg.content
+            };
+          }
+        } catch {}
+      }
+      
+      // Check for error messages
+      if (lastMsg && lastMsg.role === "error") {
+        return {
+          ok: false,
+          sessionId,
+          runId: spawnResult.runId || "",
+          runPath: "",
+          runStatus: "failed",
+          stepCount: 0,
+          finalMessage: lastMsg.content
+        };
+      }
+    } catch {
+      // Session might not be ready yet, continue polling
+    }
+    
+    attempts++;
+  }
+  
+  return {
+    ok: false,
+    sessionId,
+    runId: "",
+    runPath: "",
+    runStatus: "failed",
+    stepCount: 0,
+    finalMessage: "Agent run timed out after 60 minutes."
+  };
+}
+
+export async function startAgentRun(
+  root: string,
+  target: RuntimeChatTarget,
+  mode: "explain" | "plan",
+  instruction: string,
+  sessionId: string
+): Promise<RuntimeAgentRunResult> {
+  const args = ["--project-root", root, "--session", sessionId, "--mode", mode, "--instruction", instruction, ...chatTargetArgs(target)];
+  // Async spawn: process starts in background, returns immediately with { ok: true, pid: ... }
+  await runRuntimeCommandAsync("agent-run", args);
+  // Agent runs independently — frontend polls readChatSession for results
+  return {
+    ok: true, sessionId, runId: "", runPath: "",
+    runStatus: "running", stepCount: 0, finalMessage: ""
+  };
 }
 
 export async function createChatSession(root: string, target: RuntimeChatTarget): Promise<RuntimeChatTranscriptResult> {
@@ -417,6 +600,7 @@ export async function readAppModelSettings(): Promise<Partial<ModelSettings> | n
     const legacySettings = readLocalModelSettings();
     if (legacySettings) {
       await invoke<void>("write_app_model_settings", { settingsJson: JSON.stringify(legacySettings) });
+      window.localStorage.removeItem(modelSettingsStorageKey);
       return legacySettings;
     }
     return settings;
@@ -426,10 +610,12 @@ export async function readAppModelSettings(): Promise<Partial<ModelSettings> | n
 
 export async function saveAppModelSettings(settings: ModelSettings): Promise<void> {
   const content = JSON.stringify(settings);
-  window.localStorage.setItem(modelSettingsStorageKey, content);
   if (hasTauriRuntime()) {
     await invoke<void>("write_app_model_settings", { settingsJson: content });
+    window.localStorage.removeItem(modelSettingsStorageKey);
+    return;
   }
+  window.localStorage.setItem(modelSettingsStorageKey, content);
 }
 
 function hasTauriRuntime(): boolean {

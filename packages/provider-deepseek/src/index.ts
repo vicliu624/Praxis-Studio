@@ -1,20 +1,47 @@
 import type { ModelRoute } from "@praxis/model-router";
 
 export interface ChatMessage {
-  role: "system" | "user" | "assistant";
-  content: string;
+  role: "system" | "user" | "assistant" | "tool";
+  content: string | null;
+  reasoning_content?: string;
+  name?: string;
+  tool_call_id?: string;
+  tool_calls?: OpenAIToolCall[];
+}
+
+export interface OpenAIToolDef {
+  type: "function";
+  function: {
+    name: string;
+    description: string;
+    parameters: Record<string, unknown>;
+  };
+}
+
+export interface OpenAIToolCall {
+  id: string;
+  type: "function";
+  function: {
+    name: string;
+    arguments: string;
+  };
 }
 
 export interface ModelCallRequest {
   route: ModelRoute;
   messages: ChatMessage[];
   responseFormat?: "json" | "text";
+  tools?: OpenAIToolDef[];
+  toolChoice?: "auto" | "none" | { type: "function"; function: { name: string } };
+  signal?: AbortSignal;
 }
 
 export interface ModelCallResponse {
   provider: string;
   model: string;
   content: string;
+  reasoningContent?: string;
+  toolCalls?: OpenAIToolCall[];
   usage?: Record<string, unknown>;
 }
 
@@ -45,7 +72,16 @@ export class DeepSeekProvider implements ModelProvider {
 
     const baseUrl = this.options.baseUrl ?? "https://api.deepseek.com";
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), request.route.timeoutMs ?? this.options.timeoutMs ?? 60_000);
+    const timeoutMs = request.route.timeoutMs ?? this.options.timeoutMs ?? 180_000;
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    let abortedByCaller = false;
+    const abortFromCaller = () => {
+      abortedByCaller = true;
+      controller.abort(request.signal?.reason);
+    };
+
+    if (request.signal?.aborted) abortFromCaller();
+    else request.signal?.addEventListener("abort", abortFromCaller, { once: true });
 
     try {
       const response = await fetch(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
@@ -57,7 +93,9 @@ export class DeepSeekProvider implements ModelProvider {
         body: JSON.stringify({
           model: request.route.model,
           messages: request.messages,
-          response_format: request.responseFormat === "json" ? { type: "json_object" } : undefined
+          response_format: request.responseFormat === "json" ? { type: "json_object" } : undefined,
+          tools: request.tools?.length ? request.tools : undefined,
+          tool_choice: request.toolChoice ?? (request.tools?.length ? "auto" : undefined)
         }),
         signal: controller.signal
       });
@@ -68,16 +106,28 @@ export class DeepSeekProvider implements ModelProvider {
       }
 
       const data = (await response.json()) as {
-        choices?: { message?: { content?: string } }[];
+        choices?: { message?: { role?: string; content?: string | null; tool_calls?: OpenAIToolCall[] }; finish_reason?: string }[];
         usage?: Record<string, unknown>;
       };
+      const msg = data.choices?.[0]?.message as { role?: string; content?: string | null; reasoning_content?: string; tool_calls?: OpenAIToolCall[] };
       return {
         provider: this.name,
         model: request.route.model,
-        content: data.choices?.[0]?.message?.content ?? "",
+        content: msg?.content ?? "",
+        reasoningContent: msg?.reasoning_content,
+        toolCalls: msg?.tool_calls,
         usage: data.usage
       };
+    } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") {
+        if (abortedByCaller || request.signal?.aborted) {
+          throw new Error("DeepSeek request aborted.");
+        }
+        throw new Error(`DeepSeek request timed out after ${Math.round(timeoutMs / 1000)} seconds.`);
+      }
+      throw error;
     } finally {
+      request.signal?.removeEventListener("abort", abortFromCaller);
       clearTimeout(timeout);
     }
   }

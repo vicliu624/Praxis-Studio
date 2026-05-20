@@ -53,7 +53,20 @@ export interface PermissionRequestView {
   id: string;
   title: string;
   description: string;
-  actionType: "apply_plan" | "write_memory" | "write_graph" | "generate_task" | "import_task_result" | "run_external_agent";
+  actionType:
+    | "apply_plan"
+    | "tool_call"
+    | "read"
+    | "plan"
+    | "write_memory"
+    | "write_docs"
+    | "write_source"
+    | "shell"
+    | "network"
+    | "write_graph"
+    | "generate_task"
+    | "import_task_result"
+    | "run_external_agent";
   affectedPaths: string[];
   affectedNodeIds: string[];
   affectedEdgeIds: string[];
@@ -214,7 +227,9 @@ async function readSessionsIndex(projectRoot: string): Promise<ChatSessionsIndex
   await ensureChatStoreIfPresent(projectRoot);
   const paths = getChatSessionPaths(projectRoot);
   if (!(await exists(paths.sessionsIndexPath))) return { sessions: [], updatedAt: new Date().toISOString() };
-  const parsed = JSON.parse(await readFile(paths.sessionsIndexPath, "utf8")) as unknown;
+  const raw = await readFile(paths.sessionsIndexPath, "utf8");
+  if (!raw || !raw.trim()) return { sessions: [], updatedAt: new Date().toISOString() };
+  const parsed = JSON.parse(raw) as unknown;
   if (Array.isArray(parsed)) return { sessions: parsed as ChatSession[], updatedAt: new Date().toISOString() };
   if (isRecord(parsed) && Array.isArray(parsed.sessions)) {
     return {

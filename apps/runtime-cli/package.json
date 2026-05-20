@@ -14,6 +14,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@praxis/agent-loop": "0.1.0-alpha.0",
     "@praxis/agent-runtime": "0.1.0-alpha.0",
     "@praxis/chat-session": "0.1.0-alpha.0",
     "@praxis/coding-agent-adapter": "0.1.0-alpha.0",
@@ -28,6 +29,7 @@
     "@praxis/project-profiler": "0.1.0-alpha.0",
     "@praxis/project-wizard": "0.1.0-alpha.0",
     "@praxis/provider-deepseek": "0.1.0-alpha.0",
-    "@praxis/repository-scanner": "0.1.0-alpha.0"
+    "@praxis/repository-scanner": "0.1.0-alpha.0",
+    "@praxis/tool-registry": "0.1.0-alpha.0"
   }
 }

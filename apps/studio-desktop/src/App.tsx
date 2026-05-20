@@ -3,6 +3,7 @@ import { HomePage } from "./pages/HomePage";
 import { ProjectIntakeReviewPage } from "./pages/ProjectIntakeReviewPage";
 import { CreateProjectWizardPage } from "./pages/CreateProjectWizardPage";
 import { DevelopmentGraphWorkspacePage } from "./pages/DevelopmentGraphWorkspacePage";
+import { AgentWorkspacePage } from "./pages/AgentWorkspacePage";
 import { ModelSettingsPage } from "./pages/ModelSettingsPage";
 import { type AppRoute, routes } from "./routes";
 import { I18nProvider, type TranslationKey, useI18n } from "./i18n";
@@ -60,7 +61,7 @@ function AppContent() {
       const loadedGraph = await readGraph(root);
       setGraph(loadedGraph);
       setRecentProjects(await recordRecentProject(root).catch(() => recentProjects));
-      setRoute("graph-workspace");
+      setRoute("agent-workspace");
     } catch {
       setGraph(null);
       setAutoIntakeToken(Date.now());
@@ -72,7 +73,7 @@ function AppContent() {
     setProjectRoot(root);
     setGraph(acceptedGraph);
     setRecentProjects(await recordRecentProject(root).catch(() => recentProjects));
-    setRoute("graph-workspace");
+    setRoute("agent-workspace");
   }
 
   return (
@@ -106,38 +107,48 @@ function AppContent() {
         </label>
       </header>
 
-      {route === "home" ? (
-        <HomePage
-          onOpenExistingProject={openExistingProject}
-          onCreateNewProject={() => setRoute("create-project")}
-          onOpenGraphWorkspace={() => setRoute("graph-workspace")}
-          onOpenModelSettings={() => setRoute("model-settings")}
-          recentProjects={recentProjects}
-          onRefreshRecentProjects={refreshRecentProjects}
-          onOpenRecentProject={openRecentProject}
-        />
-      ) : null}
-      {route === "project-intake" ? (
-        <ProjectIntakeReviewPage
-          projectRoot={projectRoot}
-          intakeResult={intakeResult}
-          onProjectRootChange={setProjectRoot}
-          onIntakeResult={setIntakeResult}
-          autoIntakeToken={autoIntakeToken}
-          onGraphAccepted={(acceptedGraph) => {
-            void finishProjectOpen(projectRoot, acceptedGraph);
-          }}
-        />
-      ) : null}
-      {route === "create-project" ? (
-        <CreateProjectWizardPage
-          onProjectCreated={(root, createdGraph) => {
-            void finishProjectOpen(root, createdGraph);
-          }}
-        />
-      ) : null}
-      {route === "graph-workspace" ? <DevelopmentGraphWorkspacePage projectRoot={projectRoot} graph={graph} onGraphLoaded={setGraph} /> : null}
-      {route === "model-settings" ? <ModelSettingsPage projectRoot={projectRoot} /> : null}
+      <section className={route === "agent-workspace" ? "app-content app-content-fill" : "app-content app-content-scroll"}>
+        {route === "home" ? (
+          <HomePage
+            onOpenExistingProject={openExistingProject}
+            onCreateNewProject={() => setRoute("create-project")}
+            onOpenGraphWorkspace={() => setRoute("agent-workspace")}
+            onOpenModelSettings={() => setRoute("model-settings")}
+            recentProjects={recentProjects}
+            onRefreshRecentProjects={refreshRecentProjects}
+            onOpenRecentProject={openRecentProject}
+          />
+        ) : null}
+        {route === "project-intake" ? (
+          <ProjectIntakeReviewPage
+            projectRoot={projectRoot}
+            intakeResult={intakeResult}
+            onProjectRootChange={setProjectRoot}
+            onIntakeResult={setIntakeResult}
+            autoIntakeToken={autoIntakeToken}
+            onGraphAccepted={(acceptedGraph) => {
+              void finishProjectOpen(projectRoot, acceptedGraph);
+            }}
+          />
+        ) : null}
+        {route === "create-project" ? (
+          <CreateProjectWizardPage
+            onProjectCreated={(root, createdGraph) => {
+              void finishProjectOpen(root, createdGraph);
+            }}
+          />
+        ) : null}
+        {route === "agent-workspace" && projectRoot ? (
+          <AgentWorkspacePage
+            projectRoot={projectRoot}
+            onNavigateToGraph={() => setRoute("graph-workspace")}
+            onNavigateToSettings={() => setRoute("model-settings")}
+            onNavigateHome={() => setRoute("home")}
+          />
+        ) : null}
+        {route === "graph-workspace" ? <DevelopmentGraphWorkspacePage projectRoot={projectRoot} graph={graph} onGraphLoaded={setGraph} /> : null}
+        {route === "model-settings" ? <ModelSettingsPage projectRoot={projectRoot} /> : null}
+      </section>
     </main>
   );
 }
@@ -146,6 +157,7 @@ const routeLabelKeys: Record<AppRoute, TranslationKey> = {
   home: "route.home",
   "project-intake": "route.projectIntake",
   "create-project": "route.createProject",
+  "agent-workspace": "route.agentWorkspace",
   "graph-workspace": "route.graphWorkspace",
   "model-settings": "route.modelSettings"
 };

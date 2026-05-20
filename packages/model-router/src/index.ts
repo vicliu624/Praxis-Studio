@@ -1,6 +1,3 @@
-import { readFile } from "node:fs/promises";
-import path from "node:path";
-
 export type ModelTaskType =
   | "project.intake.analyze"
   | "project.create.requirements"
@@ -64,33 +61,8 @@ export function resolveModelRoute(config: ModelRouterConfig, taskType: ModelTask
   return route;
 }
 
-export async function loadModelConfig(projectRoot: string): Promise<ModelRouterConfig> {
-  const configPath = path.join(projectRoot, ".distinction", "models.yaml");
-  let config = defaultModelRouterConfig;
-  try {
-    const content = await readFile(configPath, "utf8");
-    config = parseSimpleModelsYaml(content, defaultModelRouterConfig);
-  } catch {
-    config = defaultModelRouterConfig;
-  }
-  return applyIdeModelSettings(config, process.env.PRAXIS_MODEL_SETTINGS_JSON);
-}
-
-function parseSimpleModelsYaml(content: string, fallback: ModelRouterConfig): ModelRouterConfig {
-  const defaultProvider = content.match(/^default_provider:\s*(\S+)/m)?.[1] ?? fallback.defaultProvider;
-  const baseUrl = content.match(/base_url:\s*(\S+)/m)?.[1] ?? fallback.providers.deepseek?.baseUrl;
-  return {
-    ...fallback,
-    defaultProvider,
-    providers: {
-      ...fallback.providers,
-      deepseek: {
-        type: "openai-compatible",
-        baseUrl,
-        apiKeyEnv: fallback.providers.deepseek?.apiKeyEnv
-      }
-    }
-  };
+export async function loadModelConfig(_projectRoot: string): Promise<ModelRouterConfig> {
+  return applyIdeModelSettings(defaultModelRouterConfig, process.env.PRAXIS_MODEL_SETTINGS_JSON);
 }
 
 function applyIdeModelSettings(config: ModelRouterConfig, settingsJson: string | undefined): ModelRouterConfig {

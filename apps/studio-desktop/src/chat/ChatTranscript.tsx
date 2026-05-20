@@ -27,16 +27,29 @@ export function ChatTranscript({
   onRejectPermission,
   onModifyPermission
 }: ChatTranscriptProps) {
+  const transcriptRef = useRef<HTMLElement | null>(null);
   const endRef = useRef<HTMLDivElement | null>(null);
+  const shouldStickToBottom = useRef(true);
 
   useEffect(() => {
-    endRef.current?.scrollIntoView({ block: "end" });
+    if (shouldStickToBottom.current) {
+      endRef.current?.scrollIntoView({ block: "end" });
+    }
   }, [messages.length]);
 
+  function handleScroll() {
+    const element = transcriptRef.current;
+    if (!element) return;
+    shouldStickToBottom.current = element.scrollHeight - element.scrollTop - element.clientHeight < 48;
+  }
+
+  const latestToolMessageIds = new Set(latestToolMessages(messages).map((message) => message.id));
+  const visibleMessages = messages.filter((message) => !message.toolCall || latestToolMessageIds.has(message.id));
+
   return (
-    <section className="chat-transcript" aria-live="polite">
-      {messages.length ? (
-        messages.map((message) => {
+    <section ref={transcriptRef} className="chat-transcript" aria-live="polite" onScroll={handleScroll}>
+      {visibleMessages.length ? (
+        visibleMessages.map((message) => {
           if (message.toolCall) return <ToolCallCard key={message.id} message={message} />;
           if (message.permissionRequest) {
             return (
@@ -75,4 +88,13 @@ export function ChatTranscript({
       <div ref={endRef} />
     </section>
   );
+}
+
+function latestToolMessages(messages: RuntimeChatMessage[]): RuntimeChatMessage[] {
+  const byToolCall = new Map<string, RuntimeChatMessage>();
+  for (const message of messages) {
+    if (!message.toolCall) continue;
+    byToolCall.set(message.toolCall.id, message);
+  }
+  return [...byToolCall.values()];
 }
