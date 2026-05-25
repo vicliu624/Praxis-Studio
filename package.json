@@ -20,9 +20,10 @@
     "dist:desktop": "npm run package:desktop",
     "test:schemas": "npm run test:roundtrip -w @praxis/schema",
     "test:fixtures": "npm run test:roundtrip -w @praxis/schema",
-    "smoke": "npm run smoke:self-intake && npm run smoke:native-projection",
+    "smoke": "npm run smoke:self-intake && npm run smoke:native-projection && npm run smoke:codegraph-provider",
     "smoke:self-intake": "node scripts/smoke-self-intake.mjs",
     "smoke:native-projection": "node scripts/smoke-native-intake-projection.mjs",
+    "smoke:codegraph-provider": "node scripts/smoke-codegraph-provider.mjs",
     "smoke:open-existing-project": "npm run build:packages && npm run build -w @praxis/runtime-cli && node scripts/smoke-open-existing-project.mjs"
   },
   "engines": { "node": ">=20" },

@@ -1,6 +1,7 @@
 import path from "node:path";
 import { createEvidence, slugify, type Confidence } from "@praxis/core";
 import { scanRepository, toRepositoryPath, type RepositorySnapshot, type SourceFileSummary } from "@praxis/repository-scanner";
+import { CodeGraphCodeFactGraphProvider } from "./providers/CodeGraphProvider.js";
 import type {
   CodeFactCapability,
   CodeFactEdge,
@@ -70,13 +71,19 @@ export async function buildCodeFactGraphSnapshot(
   root: string,
   options: CodeFactGraphBuildOptions & { provider?: CodeFactProviderSource } = {}
 ): Promise<CodeFactGraphSnapshot> {
-  if (options.provider && options.provider !== "native") {
-    throw new Error(`Code fact provider is not implemented yet: ${options.provider}`);
-  }
-  const provider = new NativeHeuristicCodeFactGraphProvider();
+  const providerSource = options.provider ?? "native";
+  const provider =
+    providerSource === "native"
+      ? new NativeHeuristicCodeFactGraphProvider()
+      : providerSource === "codegraph"
+        ? new CodeGraphCodeFactGraphProvider()
+        : undefined;
+  if (!provider) throw new Error(`Code fact provider is not implemented yet: ${providerSource}`);
   if (!(await provider.isAvailable(root))) throw new Error(`Code fact provider is unavailable: ${provider.name}`);
   return provider.buildSnapshot(root, options);
 }
+
+export { CodeGraphCodeFactGraphProvider };
 
 export function buildNativeCodeFactGraphSnapshot(snapshot: RepositorySnapshot, provider: CodeFactProviderInfo): CodeFactGraphSnapshot {
   const rootNode: CodeFactNode = {
