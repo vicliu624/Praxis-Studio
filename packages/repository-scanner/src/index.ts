@@ -86,11 +86,12 @@ const DEFAULT_IGNORE = [
   ".next",
   ".turbo",
   ".cache",
+  ".distinction",
   ".venv",
   "__pycache__"
 ];
 
-const ALLOWED_HIDDEN_DIRECTORIES = new Set([".github", ".distinction"]);
+const ALLOWED_HIDDEN_DIRECTORIES = new Set([".github"]);
 
 const MANIFESTS = new Set([
   "package.json",

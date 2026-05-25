@@ -86,6 +86,15 @@ Projection outputs may include:
 .distinction/cache/projection-manifest.json
 ```
 
+v0.1 first implementation starts with:
+
+```text
+.distinction/views/architecture/dependency-view.json
+.distinction/cache/projection-manifest.json
+```
+
+C4, UML, Gantt, memory and trace views remain later projections over the same manifest contract.
+
 ---
 
 ## 5. Projection Manifest

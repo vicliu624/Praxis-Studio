@@ -2,8 +2,9 @@
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { buildArchitectureModelPatch, type ArchitectureModelPatch } from "@praxis/architecture-modeler";
-import { buildCodeFactGraphSnapshot } from "@praxis/code-fact-graph";
-import { detectArchitectureFindings } from "@praxis/finding-detector";
+import { buildCodeFactGraphSnapshot, type CodeFactProviderSource } from "@praxis/code-fact-graph";
+import { detectArchitectureFindings, type ArchitectureFindingReport } from "@praxis/finding-detector";
+import { buildProjectionManifest, projectArchitectureDependencyView } from "@praxis/projection-engine";
 import { acceptedFactRecordsFromPatch, buildRepositoryUnderstandingPatch, type RepositoryUnderstandingPatch } from "@praxis/repository-understanding";
 import { scanRepository } from "@praxis/repository-scanner";
 import { profileProject } from "@praxis/project-profiler";
@@ -81,6 +82,7 @@ async function main(argv: string[]): Promise<void> {
     if (command === "accept-understanding") return await commandAcceptUnderstanding(args);
     if (command === "model-architecture") return await commandModelArchitecture(args);
     if (command === "detect-findings") return await commandDetectFindings(args);
+    if (command === "project:view") return await commandProjectView(args, rest);
     if (command === "init-memory") return await commandInitMemory(args);
     if (command === "chat") return await commandChat(args);
     if (command === "chat-session-create") return await commandChatSessionCreate(args);
@@ -110,7 +112,7 @@ async function commandScan(args: Args): Promise<void> {
 async function commandCodeFacts(args: Args): Promise<void> {
   const root = required(args, "root");
   const snapshot = await buildCodeFactGraphSnapshot(root, {
-    provider: "native",
+    provider: codeFactProviderArg(args),
     includeHidden: args["include-hidden"] === true,
     maxFiles: numberArg(args, "max-files"),
     maxFileSizeBytes: numberArg(args, "max-file-size")
@@ -148,10 +150,60 @@ async function commandGenerateGraph(args: Args): Promise<void> {
 
 async function commandIntake(args: Args): Promise<void> {
   const root = required(args, "root");
+  const resolvedRoot = path.resolve(root);
   const snapshot = await scanRepository({ root });
+  const codeFacts = await buildCodeFactGraphSnapshot(root, {
+    provider: codeFactProviderArg(args),
+    includeHidden: args["include-hidden"] === true,
+    maxFiles: numberArg(args, "max-files"),
+    maxFileSizeBytes: numberArg(args, "max-file-size")
+  });
+
+  await writeJson(path.join(resolvedRoot, ".distinction", "cache", "repository-snapshot.json"), snapshot);
+  const codeFactsPath = path.join(resolvedRoot, ".distinction", "cache", "code-fact-graph.json");
+  await writeJson(codeFactsPath, codeFacts);
+
   const profile = await profileProject(snapshot);
-  const candidate = generateDevelopmentGraphCandidate({ snapshot, profile });
-  outputJson({ ok: true, snapshot, profile, candidate });
+  const profilePath = path.join(resolvedRoot, ".distinction", "cache", "project-profile.json");
+  await writeJson(profilePath, profile);
+
+  const understanding = buildRepositoryUnderstandingPatch(codeFacts);
+  const understandingPath = path.join(resolvedRoot, ".distinction", "cache", "repository-understanding-patch.json");
+  await writeJson(understandingPath, understanding);
+
+  const reviewFacts = acceptedFactRecordsFromPatch(understanding);
+  const architecture = buildArchitectureModelPatch(resolvedRoot, reviewFacts);
+  const architecturePath = path.join(resolvedRoot, ".distinction", "cache", "architecture-model-patch.json");
+  await writeJson(architecturePath, architecture);
+
+  const findings = detectArchitectureFindings(architecture);
+  const findingsPath = path.join(resolvedRoot, ".distinction", "cache", "architecture-findings.json");
+  await writeJson(findingsPath, findings);
+
+  outputJson({
+    ok: true,
+    root: resolvedRoot,
+    reviewOnly: true,
+    provider: codeFacts.provider,
+    cache: {
+      repositorySnapshot: path.relative(resolvedRoot, path.join(resolvedRoot, ".distinction", "cache", "repository-snapshot.json")),
+      codeFacts: path.relative(resolvedRoot, codeFactsPath),
+      projectProfile: path.relative(resolvedRoot, profilePath),
+      repositoryUnderstandingPatch: path.relative(resolvedRoot, understandingPath),
+      architectureModelPatch: path.relative(resolvedRoot, architecturePath),
+      architectureFindings: path.relative(resolvedRoot, findingsPath)
+    },
+    summary: {
+      files: snapshot.files.length,
+      codeFactNodes: codeFacts.statistics.nodeCount,
+      codeFactEdges: codeFacts.statistics.edgeCount,
+      memoryPatches: understanding.memoryPatches.length,
+      modules: architecture.modules.length,
+      dependencies: architecture.dependencies.length,
+      findings: findings.findings.length
+    },
+    next: "Run praxis-runtime accept-understanding --root <path> to persist FACT memory."
+  });
 }
 
 async function commandInitMemory(args: Args): Promise<void> {
@@ -1642,6 +1694,64 @@ async function commandDetectFindings(args: Args): Promise<void> {
   });
 }
 
+async function commandProjectView(args: Args, rest: string[]): Promise<void> {
+  const view = rest.find((item) => !item.startsWith("--")) ?? String(args.view ?? "");
+  if (view !== "architecture") throw new Error(`Unsupported project:view target: ${view || "(missing)"}`);
+
+  const root = required(args, "root");
+  const resolvedRoot = path.resolve(root);
+  const modelPath =
+    typeof args.model === "string"
+      ? args.model
+      : path.join(resolvedRoot, ".distinction", "cache", "architecture-model-patch.json");
+  const findingsPath =
+    typeof args.findings === "string"
+      ? args.findings
+      : path.join(resolvedRoot, ".distinction", "cache", "architecture-findings.json");
+
+  let model: ArchitectureModelPatch;
+  try {
+    model = (await readJson(modelPath)) as ArchitectureModelPatch;
+  } catch {
+    const records = await readFactRecords(root);
+    model = buildArchitectureModelPatch(resolvedRoot, records as any[]);
+    await writeJson(modelPath, model);
+  }
+
+  let findings: ArchitectureFindingReport;
+  try {
+    findings = (await readJson(findingsPath)) as ArchitectureFindingReport;
+  } catch {
+    findings = detectArchitectureFindings(model);
+    await writeJson(findingsPath, findings);
+  }
+
+  const dependencyView = projectArchitectureDependencyView({ model, findings });
+  const dependencyViewPath = path.join(resolvedRoot, ".distinction", "views", "architecture", "dependency-view.json");
+  await writeJson(dependencyViewPath, dependencyView);
+
+  const manifest = buildProjectionManifest({
+    root: resolvedRoot,
+    dependencyView,
+    dependencyViewPath: ".distinction/views/architecture/dependency-view.json"
+  });
+  const manifestPath = path.join(resolvedRoot, ".distinction", "cache", "projection-manifest.json");
+  await writeJson(manifestPath, manifest);
+  await maybeWriteJson(args, "out", dependencyView);
+
+  outputJson({
+    ok: true,
+    root: resolvedRoot,
+    view: "architecture",
+    dependencyViewPath,
+    manifestPath,
+    nodes: dependencyView.nodes.length,
+    edges: dependencyView.edges.length,
+    annotations: dependencyView.annotations.length,
+    status: manifest.views[0]?.status ?? "fresh"
+  });
+}
+
 async function readOrBuildCodeFacts(root: string, args: Args) {
   const cachePath = path.join(path.resolve(root), ".distinction", "cache", "code-fact-graph.json");
   if (args["rebuild-code-facts"] !== true) {
@@ -1652,13 +1762,19 @@ async function readOrBuildCodeFacts(root: string, args: Args) {
     }
   }
   const snapshot = await buildCodeFactGraphSnapshot(root, {
-    provider: "native",
+    provider: codeFactProviderArg(args),
     includeHidden: args["include-hidden"] === true,
     maxFiles: numberArg(args, "max-files"),
     maxFileSizeBytes: numberArg(args, "max-file-size")
   });
   await writeJson(cachePath, snapshot);
   return snapshot;
+}
+
+function codeFactProviderArg(args: Args): CodeFactProviderSource {
+  const provider = String(args.provider ?? "native");
+  if (provider === "native" || provider === "codegraph" || provider === "lsp" || provider === "scip") return provider;
+  throw new Error(`Unsupported code fact provider: ${provider}`);
 }
 
 function numberArg(args: Args, key: string): number | undefined {

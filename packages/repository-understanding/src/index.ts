@@ -15,7 +15,7 @@ export interface MemoryRecord {
   evidence: CodeFactEvidenceRef[];
   source: "code_fact_graph" | "repository_scan" | "static_analysis" | "agent" | "user";
   confidence: Confidence;
-  status: "active" | "stale" | "deprecated";
+  status: "proposed" | "active" | "stale" | "deprecated";
   createdAt: string;
   updatedAt: string;
 }
@@ -116,7 +116,7 @@ function fileMemoryPatch(filePath: string, evidence: CodeFactEvidenceRef[], now:
     evidence,
     source: "code_fact_graph",
     confidence: "high",
-    status: "active",
+    status: "proposed",
     createdAt: now,
     updatedAt: now
   };
@@ -141,7 +141,7 @@ function importMemoryPatch(edge: CodeFactEdge, source: CodeFactNode, target: Cod
     evidence: edge.evidence.length ? edge.evidence : [...source.evidence, ...target.evidence],
     source: "code_fact_graph",
     confidence: confidenceFromEdge(edge.confidence),
-    status: "active",
+    status: "proposed",
     createdAt: now,
     updatedAt: now
   };

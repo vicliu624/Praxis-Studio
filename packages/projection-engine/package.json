@@ -1,0 +1,17 @@
+{
+  "name": "@praxis/projection-engine",
+  "version": "0.1.0-alpha.0",
+  "private": true,
+  "type": "module",
+  "description": "Deterministic Praxis projection engine for derived view cache and projection manifests.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@praxis/architecture-modeler": "0.1.0-alpha.0",
+    "@praxis/finding-detector": "0.1.0-alpha.0"
+  }
+}

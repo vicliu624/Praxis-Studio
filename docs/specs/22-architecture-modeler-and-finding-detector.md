@@ -112,6 +112,23 @@ then A depends_on B
 
 Every dependency must retain source memory ids and evidence.
 
+Current resolver limitation:
+
+```text
+Phase 3 initial implementation supports @praxis/* workspace imports only.
+This is enough for Praxis self-intake and the first monorepo smoke path.
+```
+
+Future resolvers:
+
+```text
+package.json workspaces
+tsconfig paths
+relative import resolution
+Rust Cargo crate dependencies
+Python package imports
+```
+
 ## 6. Findings
 
 The initial finding detector emits only reviewable findings.

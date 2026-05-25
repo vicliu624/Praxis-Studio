@@ -30,7 +30,7 @@ const codeFacts = buildNativeCodeFactGraphSnapshot(
       languages: { TypeScript: 1 }
     }
   },
-  { name: "native-heuristic", source: "native", version: "smoke" }
+  { name: "native-heuristic", source: "native", version: "smoke", capabilities: ["file_structure", "imports_exports"] }
 );
 
 const patch = buildRepositoryUnderstandingPatch(codeFacts);
@@ -42,11 +42,13 @@ assert.ok(patch.memoryPatches.some((item) => item.record.type === "code.file.exi
 assert.ok(patch.memoryPatches.some((item) => item.record.type === "code.import.exists"));
 assert.ok(patch.memoryPatches.every((item) => item.status === "proposed"));
 assert.ok(patch.memoryPatches.every((item) => item.record.kind === "FACT"));
+assert.ok(patch.memoryPatches.every((item) => item.record.status === "proposed"));
 
 const accepted = acceptedFactRecordsFromPatch(patch);
 assert.equal(accepted.length, patch.memoryPatches.length);
 assert.ok(accepted.every((record) => record.kind === "FACT"));
 assert.ok(accepted.every((record) => record.source === "code_fact_graph"));
+assert.ok(accepted.every((record) => record.status === "active"));
 
 console.log(
   JSON.stringify({

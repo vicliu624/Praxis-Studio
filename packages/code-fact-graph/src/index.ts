@@ -4,10 +4,22 @@ import { scanRepository, toRepositoryPath, type RepositorySnapshot, type SourceF
 
 export type CodeFactProviderSource = "native" | "codegraph" | "lsp" | "scip";
 
+export type CodeFactCapability =
+  | "file_structure"
+  | "imports_exports"
+  | "symbols"
+  | "calls"
+  | "type_relations"
+  | "routes"
+  | "references"
+  | "impact";
+
 export interface CodeFactProviderInfo {
   name: string;
   source: CodeFactProviderSource;
   version?: string;
+  runId?: string;
+  capabilities: CodeFactCapability[];
 }
 
 export type CodeFactNodeKind =
@@ -45,7 +57,8 @@ export type CodeFactEdgeKind =
   | "returns"
   | "instantiates"
   | "overrides"
-  | "decorates";
+  | "decorates"
+  | "impacts";
 
 export interface CodeFactRange {
   startLine: number;
@@ -63,12 +76,15 @@ export interface CodeFactEvidenceRef {
 }
 
 export interface CodeFactFile {
+  id: string;
   path: string;
   language: string;
   extension: string;
   sizeBytes: number;
+  hash?: string;
   lineCount: number;
   roleHint: string;
+  nodeIds: string[];
   evidence: CodeFactEvidenceRef[];
 }
 
@@ -133,6 +149,7 @@ export interface CodeFactGraphBuildOptions {
 export interface CodeFactGraphProvider {
   name: string;
   source: CodeFactProviderSource;
+  capabilities: CodeFactCapability[];
   isAvailable(root: string): Promise<boolean>;
   buildSnapshot(root: string, options?: CodeFactGraphBuildOptions): Promise<CodeFactGraphSnapshot>;
 }
@@ -140,6 +157,7 @@ export interface CodeFactGraphProvider {
 export class NativeHeuristicCodeFactGraphProvider implements CodeFactGraphProvider {
   name = "native-heuristic";
   source: CodeFactProviderSource = "native";
+  capabilities: CodeFactCapability[] = ["file_structure", "imports_exports"];
 
   async isAvailable(_root: string): Promise<boolean> {
     return true;
@@ -150,15 +168,20 @@ export class NativeHeuristicCodeFactGraphProvider implements CodeFactGraphProvid
     return buildNativeCodeFactGraphSnapshot(snapshot, {
       name: this.name,
       source: this.source,
-      version: "0.1.0-alpha.0"
+      version: "0.1.0-alpha.0",
+      runId: `code-facts:native:${Date.now()}`,
+      capabilities: this.capabilities
     });
   }
 }
 
 export async function buildCodeFactGraphSnapshot(
   root: string,
-  options: CodeFactGraphBuildOptions & { provider?: "native" } = {}
+  options: CodeFactGraphBuildOptions & { provider?: CodeFactProviderSource } = {}
 ): Promise<CodeFactGraphSnapshot> {
+  if (options.provider && options.provider !== "native") {
+    throw new Error(`Code fact provider is not implemented yet: ${options.provider}`);
+  }
   const provider = new NativeHeuristicCodeFactGraphProvider();
   if (!(await provider.isAvailable(root))) throw new Error(`Code fact provider is unavailable: ${provider.name}`);
   return provider.buildSnapshot(root, options);
@@ -227,13 +250,16 @@ export function buildNativeCodeFactGraphSnapshot(snapshot: RepositorySnapshot, p
 }
 
 function toCodeFactFile(file: SourceFileSummary): CodeFactFile {
+  const id = fileNodeId(file.path);
   return {
+    id,
     path: file.path,
     language: file.language,
     extension: file.extension,
     sizeBytes: file.sizeBytes,
     lineCount: file.lineCount,
     roleHint: file.roleHint,
+    nodeIds: [id],
     evidence: [evidenceForFile(file.path)]
   };
 }

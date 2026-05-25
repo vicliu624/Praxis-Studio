@@ -114,7 +114,8 @@ export interface CodeFactGraphSnapshot {
 }
 
 export interface CodeFactProviderInfo {
-  name: "native" | "codegraph" | "lsp" | "scip";
+  name: string;
+  source: "native" | "codegraph" | "lsp" | "scip";
   version?: string;
   runId?: string;
   capabilities: CodeFactCapability[];
@@ -133,10 +134,14 @@ export type CodeFactCapability =
 export interface CodeFactFile {
   id: string;
   path: string;
-  language?: string;
-  sizeBytes?: number;
+  language: string;
+  extension: string;
+  sizeBytes: number;
   hash?: string;
+  lineCount: number;
+  roleHint: string;
   nodeIds: string[];
+  evidence: CodeFactEvidenceRef[];
 }
 ```
 
@@ -144,20 +149,25 @@ export interface CodeFactFile {
 
 ```ts
 export type CodeFactNodeKind =
-  | "repository"
-  | "directory"
+  | "project"
   | "file"
-  | "package"
   | "module"
-  | "namespace"
   | "class"
+  | "struct"
   | "interface"
-  | "type_alias"
-  | "enum"
+  | "trait"
   | "function"
   | "method"
+  | "property"
   | "field"
   | "variable"
+  | "constant"
+  | "enum"
+  | "enum_member"
+  | "type_alias"
+  | "namespace"
+  | "import"
+  | "export"
   | "route";
 ```
 
@@ -166,15 +176,14 @@ export interface CodeFactNode {
   id: string;
   kind: CodeFactNodeKind;
   name: string;
-  path?: string;
-  symbol?: string;
-  exported?: boolean;
-  location?: {
-    startLine: number;
-    endLine: number;
-  };
-  evidence: EvidenceRef[];
-  confidence: "low" | "medium" | "high";
+  qualifiedName: string;
+  filePath: string;
+  language: string;
+  range?: CodeFactRange;
+  signature?: string;
+  docSummary?: string;
+  visibility?: "public" | "private" | "protected" | "internal";
+  evidence: CodeFactEvidenceRef[];
 }
 ```
 
@@ -190,23 +199,26 @@ export type CodeFactEdgeKind =
   | "instantiates"
   | "extends"
   | "implements"
-  | "depends_on_file"
-  | "depends_on_package"
-  | "declares_route"
+  | "type_of"
+  | "overrides"
+  | "decorates"
   | "returns"
-  | "accepts_parameter"
   | "impacts";
 
 export interface CodeFactEdge {
   id: string;
   kind: CodeFactEdgeKind;
-  from: string;
-  to: string;
-  path?: string;
-  evidence: EvidenceRef[];
-  confidence: "low" | "medium" | "high";
+  sourceId: string;
+  targetId: string;
+  filePath?: string;
+  range?: Partial<CodeFactRange>;
+  confidence: number;
+  evidence: CodeFactEvidenceRef[];
 }
 ```
+
+Provider-level `confidence` is numeric because extraction engines often produce scores.
+Memory and finding layers may map that number into `"low" | "medium" | "high"` when writing Praxis memory.
 
 ### 4.3 Statistics
 
@@ -215,18 +227,15 @@ export interface CodeFactStatistics {
   fileCount: number;
   nodeCount: number;
   edgeCount: number;
-  symbolCount?: number;
-  routeCount?: number;
-  importCount?: number;
-  callCount?: number;
-  referenceCount?: number;
+  filesByLanguage: Record<string, number>;
+  nodesByKind: Record<string, number>;
+  edgesByKind: Record<string, number>;
 }
 
 export interface CodeFactWarning {
   id: string;
-  level: "info" | "warning" | "error";
+  severity: "info" | "warning";
   summary: string;
-  affectedPaths: string[];
 }
 ```
 
@@ -346,6 +355,9 @@ praxis-runtime code-facts --root . --provider codegraph
 praxis-runtime code-facts --root . --provider lsp
 praxis-runtime code-facts --root . --provider scip
 ```
+
+v0.1 must accept provider selection at the CLI boundary.
+Providers that are not implemented yet must fail explicitly instead of silently falling back to native extraction.
 
 Optional output:
 
