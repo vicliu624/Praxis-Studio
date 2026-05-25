@@ -2,7 +2,14 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { ArchitectureModelPatchSchema, CodeFactGraphSnapshotSchema, ProjectionManifestSchema } from "../dist/index.js";
+import {
+  ArchitectureDependencyViewSchema,
+  ArchitectureFindingReportSchema,
+  ArchitectureModelPatchSchema,
+  CodeFactGraphSnapshotSchema,
+  ProjectionManifestSchema,
+  RepositoryUnderstandingPatchSchema
+} from "../dist/index.js";
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -16,6 +23,21 @@ const fixtures = [
     name: "ArchitectureModelPatch",
     path: "fixtures/architecture-model-patch/minimal.json",
     schema: ArchitectureModelPatchSchema
+  },
+  {
+    name: "RepositoryUnderstandingPatch",
+    path: "fixtures/repository-understanding-patch/minimal.json",
+    schema: RepositoryUnderstandingPatchSchema
+  },
+  {
+    name: "ArchitectureFindingReport",
+    path: "fixtures/architecture-finding-report/minimal.json",
+    schema: ArchitectureFindingReportSchema
+  },
+  {
+    name: "ArchitectureDependencyView",
+    path: "fixtures/architecture-dependency-view/minimal.json",
+    schema: ArchitectureDependencyViewSchema
   },
   {
     name: "ProjectionManifest",

@@ -1,0 +1,75 @@
+{
+  "schemaVersion": "praxis.repositoryUnderstandingPatch.v1",
+  "root": "/repo",
+  "generatedAt": "2026-05-25T00:00:00.000Z",
+  "sourceSnapshot": {
+    "schemaVersion": "praxis.codeFactGraph.v1",
+    "generatedAt": "2026-05-25T00:00:00.000Z",
+    "provider": {
+      "name": "native-heuristic",
+      "source": "native",
+      "version": "0.1.0-alpha.0",
+      "runId": "code-facts:native:fixture",
+      "capabilities": ["file_structure", "imports_exports"]
+    },
+    "statistics": {
+      "fileCount": 1,
+      "nodeCount": 2,
+      "edgeCount": 1,
+      "filesByLanguage": {
+        "TypeScript": 1
+      },
+      "nodesByKind": {
+        "project": 1,
+        "file": 1
+      },
+      "edgesByKind": {
+        "contains": 1
+      }
+    }
+  },
+  "memoryPatches": [
+    {
+      "id": "patch:mem:fact:core-file",
+      "operation": "append",
+      "status": "proposed",
+      "record": {
+        "id": "mem:fact:core-file",
+        "kind": "FACT",
+        "type": "code.file.exists",
+        "subject": "packages/core/src/index.ts",
+        "predicate": "exists",
+        "object": "file",
+        "summary": "File exists in repository: packages/core/src/index.ts.",
+        "evidence": [
+          {
+            "source": "repository_scan",
+            "filePath": "packages/core/src/index.ts"
+          }
+        ],
+        "source": "code_fact_graph",
+        "confidence": "high",
+        "status": "proposed",
+        "createdAt": "2026-05-25T00:00:00.000Z",
+        "updatedAt": "2026-05-25T00:00:00.000Z"
+      },
+      "sourceCodeFactIds": ["code:file:packages-core-src-index-ts"]
+    }
+  ],
+  "modelPatches": [],
+  "findingPatches": [],
+  "reviewQuestions": [
+    {
+      "id": "question:code-fact-provider-depth",
+      "question": "Should Praxis use a stronger provider before deriving symbol-level or call-level understanding?"
+    }
+  ],
+  "warnings": [
+    {
+      "id": "understanding-warning:native-provider-limited",
+      "severity": "info",
+      "summary": "Native provider records file and import facts only; symbol, call, and reference facts require a stronger provider."
+    }
+  ],
+  "confidence": "high"
+}

@@ -1,0 +1,33 @@
+{
+  "schemaVersion": "praxis.architectureFindingReport.v1",
+  "root": "/repo",
+  "generatedAt": "2026-05-25T00:00:00.000Z",
+  "findings": [
+    {
+      "id": "finding:package-cycle:core-runtime",
+      "antiPatternId": "package_dependency_cycle",
+      "category": "architecture",
+      "title": "Package dependency cycle: packages/core -> apps/runtime-cli",
+      "summary": "Package-level dependencies form a cycle and may make architecture boundaries harder to evolve.",
+      "severity": "medium",
+      "confidence": "medium",
+      "knowledgeKind": "INFERENCE",
+      "affectedModuleIds": ["arch-module:packages-core", "arch-module:apps-runtime-cli"],
+      "affectedDependencyIds": ["arch-dep:runtime-cli-depends-on-core"],
+      "affectedSourcePaths": ["apps/runtime-cli/src/index.ts"],
+      "evidence": [
+        {
+          "source": "repository_scan",
+          "filePath": "apps/runtime-cli/src/index.ts",
+          "excerpt": "Import observed: @praxis/core"
+        }
+      ],
+      "suggestedQuestions": ["Which module should own the shared abstraction that currently creates this cycle?"],
+      "suggestedPlanActions": ["Introduce or identify a stable dependency direction before generating remediation tasks."],
+      "status": "open",
+      "createdAt": "2026-05-25T00:00:00.000Z",
+      "updatedAt": "2026-05-25T00:00:00.000Z"
+    }
+  ],
+  "detectorIds": ["package-dependency-cycle"]
+}

@@ -1,0 +1,51 @@
+{
+  "schemaVersion": "praxis.architectureDependencyView.v1",
+  "id": "view:architecture:dependency",
+  "kind": "architecture_dependency",
+  "root": "/repo",
+  "generatedAt": "2026-05-25T00:00:00.000Z",
+  "nodes": [
+    {
+      "id": "arch-module:packages-core",
+      "label": "packages/core",
+      "path": "packages/core",
+      "role": "domain",
+      "confidence": "medium",
+      "knowledgeKind": "INFERENCE",
+      "sourceMemoryIds": ["mem:fact:core-file"]
+    },
+    {
+      "id": "arch-module:apps-runtime-cli",
+      "label": "apps/runtime-cli",
+      "path": "apps/runtime-cli",
+      "role": "tooling",
+      "confidence": "medium",
+      "knowledgeKind": "INFERENCE",
+      "sourceMemoryIds": ["mem:fact:runtime-cli-file"]
+    }
+  ],
+  "edges": [
+    {
+      "id": "arch-dep:runtime-cli-depends-on-core",
+      "source": "arch-module:apps-runtime-cli",
+      "target": "arch-module:packages-core",
+      "kind": "depends_on",
+      "confidence": "medium",
+      "knowledgeKind": "INFERENCE",
+      "sourceMemoryIds": ["mem:fact:runtime-cli-imports-core"],
+      "evidenceCount": 1,
+      "findingIds": ["finding:package-cycle:core-runtime"]
+    }
+  ],
+  "annotations": [
+    {
+      "id": "annotation:finding:package-cycle:core-runtime",
+      "findingId": "finding:package-cycle:core-runtime",
+      "antiPatternId": "package_dependency_cycle",
+      "severity": "medium",
+      "status": "open",
+      "targetIds": ["arch-dep:runtime-cli-depends-on-core", "arch-module:packages-core", "arch-module:apps-runtime-cli"],
+      "summary": "Package-level dependencies form a cycle and may make architecture boundaries harder to evolve."
+    }
+  ]
+}

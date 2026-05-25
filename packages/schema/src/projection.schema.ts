@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { ConfidenceSchema } from "./common.schema.js";
-import type { ProjectionManifest } from "./projection.js";
+import type { ArchitectureDependencyView, ProjectionManifest } from "./projection.js";
 
 export const ProjectionStatusSchema = z.enum(["fresh", "stale", "regenerating", "failed"]);
 
@@ -49,7 +49,7 @@ export const ArchitectureDependencyViewAnnotationSchema = z.object({
   summary: z.string().min(1)
 });
 
-export const ArchitectureDependencyViewSchema = z.object({
+export const ArchitectureDependencyViewSchema: z.ZodType<ArchitectureDependencyView> = z.object({
   schemaVersion: z.literal("praxis.architectureDependencyView.v1"),
   id: z.string().min(1),
   kind: z.literal("architecture_dependency"),

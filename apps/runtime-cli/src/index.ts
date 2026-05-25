@@ -13,7 +13,14 @@ import {
 } from "@praxis/repository-understanding";
 import { scanRepository } from "@praxis/repository-scanner";
 import { profileProject } from "@praxis/project-profiler";
-import { ArchitectureModelPatchSchema, CodeFactGraphSnapshotSchema, ProjectionManifestSchema } from "@praxis/schema";
+import {
+  ArchitectureDependencyViewSchema,
+  ArchitectureFindingReportSchema,
+  ArchitectureModelPatchSchema,
+  CodeFactGraphSnapshotSchema,
+  ProjectionManifestSchema,
+  RepositoryUnderstandingPatchSchema
+} from "@praxis/schema";
 import { generateDevelopmentGraphCandidate } from "@praxis/graph-generator";
 import {
   appendMessage,
@@ -189,18 +196,18 @@ async function commandIntake(args: Args): Promise<void> {
   const profilePath = path.join(resolvedRoot, ".distinction", "cache", "project-profile.json");
   await writeJson(profilePath, profile);
 
-  const understanding = buildRepositoryUnderstandingPatch(codeFacts);
+  const understanding = RepositoryUnderstandingPatchSchema.parse(buildRepositoryUnderstandingPatch(codeFacts));
   const understandingPath = path.join(resolvedRoot, ".distinction", "cache", "repository-understanding-patch.json");
-  await writeJson(understandingPath, understanding);
+  await writeJson(understandingPath, understanding, RepositoryUnderstandingPatchSchema);
 
   const previewFacts = proposedFactRecordsFromPatchForPreview(understanding);
   const architecture = ArchitectureModelPatchSchema.parse(buildArchitectureModelPatch(resolvedRoot, previewFacts));
   const architecturePath = path.join(resolvedRoot, ".distinction", "cache", "architecture-model-patch.json");
   await writeJson(architecturePath, architecture, ArchitectureModelPatchSchema);
 
-  const findings = detectArchitectureFindings(architecture);
+  const findings = ArchitectureFindingReportSchema.parse(detectArchitectureFindings(architecture));
   const findingsPath = path.join(resolvedRoot, ".distinction", "cache", "architecture-findings.json");
-  await writeJson(findingsPath, findings);
+  await writeJson(findingsPath, findings, ArchitectureFindingReportSchema);
 
   outputJson({
     ok: true,
@@ -1649,9 +1656,9 @@ async function commandUnderstand(args: Args): Promise<void> {
   const codeFacts = args["code-facts"]
     ? await readJsonWithSchema(String(args["code-facts"]), CodeFactGraphSnapshotSchema)
     : await readOrBuildCodeFacts(root, args);
-  const patch = buildRepositoryUnderstandingPatch(codeFacts);
+  const patch = RepositoryUnderstandingPatchSchema.parse(buildRepositoryUnderstandingPatch(codeFacts));
   const cachePath = path.join(path.resolve(root), ".distinction", "cache", "repository-understanding-patch.json");
-  await writeJson(cachePath, patch);
+  await writeJson(cachePath, patch, RepositoryUnderstandingPatchSchema);
   await maybeWriteJson(args, "out", patch);
   outputJson({
     ok: true,
@@ -1671,7 +1678,7 @@ async function commandAcceptUnderstanding(args: Args): Promise<void> {
     typeof args.patch === "string"
       ? args.patch
       : path.join(path.resolve(root), ".distinction", "cache", "repository-understanding-patch.json");
-  const patch = (await readJson(patchPath)) as RepositoryUnderstandingPatch;
+  const patch = await readJsonWithSchema(patchPath, RepositoryUnderstandingPatchSchema);
   const records = acceptedFactRecordsFromPatch(patch);
   const factsPath = await appendFactRecords(root, records);
   await appendChange(root, {
@@ -1719,9 +1726,9 @@ async function commandDetectFindings(args: Args): Promise<void> {
     model = ArchitectureModelPatchSchema.parse(buildArchitectureModelPatch(path.resolve(root), records as any[]));
     await writeJson(modelPath, model, ArchitectureModelPatchSchema);
   }
-  const report = detectArchitectureFindings(model);
+  const report = ArchitectureFindingReportSchema.parse(detectArchitectureFindings(model));
   const cachePath = path.join(path.resolve(root), ".distinction", "cache", "architecture-findings.json");
-  await writeJson(cachePath, report);
+  await writeJson(cachePath, report, ArchitectureFindingReportSchema);
   await maybeWriteJson(args, "out", report);
   outputJson({
     ok: true,
@@ -1759,15 +1766,16 @@ async function commandProjectView(args: Args, rest: string[]): Promise<void> {
 
   let findings: ArchitectureFindingReport;
   try {
-    findings = (await readJson(findingsPath)) as ArchitectureFindingReport;
-  } catch {
-    findings = detectArchitectureFindings(model);
-    await writeJson(findingsPath, findings);
+    findings = await readJsonWithSchema(findingsPath, ArchitectureFindingReportSchema);
+  } catch (error) {
+    if (!isMissingFileError(error)) throw error;
+    findings = ArchitectureFindingReportSchema.parse(detectArchitectureFindings(model));
+    await writeJson(findingsPath, findings, ArchitectureFindingReportSchema);
   }
 
-  const dependencyView = projectArchitectureDependencyView({ model, findings });
+  const dependencyView = ArchitectureDependencyViewSchema.parse(projectArchitectureDependencyView({ model, findings }));
   const dependencyViewPath = path.join(resolvedRoot, ".distinction", "views", "architecture", "dependency-view.json");
-  await writeJson(dependencyViewPath, dependencyView);
+  await writeJson(dependencyViewPath, dependencyView, ArchitectureDependencyViewSchema);
 
   const manifest = buildProjectionManifest({
     root: resolvedRoot,

@@ -152,16 +152,19 @@ ProjectionManifest
 ArchitectureDependencyView
 ```
 
-The first runtime validation tranche is:
+The bootstrap runtime validation tranche is:
 
 ```text
 CodeFactGraphSnapshotSchema
+RepositoryUnderstandingPatchSchema
 ArchitectureModelPatchSchema
+ArchitectureFindingReportSchema
+ArchitectureDependencyViewSchema
 ProjectionManifestSchema
 ```
 
 These schemas have minimal JSON fixtures and round-trip tests.
-The remaining governed structures still require Zod schemas, fixtures and round-trip tests before the full schema contract is complete.
+The remaining governed structures, especially durable memory/task/context packet shapes, still require Zod schemas, fixtures and round-trip tests before the full schema contract is complete.
 
 ---
 
