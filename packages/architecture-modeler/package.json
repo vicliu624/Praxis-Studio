@@ -1,0 +1,19 @@
+{
+  "name": "@praxis/architecture-modeler",
+  "version": "0.1.0-alpha.0",
+  "private": true,
+  "type": "module",
+  "description": "Infer reviewable Praxis architecture model patches from accepted memory facts.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "smoke": "node tests/architecture-modeler-smoke.mjs"
+  },
+  "dependencies": {
+    "@praxis/code-fact-graph": "0.1.0-alpha.0",
+    "@praxis/core": "0.1.0-alpha.0",
+    "@praxis/repository-understanding": "0.1.0-alpha.0"
+  }
+}

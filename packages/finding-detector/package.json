@@ -1,0 +1,19 @@
+{
+  "name": "@praxis/finding-detector",
+  "version": "0.1.0-alpha.0",
+  "private": true,
+  "type": "module",
+  "description": "Rule-based Praxis architecture finding detectors.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "smoke": "node tests/finding-detector-smoke.mjs"
+  },
+  "dependencies": {
+    "@praxis/architecture-modeler": "0.1.0-alpha.0",
+    "@praxis/code-fact-graph": "0.1.0-alpha.0",
+    "@praxis/core": "0.1.0-alpha.0"
+  }
+}

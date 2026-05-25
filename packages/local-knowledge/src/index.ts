@@ -6,6 +6,7 @@ import { serializeTraceEvent, type TraceEvent } from "@praxis/trace-recorder";
 export interface LocalKnowledgePaths {
   root: string;
   distinctionDir: string;
+  cacheDir: string;
   graphDir: string;
   memoryDir: string;
   rulesDir: string;
@@ -26,6 +27,7 @@ export function getLocalKnowledgePaths(projectRoot: string): LocalKnowledgePaths
   return {
     root,
     distinctionDir,
+    cacheDir: path.join(distinctionDir, "cache"),
     graphDir: path.join(distinctionDir, "graph"),
     memoryDir: path.join(distinctionDir, "memory"),
     rulesDir: path.join(distinctionDir, "rules"),
@@ -108,6 +110,34 @@ export async function appendTrace(projectRoot: string, traceEvent: TraceEvent): 
   const paths = getLocalKnowledgePaths(projectRoot);
   await mkdir(paths.memoryDir, { recursive: true });
   await appendFile(path.join(paths.memoryDir, "traces.jsonl"), `${serializeTraceEvent(traceEvent)}\n`, "utf8");
+}
+
+export async function appendFactRecords(projectRoot: string, records: unknown[]): Promise<string> {
+  const paths = getLocalKnowledgePaths(projectRoot);
+  await mkdir(paths.memoryDir, { recursive: true });
+  const factsPath = path.join(paths.memoryDir, "facts.jsonl");
+  if (!records.length) {
+    await ensureFile(factsPath, "");
+    return factsPath;
+  }
+  const lines = records.map((record) => JSON.stringify(record)).join("\n");
+  await appendFile(factsPath, `${lines}\n`, "utf8");
+  return factsPath;
+}
+
+export async function readFactRecords<T = unknown>(projectRoot: string): Promise<T[]> {
+  const paths = getLocalKnowledgePaths(projectRoot);
+  const factsPath = path.join(paths.memoryDir, "facts.jsonl");
+  try {
+    const raw = await readFile(factsPath, "utf8");
+    return raw
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as T);
+  } catch {
+    return [];
+  }
 }
 
 export async function appendChange(projectRoot: string, change: ChangeRecord): Promise<void> {
@@ -199,6 +229,7 @@ export async function writeCodingTask(projectRoot: string, task: { id: string; m
 }
 
 async function ensureDistinctionDirectories(paths: LocalKnowledgePaths): Promise<void> {
+  await mkdir(paths.cacheDir, { recursive: true });
   await mkdir(paths.graphDir, { recursive: true });
   await mkdir(paths.memoryDir, { recursive: true });
   await mkdir(paths.rulesDir, { recursive: true });

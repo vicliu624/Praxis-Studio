@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { buildArchitectureModelPatch, type ArchitectureModelPatch } from "@praxis/architecture-modeler";
+import { buildCodeFactGraphSnapshot } from "@praxis/code-fact-graph";
+import { detectArchitectureFindings } from "@praxis/finding-detector";
+import { acceptedFactRecordsFromPatch, buildRepositoryUnderstandingPatch, type RepositoryUnderstandingPatch } from "@praxis/repository-understanding";
 import { scanRepository } from "@praxis/repository-scanner";
 import { profileProject } from "@praxis/project-profiler";
 import { generateDevelopmentGraphCandidate } from "@praxis/graph-generator";
@@ -20,10 +24,12 @@ import {
 import { buildContext, type SelectionTarget } from "@praxis/context-builder";
 import {
   appendChange,
+  appendFactRecords,
   appendTrace,
   getLocalKnowledgePaths,
   initializeLocalKnowledge,
   readDevelopmentGraph,
+  readFactRecords,
   writeCodingTask,
   writeDevelopmentGraph
 } from "@praxis/local-knowledge";
@@ -67,9 +73,14 @@ async function main(argv: string[]): Promise<void> {
   const args = parseArgs(rest);
   try {
     if (command === "scan") return await commandScan(args);
+    if (command === "code-facts") return await commandCodeFacts(args);
     if (command === "profile") return await commandProfile(args);
     if (command === "generate-graph") return await commandGenerateGraph(args);
     if (command === "intake") return await commandIntake(args);
+    if (command === "understand") return await commandUnderstand(args);
+    if (command === "accept-understanding") return await commandAcceptUnderstanding(args);
+    if (command === "model-architecture") return await commandModelArchitecture(args);
+    if (command === "detect-findings") return await commandDetectFindings(args);
     if (command === "init-memory") return await commandInitMemory(args);
     if (command === "chat") return await commandChat(args);
     if (command === "chat-session-create") return await commandChatSessionCreate(args);
@@ -94,6 +105,30 @@ async function commandScan(args: Args): Promise<void> {
   const snapshot = await scanRepository({ root });
   await maybeWriteJson(args, "out", snapshot);
   outputJson({ ok: true, fileCount: snapshot.files.length, root: snapshot.root });
+}
+
+async function commandCodeFacts(args: Args): Promise<void> {
+  const root = required(args, "root");
+  const snapshot = await buildCodeFactGraphSnapshot(root, {
+    provider: "native",
+    includeHidden: args["include-hidden"] === true,
+    maxFiles: numberArg(args, "max-files"),
+    maxFileSizeBytes: numberArg(args, "max-file-size")
+  });
+  await maybeWriteJson(args, "out", snapshot);
+  if (args["write-cache"] === true) {
+    const cachePath = path.join(path.resolve(root), ".distinction", "cache", "code-fact-graph.json");
+    await writeJson(cachePath, snapshot);
+  }
+  outputJson({
+    ok: true,
+    root: snapshot.root,
+    provider: snapshot.provider,
+    files: snapshot.statistics.fileCount,
+    nodes: snapshot.statistics.nodeCount,
+    edges: snapshot.statistics.edgeCount,
+    warnings: snapshot.warnings
+  });
 }
 
 async function commandProfile(args: Args): Promise<void> {
@@ -1520,6 +1555,120 @@ function required(args: Args, key: string): string {
   return value;
 }
 
+async function commandUnderstand(args: Args): Promise<void> {
+  const root = required(args, "root");
+  const codeFacts = args["code-facts"]
+    ? await readJson(String(args["code-facts"]))
+    : await readOrBuildCodeFacts(root, args);
+  const patch = buildRepositoryUnderstandingPatch(codeFacts);
+  const cachePath = path.join(path.resolve(root), ".distinction", "cache", "repository-understanding-patch.json");
+  await writeJson(cachePath, patch);
+  await maybeWriteJson(args, "out", patch);
+  outputJson({
+    ok: true,
+    root: patch.root,
+    cachePath,
+    memoryPatches: patch.memoryPatches.length,
+    modelPatches: patch.modelPatches.length,
+    findingPatches: patch.findingPatches.length,
+    warnings: patch.warnings,
+    reviewQuestions: patch.reviewQuestions
+  });
+}
+
+async function commandAcceptUnderstanding(args: Args): Promise<void> {
+  const root = required(args, "root");
+  const patchPath =
+    typeof args.patch === "string"
+      ? args.patch
+      : path.join(path.resolve(root), ".distinction", "cache", "repository-understanding-patch.json");
+  const patch = (await readJson(patchPath)) as RepositoryUnderstandingPatch;
+  const records = acceptedFactRecordsFromPatch(patch);
+  const factsPath = await appendFactRecords(root, records);
+  await appendChange(root, {
+    title: "Accepted repository understanding facts",
+    summary: `Accepted ${records.length} FACT memory record(s) from ${path.relative(path.resolve(root), patchPath) || patchPath}.`,
+    kind: "CONFIRMED"
+  });
+  outputJson({
+    ok: true,
+    root: path.resolve(root),
+    factsPath,
+    acceptedFacts: records.length
+  });
+}
+
+async function commandModelArchitecture(args: Args): Promise<void> {
+  const root = required(args, "root");
+  const records = await readFactRecords(root);
+  const patch = buildArchitectureModelPatch(path.resolve(root), records as any[]);
+  const cachePath = path.join(path.resolve(root), ".distinction", "cache", "architecture-model-patch.json");
+  await writeJson(cachePath, patch);
+  await maybeWriteJson(args, "out", patch);
+  outputJson({
+    ok: true,
+    root: patch.root,
+    cachePath,
+    modules: patch.modules.length,
+    dependencies: patch.dependencies.length,
+    warnings: patch.warnings
+  });
+}
+
+async function commandDetectFindings(args: Args): Promise<void> {
+  const root = required(args, "root");
+  const modelPath =
+    typeof args.model === "string"
+      ? args.model
+      : path.join(path.resolve(root), ".distinction", "cache", "architecture-model-patch.json");
+  let model: ArchitectureModelPatch;
+  try {
+    model = (await readJson(modelPath)) as ArchitectureModelPatch;
+  } catch {
+    const records = await readFactRecords(root);
+    model = buildArchitectureModelPatch(path.resolve(root), records as any[]);
+    await writeJson(modelPath, model);
+  }
+  const report = detectArchitectureFindings(model);
+  const cachePath = path.join(path.resolve(root), ".distinction", "cache", "architecture-findings.json");
+  await writeJson(cachePath, report);
+  await maybeWriteJson(args, "out", report);
+  outputJson({
+    ok: true,
+    root: report.root,
+    cachePath,
+    findings: report.findings.length,
+    detectorIds: report.detectorIds
+  });
+}
+
+async function readOrBuildCodeFacts(root: string, args: Args) {
+  const cachePath = path.join(path.resolve(root), ".distinction", "cache", "code-fact-graph.json");
+  if (args["rebuild-code-facts"] !== true) {
+    try {
+      return await readJson(cachePath);
+    } catch {
+      // Build below when no cache exists.
+    }
+  }
+  const snapshot = await buildCodeFactGraphSnapshot(root, {
+    provider: "native",
+    includeHidden: args["include-hidden"] === true,
+    maxFiles: numberArg(args, "max-files"),
+    maxFileSizeBytes: numberArg(args, "max-file-size")
+  });
+  await writeJson(cachePath, snapshot);
+  return snapshot;
+}
+
+function numberArg(args: Args, key: string): number | undefined {
+  const value = args[key];
+  if (typeof value !== "string" || !value) return undefined;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) throw new Error(`Invalid numeric value for --${key}: ${value}`);
+  return parsed;
+}
+
 async function readJson(filePath: string): Promise<any> {
   return JSON.parse(await readFile(filePath, "utf8"));
 }
@@ -1535,6 +1684,11 @@ function safeJson(content: string): unknown {
 async function maybeWriteJson(args: Args, key: string, value: unknown): Promise<void> {
   const out = args[key];
   if (typeof out === "string") await writeFile(out, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+}
+
+async function writeJson(filePath: string, value: unknown): Promise<void> {
+  await mkdir(path.dirname(filePath), { recursive: true });
+  await writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
 }
 
 function outputJson(value: unknown): void {
