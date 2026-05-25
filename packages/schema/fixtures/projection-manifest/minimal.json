@@ -1,0 +1,25 @@
+{
+  "schemaVersion": "praxis.projectionManifest.v1",
+  "root": "/repo",
+  "generatedAt": "2026-05-25T00:00:00.000Z",
+  "views": [
+    {
+      "id": "view:architecture:dependency",
+      "kind": "architecture_dependency",
+      "path": ".distinction/views/architecture/dependency-view.json",
+      "authority": "review_cache",
+      "sourceCachePaths": [
+        ".distinction/cache/architecture-model-patch.json",
+        ".distinction/cache/architecture-findings.json"
+      ],
+      "sourceMemoryIds": ["mem:fact:runtime-cli-imports-core"],
+      "sourceModelIds": ["cache:architecture-model-patch"],
+      "sourceFindingIds": [],
+      "sourceTaskIds": [],
+      "sourceTraceIds": [],
+      "sourceSpecPaths": [],
+      "status": "fresh",
+      "generatedAt": "2026-05-25T00:00:00.000Z"
+    }
+  ]
+}

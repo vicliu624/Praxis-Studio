@@ -270,6 +270,18 @@ plan progress changes that become authoritative
 5. legacy files may be archived under reports/legacy/ if preservation is needed
 ```
 
+Current CLI boundary:
+
+```text
+generate-graph / init-memory / create-project legacy graph files
+  remain legacy DevelopmentGraph bootstrap flows
+
+intake / model-architecture / detect-findings / project:view
+  are the v0.1 projection pipeline
+```
+
+Legacy commands must label their output as legacy until they are migrated or retired.
+
 ---
 
 ## 7. 与 Git 的关系

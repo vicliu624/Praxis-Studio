@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { buildNativeCodeFactGraphSnapshot } from "@praxis/code-fact-graph";
-import { acceptedFactRecordsFromPatch, buildRepositoryUnderstandingPatch } from "../dist/index.js";
+import { acceptedFactRecordsFromPatch, buildRepositoryUnderstandingPatch, proposedFactRecordsFromPatchForPreview } from "../dist/index.js";
 
 const codeFacts = buildNativeCodeFactGraphSnapshot(
   {
@@ -43,6 +43,12 @@ assert.ok(patch.memoryPatches.some((item) => item.record.type === "code.import.e
 assert.ok(patch.memoryPatches.every((item) => item.status === "proposed"));
 assert.ok(patch.memoryPatches.every((item) => item.record.kind === "FACT"));
 assert.ok(patch.memoryPatches.every((item) => item.record.status === "proposed"));
+
+const preview = proposedFactRecordsFromPatchForPreview(patch);
+assert.equal(preview.length, patch.memoryPatches.length);
+assert.ok(preview.every((record) => record.kind === "FACT"));
+assert.ok(preview.every((record) => record.source === "code_fact_graph"));
+assert.ok(preview.every((record) => record.status === "proposed"));
 
 const accepted = acceptedFactRecordsFromPatch(patch);
 assert.equal(accepted.length, patch.memoryPatches.length);

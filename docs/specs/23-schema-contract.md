@@ -152,7 +152,16 @@ ProjectionManifest
 ArchitectureDependencyView
 ```
 
-Runtime Zod schemas, fixtures and round-trip tests remain required before the schema contract is considered complete.
+The first runtime validation tranche is:
+
+```text
+CodeFactGraphSnapshotSchema
+ArchitectureModelPatchSchema
+ProjectionManifestSchema
+```
+
+These schemas have minimal JSON fixtures and round-trip tests.
+The remaining governed structures still require Zod schemas, fixtures and round-trip tests before the full schema contract is complete.
 
 ---
 

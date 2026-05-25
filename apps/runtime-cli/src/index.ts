@@ -5,9 +5,15 @@ import { buildArchitectureModelPatch, type ArchitectureModelPatch } from "@praxi
 import { buildCodeFactGraphSnapshot, type CodeFactProviderSource } from "@praxis/code-fact-graph";
 import { detectArchitectureFindings, type ArchitectureFindingReport } from "@praxis/finding-detector";
 import { buildProjectionManifest, projectArchitectureDependencyView } from "@praxis/projection-engine";
-import { acceptedFactRecordsFromPatch, buildRepositoryUnderstandingPatch, type RepositoryUnderstandingPatch } from "@praxis/repository-understanding";
+import {
+  acceptedFactRecordsFromPatch,
+  buildRepositoryUnderstandingPatch,
+  proposedFactRecordsFromPatchForPreview,
+  type RepositoryUnderstandingPatch
+} from "@praxis/repository-understanding";
 import { scanRepository } from "@praxis/repository-scanner";
 import { profileProject } from "@praxis/project-profiler";
+import { ArchitectureModelPatchSchema, CodeFactGraphSnapshotSchema, ProjectionManifestSchema } from "@praxis/schema";
 import { generateDevelopmentGraphCandidate } from "@praxis/graph-generator";
 import {
   appendMessage,
@@ -55,6 +61,10 @@ import { ToolRegistry } from "@praxis/tool-registry";
 import { registerAgentTools } from "@praxis/agent-loop/tools";
 
 type Args = Record<string, string | boolean>;
+
+interface JsonSchema<T> {
+  parse(value: unknown): T;
+}
 
 interface CodingAgentResultInput {
   taskId: string;
@@ -111,16 +121,18 @@ async function commandScan(args: Args): Promise<void> {
 
 async function commandCodeFacts(args: Args): Promise<void> {
   const root = required(args, "root");
-  const snapshot = await buildCodeFactGraphSnapshot(root, {
-    provider: codeFactProviderArg(args),
-    includeHidden: args["include-hidden"] === true,
-    maxFiles: numberArg(args, "max-files"),
-    maxFileSizeBytes: numberArg(args, "max-file-size")
-  });
+  const snapshot = CodeFactGraphSnapshotSchema.parse(
+    await buildCodeFactGraphSnapshot(root, {
+      provider: codeFactProviderArg(args),
+      includeHidden: args["include-hidden"] === true,
+      maxFiles: numberArg(args, "max-files"),
+      maxFileSizeBytes: numberArg(args, "max-file-size")
+    })
+  );
   await maybeWriteJson(args, "out", snapshot);
   if (args["write-cache"] === true) {
     const cachePath = path.join(path.resolve(root), ".distinction", "cache", "code-fact-graph.json");
-    await writeJson(cachePath, snapshot);
+    await writeJson(cachePath, snapshot, CodeFactGraphSnapshotSchema);
   }
   outputJson({
     ok: true,
@@ -145,23 +157,33 @@ async function commandGenerateGraph(args: Args): Promise<void> {
   const profile = await readJson(required(args, "profile"));
   const candidate = generateDevelopmentGraphCandidate({ snapshot, profile });
   await maybeWriteJson(args, "out", candidate);
-  outputJson({ ok: true, nodes: candidate.graph.nodes.length, edges: candidate.graph.edges.length, warnings: candidate.warnings.length });
+  outputJson({
+    ok: true,
+    flow: "legacy_development_graph",
+    legacy: true,
+    nextFlow: "Use intake -> model-architecture -> detect-findings -> project:view for the v0.1 projection pipeline.",
+    nodes: candidate.graph.nodes.length,
+    edges: candidate.graph.edges.length,
+    warnings: candidate.warnings.length
+  });
 }
 
 async function commandIntake(args: Args): Promise<void> {
   const root = required(args, "root");
   const resolvedRoot = path.resolve(root);
   const snapshot = await scanRepository({ root });
-  const codeFacts = await buildCodeFactGraphSnapshot(root, {
-    provider: codeFactProviderArg(args),
-    includeHidden: args["include-hidden"] === true,
-    maxFiles: numberArg(args, "max-files"),
-    maxFileSizeBytes: numberArg(args, "max-file-size")
-  });
+  const codeFacts = CodeFactGraphSnapshotSchema.parse(
+    await buildCodeFactGraphSnapshot(root, {
+      provider: codeFactProviderArg(args),
+      includeHidden: args["include-hidden"] === true,
+      maxFiles: numberArg(args, "max-files"),
+      maxFileSizeBytes: numberArg(args, "max-file-size")
+    })
+  );
 
   await writeJson(path.join(resolvedRoot, ".distinction", "cache", "repository-snapshot.json"), snapshot);
   const codeFactsPath = path.join(resolvedRoot, ".distinction", "cache", "code-fact-graph.json");
-  await writeJson(codeFactsPath, codeFacts);
+  await writeJson(codeFactsPath, codeFacts, CodeFactGraphSnapshotSchema);
 
   const profile = await profileProject(snapshot);
   const profilePath = path.join(resolvedRoot, ".distinction", "cache", "project-profile.json");
@@ -171,10 +193,10 @@ async function commandIntake(args: Args): Promise<void> {
   const understandingPath = path.join(resolvedRoot, ".distinction", "cache", "repository-understanding-patch.json");
   await writeJson(understandingPath, understanding);
 
-  const reviewFacts = acceptedFactRecordsFromPatch(understanding);
-  const architecture = buildArchitectureModelPatch(resolvedRoot, reviewFacts);
+  const previewFacts = proposedFactRecordsFromPatchForPreview(understanding);
+  const architecture = ArchitectureModelPatchSchema.parse(buildArchitectureModelPatch(resolvedRoot, previewFacts));
   const architecturePath = path.join(resolvedRoot, ".distinction", "cache", "architecture-model-patch.json");
-  await writeJson(architecturePath, architecture);
+  await writeJson(architecturePath, architecture, ArchitectureModelPatchSchema);
 
   const findings = detectArchitectureFindings(architecture);
   const findingsPath = path.join(resolvedRoot, ".distinction", "cache", "architecture-findings.json");
@@ -210,7 +232,13 @@ async function commandInitMemory(args: Args): Promise<void> {
   const root = required(args, "root");
   const candidate = (await readJson(required(args, "candidate"))) as DevelopmentGraphCandidate;
   await initializeLocalKnowledge(root, candidate);
-  outputJson({ ok: true, distinction: path.join(path.resolve(root), ".distinction") });
+  outputJson({
+    ok: true,
+    flow: "legacy_development_graph",
+    legacy: true,
+    nextFlow: "Use project:view outputs under .distinction/views/ for new projection cache.",
+    distinction: path.join(path.resolve(root), ".distinction")
+  });
 }
 
 async function commandChat(args: Args): Promise<void> {
@@ -1377,7 +1405,15 @@ async function commandCreateProjectPlan(args: Args): Promise<void> {
     projectKind: args.kind === "tauri-desktop-minimal" ? "tauri-desktop-minimal" : "documentation-first"
   });
   await maybeWriteJson(args, "out", plan);
-  outputJson({ ok: true, requirements: plan.requirements.length, architecture: plan.architecture.length, files: plan.files.length, plan });
+  outputJson({
+    ok: true,
+    legacyGraphFiles: true,
+    legacyGraphNotice: "Generated .distinction/graph files are legacy DevelopmentGraph bootstrap artifacts, not v0.1 projection authority.",
+    requirements: plan.requirements.length,
+    architecture: plan.architecture.length,
+    files: plan.files.length,
+    plan
+  });
 }
 
 async function createProjectPlanWithAgents(
@@ -1567,6 +1603,7 @@ function refreshNewProjectPlanArtifacts(plan: NewProjectPlan): void {
       ""
     ].join("\n")
   );
+  // Legacy bootstrap output: new v0.1 graph surfaces should be projected under views/.
   replaceGeneratedFile(plan, ".distinction/graph/nodes.json", `${JSON.stringify(plan.graph.nodes, null, 2)}\n`);
   replaceGeneratedFile(plan, ".distinction/graph/edges.json", `${JSON.stringify(plan.graph.edges, null, 2)}\n`);
 }
@@ -1610,7 +1647,7 @@ function required(args: Args, key: string): string {
 async function commandUnderstand(args: Args): Promise<void> {
   const root = required(args, "root");
   const codeFacts = args["code-facts"]
-    ? await readJson(String(args["code-facts"]))
+    ? await readJsonWithSchema(String(args["code-facts"]), CodeFactGraphSnapshotSchema)
     : await readOrBuildCodeFacts(root, args);
   const patch = buildRepositoryUnderstandingPatch(codeFacts);
   const cachePath = path.join(path.resolve(root), ".distinction", "cache", "repository-understanding-patch.json");
@@ -1653,9 +1690,9 @@ async function commandAcceptUnderstanding(args: Args): Promise<void> {
 async function commandModelArchitecture(args: Args): Promise<void> {
   const root = required(args, "root");
   const records = await readFactRecords(root);
-  const patch = buildArchitectureModelPatch(path.resolve(root), records as any[]);
+  const patch = ArchitectureModelPatchSchema.parse(buildArchitectureModelPatch(path.resolve(root), records as any[]));
   const cachePath = path.join(path.resolve(root), ".distinction", "cache", "architecture-model-patch.json");
-  await writeJson(cachePath, patch);
+  await writeJson(cachePath, patch, ArchitectureModelPatchSchema);
   await maybeWriteJson(args, "out", patch);
   outputJson({
     ok: true,
@@ -1675,11 +1712,12 @@ async function commandDetectFindings(args: Args): Promise<void> {
       : path.join(path.resolve(root), ".distinction", "cache", "architecture-model-patch.json");
   let model: ArchitectureModelPatch;
   try {
-    model = (await readJson(modelPath)) as ArchitectureModelPatch;
-  } catch {
+    model = await readJsonWithSchema(modelPath, ArchitectureModelPatchSchema);
+  } catch (error) {
+    if (!isMissingFileError(error)) throw error;
     const records = await readFactRecords(root);
-    model = buildArchitectureModelPatch(path.resolve(root), records as any[]);
-    await writeJson(modelPath, model);
+    model = ArchitectureModelPatchSchema.parse(buildArchitectureModelPatch(path.resolve(root), records as any[]));
+    await writeJson(modelPath, model, ArchitectureModelPatchSchema);
   }
   const report = detectArchitectureFindings(model);
   const cachePath = path.join(path.resolve(root), ".distinction", "cache", "architecture-findings.json");
@@ -1711,11 +1749,12 @@ async function commandProjectView(args: Args, rest: string[]): Promise<void> {
 
   let model: ArchitectureModelPatch;
   try {
-    model = (await readJson(modelPath)) as ArchitectureModelPatch;
-  } catch {
+    model = await readJsonWithSchema(modelPath, ArchitectureModelPatchSchema);
+  } catch (error) {
+    if (!isMissingFileError(error)) throw error;
     const records = await readFactRecords(root);
-    model = buildArchitectureModelPatch(resolvedRoot, records as any[]);
-    await writeJson(modelPath, model);
+    model = ArchitectureModelPatchSchema.parse(buildArchitectureModelPatch(resolvedRoot, records as any[]));
+    await writeJson(modelPath, model, ArchitectureModelPatchSchema);
   }
 
   let findings: ArchitectureFindingReport;
@@ -1738,7 +1777,7 @@ async function commandProjectView(args: Args, rest: string[]): Promise<void> {
     sourceCachePaths: [projectRelativePath(resolvedRoot, modelPath), projectRelativePath(resolvedRoot, findingsPath)]
   });
   const manifestPath = path.join(resolvedRoot, ".distinction", "cache", "projection-manifest.json");
-  await writeJson(manifestPath, manifest);
+  await writeJson(manifestPath, manifest, ProjectionManifestSchema);
   await maybeWriteJson(args, "out", dependencyView);
 
   outputJson({
@@ -1758,18 +1797,21 @@ async function readOrBuildCodeFacts(root: string, args: Args) {
   const cachePath = path.join(path.resolve(root), ".distinction", "cache", "code-fact-graph.json");
   if (args["rebuild-code-facts"] !== true) {
     try {
-      return await readJson(cachePath);
-    } catch {
+      return await readJsonWithSchema(cachePath, CodeFactGraphSnapshotSchema);
+    } catch (error) {
+      if (!isMissingFileError(error)) throw error;
       // Build below when no cache exists.
     }
   }
-  const snapshot = await buildCodeFactGraphSnapshot(root, {
-    provider: codeFactProviderArg(args),
-    includeHidden: args["include-hidden"] === true,
-    maxFiles: numberArg(args, "max-files"),
-    maxFileSizeBytes: numberArg(args, "max-file-size")
-  });
-  await writeJson(cachePath, snapshot);
+  const snapshot = CodeFactGraphSnapshotSchema.parse(
+    await buildCodeFactGraphSnapshot(root, {
+      provider: codeFactProviderArg(args),
+      includeHidden: args["include-hidden"] === true,
+      maxFiles: numberArg(args, "max-files"),
+      maxFileSizeBytes: numberArg(args, "max-file-size")
+    })
+  );
+  await writeJson(cachePath, snapshot, CodeFactGraphSnapshotSchema);
   return snapshot;
 }
 
@@ -1798,6 +1840,14 @@ async function readJson(filePath: string): Promise<any> {
   return JSON.parse(await readFile(filePath, "utf8"));
 }
 
+async function readJsonWithSchema<T>(filePath: string, schema: JsonSchema<T>): Promise<T> {
+  return schema.parse(await readJson(filePath));
+}
+
+function isMissingFileError(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "ENOENT";
+}
+
 function safeJson(content: string): unknown {
   try {
     return JSON.parse(content);
@@ -1811,9 +1861,10 @@ async function maybeWriteJson(args: Args, key: string, value: unknown): Promise<
   if (typeof out === "string") await writeFile(out, `${JSON.stringify(value, null, 2)}\n`, "utf8");
 }
 
-async function writeJson(filePath: string, value: unknown): Promise<void> {
+async function writeJson<T>(filePath: string, value: T, schema?: JsonSchema<T>): Promise<void> {
+  const parsed = schema ? schema.parse(value) : value;
   await mkdir(path.dirname(filePath), { recursive: true });
-  await writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+  await writeFile(filePath, `${JSON.stringify(parsed, null, 2)}\n`, "utf8");
 }
 
 function outputJson(value: unknown): void {

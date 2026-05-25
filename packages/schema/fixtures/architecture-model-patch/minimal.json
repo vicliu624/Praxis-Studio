@@ -1,0 +1,59 @@
+{
+  "schemaVersion": "praxis.architectureModelPatch.v1",
+  "root": "/repo",
+  "generatedAt": "2026-05-25T00:00:00.000Z",
+  "modules": [
+    {
+      "id": "arch-module:packages-core",
+      "name": "packages/core",
+      "path": "packages/core",
+      "role": "domain",
+      "responsibilities": ["Owns source files under packages/core."],
+      "sourceMemoryIds": ["mem:fact:core-file"],
+      "evidence": [
+        {
+          "source": "repository_scan",
+          "filePath": "packages/core/src/index.ts"
+        }
+      ],
+      "confidence": "medium",
+      "knowledgeKind": "INFERENCE"
+    },
+    {
+      "id": "arch-module:apps-runtime-cli",
+      "name": "apps/runtime-cli",
+      "path": "apps/runtime-cli",
+      "role": "tooling",
+      "responsibilities": ["Owns source files under apps/runtime-cli."],
+      "sourceMemoryIds": ["mem:fact:runtime-cli-file"],
+      "evidence": [
+        {
+          "source": "repository_scan",
+          "filePath": "apps/runtime-cli/src/index.ts"
+        }
+      ],
+      "confidence": "medium",
+      "knowledgeKind": "INFERENCE"
+    }
+  ],
+  "dependencies": [
+    {
+      "id": "arch-dep:runtime-cli-depends-on-core",
+      "sourceModuleId": "arch-module:apps-runtime-cli",
+      "targetModuleId": "arch-module:packages-core",
+      "kind": "depends_on",
+      "sourceMemoryIds": ["mem:fact:runtime-cli-imports-core"],
+      "evidence": [
+        {
+          "source": "repository_scan",
+          "filePath": "apps/runtime-cli/src/index.ts",
+          "excerpt": "Import observed: @praxis/core"
+        }
+      ],
+      "confidence": "medium",
+      "knowledgeKind": "INFERENCE"
+    }
+  ],
+  "warnings": [],
+  "confidence": "medium"
+}

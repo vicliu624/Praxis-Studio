@@ -40,13 +40,20 @@ export function buildRepositoryUnderstandingPatch(snapshot: CodeFactGraphSnapsho
 }
 
 export function acceptedFactRecordsFromPatch(patch: RepositoryUnderstandingPatch): MemoryRecord[] {
+  return proposedFactRecordsFromPatchForPreview(patch).map((record) => ({
+    ...record,
+    status: "active" as const,
+    updatedAt: new Date().toISOString()
+  }));
+}
+
+export function proposedFactRecordsFromPatchForPreview(patch: RepositoryUnderstandingPatch): MemoryRecord[] {
   return patch.memoryPatches
     .map((item) => item.record)
     .filter((record) => record.kind === "FACT")
     .map((record) => ({
       ...record,
-      status: "active" as const,
-      updatedAt: new Date().toISOString()
+      status: "proposed" as const
     }));
 }
 
