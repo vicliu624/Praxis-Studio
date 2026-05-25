@@ -432,6 +432,7 @@ graph reprojection
 ```
 
 For detailed playbook rules, see `docs/specs/17-opinionated-governance-playbooks.md`.
+For the initial concrete mapping bundle, see `docs/specs/28-default-playbooks-v0.1.md`.
 
 ## 10. v0.1 Minimum Detectors
 

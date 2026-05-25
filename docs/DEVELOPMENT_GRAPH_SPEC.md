@@ -165,7 +165,7 @@ export interface DevelopmentGraphCandidate {
 }
 ```
 
-用户确认后，候选图谱才能写入 `.distinction/graph/`。
+用户确认后，候选图谱才能写入 `.distinction/memory/`、`.distinction/models/`，并投影到 `.distinction/views/`。
 
 ---
 

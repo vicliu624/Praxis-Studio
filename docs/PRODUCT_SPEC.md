@@ -127,10 +127,11 @@ README.md
 docs/PRODUCT_SPEC.md
 docs/ARCHITECTURE.md
 docs/ROADMAP.md
-.distinction/graph/nodes.json
-.distinction/graph/edges.json
-.distinction/memory/changes.md
-.distinction/memory/decisions.md
+.distinction/project.json
+.distinction/memory/candidates.jsonl
+.distinction/memory/decisions.jsonl
+.distinction/models/architecture-model.json
+.distinction/views/architecture/component-view.json
 .distinction/rules/ai-constraints.md
 ```
 
@@ -162,8 +163,8 @@ Agent 应围绕这条边及其一跳上下文回答：
 用户确认计划后，Praxis 可以：
 
 ```text
-更新 .distinction/graph/edges.json
-写入 .distinction/memory/changes.md
+更新相关 memory/model records 并触发 graph reprojection
+写入 .distinction/memory/candidates.jsonl
 写入 .distinction/tasks/TASK-0001.md
 ```
 

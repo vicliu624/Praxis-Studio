@@ -116,8 +116,8 @@ Architecture Memory --records--> Local Knowledge
 
 ## Acceptance Criteria
 
-- Report can be converted into MemoryEvent
-- MemoryEvent is appended to .distinction/memory/changes.md
+- Report can be converted into a governed memory suggestion or runtime event
+- Memory suggestion is appended to a structured `.distinction/memory/*.jsonl` file through local-knowledge policy
 - Trace event is recorded
 
 ## Verification

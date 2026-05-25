@@ -119,6 +119,18 @@ source: code_fact_graph
 
 Each record must include evidence from the code fact graph and must keep provider confidence separate from user confirmation.
 
+Future providers may extend the patch with additional FACT families such as:
+
+```text
+code.symbol.exists
+code.call.exists
+code.type_relation.exists
+code.route.exists
+code.reference.exists
+```
+
+The durable-memory authority rule does not change when richer fact families are added.
+
 ## 7. CLI Contract
 
 Generate review patch:

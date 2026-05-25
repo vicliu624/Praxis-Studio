@@ -72,21 +72,21 @@ README.md
 docs/PRODUCT_SPEC.md
 docs/ARCHITECTURE.md
 docs/ROADMAP.md
-.distinction/graph/nodes.json
-.distinction/graph/edges.json
+.distinction/project.json
+.distinction/memory/candidates.jsonl
+.distinction/models/architecture-model.json
+.distinction/views/architecture/component-view.json
 .distinction/rules/ai-constraints.md
-.distinction/memory/changes.md
-.distinction/memory/decisions.md
+.distinction/memory/decisions.jsonl
 ```
 
 When useful, it may also generate:
 
 ```text
-.distinction/graph/progress.json
-.distinction/graph/views.json
+.distinction/cache/projection-manifest.json
 .distinction/memory/traces.jsonl
-.distinction/memory/incidents.json
-.distinction/memory/do-not-repeat.md
+.distinction/memory/incidents.jsonl
+.distinction/memory/do-not-repeat.jsonl
 .distinction/rules/architecture.md
 .distinction/rules/boundaries.md
 .distinction/reports/project-creation.md

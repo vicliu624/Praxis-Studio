@@ -25,6 +25,8 @@ This phase generates candidates and inferences. It does not confirm architecture
 Use `05-modeling-pipeline.md` for the model pipeline.
 Use `08-architecture-graph-view.md` for architecture view expectations.
 Use `16-anti-pattern-quality-management.md` for finding lifecycle expectations.
+Use `26-projection-engine.md` for projection status and cache boundaries.
+Use `28-default-playbooks-v0.1.md` for the initial finding-to-playbook mapping bundle.
 Use this document for Phase 3 package boundaries and smoke gates.
 
 ## 3. Scope
@@ -34,6 +36,7 @@ Phase 3 covers:
 - reading accepted FACT memory records from `.distinction/memory/facts.jsonl`
 - inferring module candidates from repository paths
 - inferring package-level dependencies from `code.import.exists` facts
+- optionally using richer code facts such as symbol / route / reference data when available
 - writing `.distinction/cache/architecture-model-patch.json`
 - detecting basic architecture findings from the model patch
 - writing `.distinction/cache/architecture-findings.json`

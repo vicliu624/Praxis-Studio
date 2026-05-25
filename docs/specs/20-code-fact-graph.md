@@ -2,134 +2,370 @@
 
 ## 1. Purpose
 
-Praxis needs a code fact layer before it can turn repository observations into memory, models, findings, projections, context packets, and tasks.
+Praxis needs a code fact layer stronger than a coarse repository scan, but weaker than confirmed architecture meaning.
 
-The code fact graph is not the Development Graph. It is a provider-normalized cache of code-level facts.
+The code fact graph is that layer.
 
 ```text
-Repository Scanner / CodeGraph / LSP / SCIP
+RepositorySnapshot
+  + provider-specific extraction
       ↓
 CodeFactGraphSnapshot
+      ↓
+RepositoryUnderstandingPatch
       ↓
 FACT memory
       ↓
 ArchitectureModel / Finding / Projection / ContextPacket
 ```
 
-## 2. Boundary
+`CodeFactGraphSnapshot` is not the Development Graph.
+It is a provider-normalized cache of code-level facts.
 
-`CodeFactGraphSnapshot` records facts about files, symbols, imports, and code relationships.
+---
 
-It must not:
+## 2. Distinction Contract
 
-- become Praxis source of truth
-- write confirmed memory
-- directly define architecture truth
-- directly drive the graph workspace
-- bypass intake review or user confirmation
-
-`.distinction/cache/code-fact-graph.json` is a derived cache. It may be deleted and rebuilt.
-
-`.distinction/memory`, `.distinction/models`, and confirmed graph files remain the Praxis project memory authority.
-
-## 3. Knowledge Rules
-
-Local static observations are `FACT`.
-
-Provider interpretation quality is represented by `confidence`, not by upgrading a fact into confirmed architecture meaning.
+### 2.1 Current Confusions
 
 ```text
-file exists        = FACT
-import exists      = FACT
-symbol exists      = FACT when provider can identify it
-module boundary    = INFERENCE unless confirmed
-architecture role  = INFERENCE unless confirmed
-finding severity   = CANDIDATE / INFERENCE until accepted
+Code fact graph can look graph-like, but it is not the graph workspace authority.
+Provider-local scratch such as .codegraph/ can be useful, but it is not Praxis memory.
+Symbol and call facts are still code facts; they are not automatically architecture boundaries.
+Impact relations can be fact-like provider output, but they do not become plan or risk truth by themselves.
 ```
+
+### 2.2 Valid Distinctions
+
+```text
+RepositorySnapshot
+  answers what files, directories, manifests and repository metadata exist
+
+CodeFactGraphSnapshot
+  answers what code-level structures and relations a provider observed
+
+RepositoryUnderstandingPatch
+  answers which FACT memory records Praxis proposes to persist from those observations
+
+ArchitectureModelPatch
+  answers which architecture interpretations Praxis infers from accepted memory
+```
+
+### 2.3 Invalid Distinctions
+
+```text
+Do not treat every import as an architecture dependency.
+Do not treat every symbol cluster as a component boundary.
+Do not let provider names define business meaning.
+Do not let code fact cache write directly to views/ or models/.
+Do not write confirmed memory from code fact extraction alone.
+```
+
+---
+
+## 3. Authority Boundary
+
+`CodeFactGraphSnapshot` may be written to:
+
+```text
+.distinction/cache/code-fact-graph.json
+```
+
+Provider-local caches such as:
+
+```text
+.codegraph/
+.scip/
+temporary LSP indexes
+```
+
+are rebuildable scratch space.
+
+The code fact graph must not:
+
+```text
+write .distinction/memory/*.jsonl directly
+write .distinction/models/*.json directly
+write .distinction/views/**/*.json directly
+write confirmed architecture truth
+bypass Project Intake Review or acceptance commands
+```
+
+---
 
 ## 4. Snapshot Schema
 
 The normalized snapshot uses this logical shape:
 
 ```ts
-interface CodeFactGraphSnapshot {
+export interface CodeFactGraphSnapshot {
   schemaVersion: "praxis.codeFactGraph.v1";
   root: string;
   generatedAt: string;
+
   provider: CodeFactProviderInfo;
+
   files: CodeFactFile[];
   nodes: CodeFactNode[];
   edges: CodeFactEdge[];
+
   statistics: CodeFactStatistics;
   warnings: CodeFactWarning[];
 }
+
+export interface CodeFactProviderInfo {
+  name: "native" | "codegraph" | "lsp" | "scip";
+  version?: string;
+  runId?: string;
+  capabilities: CodeFactCapability[];
+}
+
+export type CodeFactCapability =
+  | "file_structure"
+  | "imports_exports"
+  | "symbols"
+  | "calls"
+  | "type_relations"
+  | "routes"
+  | "references"
+  | "impact";
+
+export interface CodeFactFile {
+  id: string;
+  path: string;
+  language?: string;
+  sizeBytes?: number;
+  hash?: string;
+  nodeIds: string[];
+}
 ```
 
-Providers may be:
+### 4.1 Node Kinds
+
+```ts
+export type CodeFactNodeKind =
+  | "repository"
+  | "directory"
+  | "file"
+  | "package"
+  | "module"
+  | "namespace"
+  | "class"
+  | "interface"
+  | "type_alias"
+  | "enum"
+  | "function"
+  | "method"
+  | "field"
+  | "variable"
+  | "route";
+```
+
+```ts
+export interface CodeFactNode {
+  id: string;
+  kind: CodeFactNodeKind;
+  name: string;
+  path?: string;
+  symbol?: string;
+  exported?: boolean;
+  location?: {
+    startLine: number;
+    endLine: number;
+  };
+  evidence: EvidenceRef[];
+  confidence: "low" | "medium" | "high";
+}
+```
+
+### 4.2 Edge Kinds
+
+```ts
+export type CodeFactEdgeKind =
+  | "contains"
+  | "imports"
+  | "exports"
+  | "calls"
+  | "references"
+  | "instantiates"
+  | "extends"
+  | "implements"
+  | "depends_on_file"
+  | "depends_on_package"
+  | "declares_route"
+  | "returns"
+  | "accepts_parameter"
+  | "impacts";
+
+export interface CodeFactEdge {
+  id: string;
+  kind: CodeFactEdgeKind;
+  from: string;
+  to: string;
+  path?: string;
+  evidence: EvidenceRef[];
+  confidence: "low" | "medium" | "high";
+}
+```
+
+### 4.3 Statistics
+
+```ts
+export interface CodeFactStatistics {
+  fileCount: number;
+  nodeCount: number;
+  edgeCount: number;
+  symbolCount?: number;
+  routeCount?: number;
+  importCount?: number;
+  callCount?: number;
+  referenceCount?: number;
+}
+
+export interface CodeFactWarning {
+  id: string;
+  level: "info" | "warning" | "error";
+  summary: string;
+  affectedPaths: string[];
+}
+```
+
+---
+
+## 5. Fact Families
+
+The code fact layer must be able to express at least these normalized fact families:
 
 ```text
-native
-codegraph
-lsp
-scip
+code.file.exists
+code.directory.exists
+code.manifest.exists
+code.package.exists
+code.import.exists
+code.export.exists
+code.symbol.exists
+code.call.exists
+code.type_relation.exists
+code.route.exists
+code.implements.exists
+code.extends.exists
+code.instantiates.exists
+code.reference.exists
+code.file_dependency.exists
+code.symbol_impact.exists
 ```
 
-The initial implementation uses the native provider backed by `repository-scanner`.
-
-## 5. Initial Native Provider
-
-The native provider is intentionally conservative.
-
-It emits:
-
-- one `file` node per scanned source file
-- one `import` node per import string
-- one `imports` edge from file node to import node
-- one `contains` edge from a synthetic project root node to each file node
-
-It does not pretend to understand call graphs, class hierarchies, references, or symbol ownership.
-
-Those facts are reserved for stronger providers such as CodeGraph, LSP, or SCIP.
-
-## 6. CLI Contract
-
-```bash
-praxis-runtime code-facts --root .
-```
-
-Default behavior prints a summary.
-
-```bash
-praxis-runtime code-facts --root . --write-cache
-```
-
-writes:
+Interpretation rules:
 
 ```text
-.distinction/cache/code-fact-graph.json
+file / directory / import / export / symbol / call / route / reference
+  can be FACT when provider evidence is direct
+
+architecture boundary / module ownership / responsibility / risk
+  remain INFERENCE or CANDIDATE until later stages
+```
+
+Provider confidence measures extraction quality.
+It must not silently upgrade code facts into confirmed architecture meaning.
+
+---
+
+## 6. Provider Capability Levels
+
+### 6.1 Native Provider
+
+The native provider is conservative and always available.
+
+It should emit:
+
+```text
+files
+directories
+package/manifests
+imports
+exports
+basic file dependency edges
+```
+
+It may emit symbol-level facts only when extraction is deterministic and cheap.
+
+### 6.2 Stronger Providers
+
+Optional providers such as CodeGraph, LSP and SCIP may additionally emit:
+
+```text
+classes / interfaces / functions / methods / fields
+calls
+extends / implements
+references
+routes
+impact edges
+```
+
+Absence of a capability does not imply absence of a fact.
+It only means the current provider did not observe or normalize it.
+
+---
+
+## 7. Mapping Boundary
+
+`CodeFactGraphSnapshot` does not persist directly into durable memory.
+
+The correct write chain is:
+
+```text
+CodeFactGraphSnapshot
+  -> RepositoryUnderstandingPatch
+  -> explicit acceptance
+  -> .distinction/memory/facts.jsonl
+```
+
+The initial repository-understanding phase may choose to persist only a subset of fact families.
+That implementation limit must not narrow the schema contract.
+
+---
+
+## 8. CLI Contract
+
+Generate a snapshot:
+
+```bash
+praxis-runtime code-facts --root . --provider native
+```
+
+Write cache:
+
+```bash
+praxis-runtime code-facts --root . --provider native --write-cache
+```
+
+Provider selection:
+
+```bash
+praxis-runtime code-facts --root . --provider codegraph
+praxis-runtime code-facts --root . --provider lsp
+praxis-runtime code-facts --root . --provider scip
 ```
 
 Optional output:
 
 ```bash
-praxis-runtime code-facts --root . --out snapshot.json
+praxis-runtime code-facts --root . --provider native --out snapshot.json
 ```
 
-## 7. Conceptual Constraint
+All variants must return schema-valid JSON.
 
-The code fact graph answers:
+---
+
+## 9. Acceptance Gates
+
+The code fact graph contract is implemented when:
 
 ```text
-What code facts did a provider observe?
+1. Snapshot writes only cache by default.
+2. Provider name and capabilities are recorded.
+3. File/import facts are normalized consistently across providers.
+4. Stronger providers can add symbol / call / type / route / reference / impact facts without changing durable-memory authority rules.
+5. Snapshot does not directly generate architecture model, graph view or confirmed memory.
+6. Contract tests verify schema validity and provider normalization.
 ```
-
-It does not answer:
-
-```text
-What does this project mean?
-What is the architecture?
-What should the user change?
-What is confirmed project memory?
-```
-
-Those answers belong to Praxis memory, model, finding, projection, and review flows.

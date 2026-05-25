@@ -208,10 +208,11 @@ Cancel
 确认后写入：
 
 ```text
-.distinction/graph/nodes.json
-.distinction/graph/edges.json
+.distinction/cache/repository-understanding-patch.json
+.distinction/memory/facts.jsonl
+.distinction/views/architecture/dependency-view.json
 .distinction/reports/project-intake.md
-.distinction/memory/changes.md
+.distinction/cache/projection-manifest.json
 ```
 
 ---

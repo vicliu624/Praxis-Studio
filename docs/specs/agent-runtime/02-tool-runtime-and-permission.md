@@ -223,9 +223,12 @@ Allowed after approval:
 ```text
 .distinction/chat/*
 .distinction/memory/*
-.distinction/graph/*
+.distinction/models/*
+.distinction/cache/*
+.distinction/views/*
 .distinction/runs/*
 .distinction/tasks/*
+.distinction/reports/*
 docs/*
 new project scaffold files during Create New Project
 ```

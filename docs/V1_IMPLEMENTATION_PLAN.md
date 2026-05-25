@@ -1,530 +1,301 @@
 # Praxis Studio v0.1 Implementation Plan
 
-## 1. 总体实施顺序
+## 1. 总体施工原则
 
-v0.1 按以下顺序施工：
+v0.1 的首要闭环不是 demo graph，也不是 source-editing agent，而是：
 
 ```text
-Step 1  重构入口：HomePage
-Step 2  runtime-cli
-Step 3  repository-scanner
-Step 4  project-profiler
-Step 5  graph-generator
-Step 6  model-router + provider-deepseek
-Step 7  agent-runtime + prompt-registry
-Step 8  Project Intake Review UI
-Step 9  local-knowledge writer
-Step 10 Create New Project Wizard
-Step 11 Development Graph Workspace
-Step 12 Coding Task Agent + ManualAdapter
+Open Existing Project
+  -> Repository Intelligence
+  -> Project Memory
+  -> Architecture / Finding / Projection
+  -> ContextPacket
+  -> Explain / Plan / Task
+  -> MCP / Desktop reuse
 ```
 
-实施原则：
+施工原则：
 
 ```text
-CLI first, UI second.
-Schema first, prompt second.
-Facts first, AI candidates second.
-Plan first, Apply second.
-No demo-first workflow.
-External coding agents are workers, not the Praxis runtime foundation.
-```
-
-本计划的 v0.1 范围以以下规格为准：
-
-```text
-docs/PRODUCT_SPEC.md
-docs/PROJECT_INTAKE_SPEC.md
-docs/PROJECT_CREATION_SPEC.md
-docs/DEVELOPMENT_GRAPH_SPEC.md
-docs/AGENT_RUNTIME_SPEC.md
-docs/CODING_AGENT_ADAPTER_SPEC.md
-docs/MODEL_ROUTER_SPEC.md
-docs/LOCAL_KNOWLEDGE_SPEC.md
-docs/CLEAN_ROOM_BORROWING_SPEC.md
+Schema first, UI second.
+Facts first, interpretation second.
+Cache first, acceptance before durable memory.
+Explain before Plan. Plan before Apply.
+Open Existing Project first, Create New Project second.
+MCP Server is a first-class external surface, not a later afterthought.
+External coding agents are workers, not the Praxis foundation.
+Existing source code is not modified automatically in v0.1.
 ```
 
 ---
 
-## 2. Step 1：重构入口
+## 2. v0.1 顺序
 
-### 目标
+### Step 1. Schema Contracts
 
-启动后不显示 demo graph，而显示 HomePage。
-
-HomePage 是产品入口，不是营销页，也不是内置样例图入口。任何 graph workspace 都必须来自真实工程扫描、真实产品构想或已存在的 `.distinction`。
-
-### 文件
+目标：
 
 ```text
-apps/studio-desktop/src/pages/HomePage.tsx
-apps/studio-desktop/src/App.tsx
-apps/studio-desktop/src/routes.ts
+freeze cross-package schemas
+define schemaVersion policy
+require TypeScript interface + Zod schema + JSON fixture + round-trip test
 ```
 
-### UI
+主要产物：
 
 ```text
-Praxis Studio
-
-[ Open Existing Project ]
-[ Create New Project ]
-[ Recent Projects ]
-[ Model Settings ]
+packages/schema/
+docs/specs/23-schema-contract.md
 ```
 
-### 验收
+### Step 2. runtime-cli
+
+目标：
 
 ```text
-启动桌面端后可以看到 HomePage。
-点击 Open Existing Project 进入项目选择流程。
-点击 Create New Project 进入新建项目向导。
-没有内置 demo graph 作为主 workflow。
+build the core runtime surface once
+reuse it from desktop, tests and MCP server
 ```
 
----
-
-## 3. Step 2：runtime-cli
-
-### 目标
-
-把核心能力做成 CLI，供 Tauri、VS Code 插件、后续 MCP Server 复用。
-
-### 目录
-
-```text
-apps/runtime-cli/
-```
-
-### 命令
+关键命令：
 
 ```bash
 praxis-runtime scan --root <path>
-praxis-runtime profile --snapshot <snapshot.json>
-praxis-runtime generate-graph --snapshot <snapshot.json> --profile <profile.json>
-praxis-runtime init-memory --root <path> --graph <graph.json>
-praxis-runtime create-project --plan <plan.json>
-praxis-runtime chat --project-root <path> --target <node-or-edge-id> --mode explain
-praxis-runtime generate-task --plan <plan.json>
+praxis-runtime code-facts --root <path> --provider <provider>
+praxis-runtime profile --root <path>
+praxis-runtime understand --root <path>
+praxis-runtime accept-understanding --root <path>
+praxis-runtime model-architecture --root <path>
+praxis-runtime detect-findings --root <path>
+praxis-runtime project:view <architecture|plan|memory|trace> --root <path>
+praxis-runtime context:build --root <path> --anchor <anchor>
+praxis-runtime chat --project-root <path> --target <anchor> --mode <explain|plan>
+praxis-runtime task:generate --root <path> --anchor <anchor>
+praxis-runtime serve --mcp --path <project>
+praxis-runtime intake --root <path>
 ```
 
-### 技术
+### Step 3. repository-scanner
 
-- Node.js
-- TypeScript
-- commander 或 cac
-- JSON 输入输出
-- 所有命令必须可单独测试
-
-### 验收
+目标：
 
 ```text
-npm run build 后可以执行 runtime-cli。
-scan/profile/generate-graph 三个命令可以串起来运行。
+produce RepositorySnapshot from real repositories
 ```
 
----
-
-## 4. Step 3：repository-scanner
-
-### 目标
-
-扫描真实工程，输出 RepositorySnapshot。
-
-### 包
+主要包：
 
 ```text
 packages/repository-scanner/
 ```
 
-### 需要实现
+### Step 4. code-fact-graph + CodeGraphProvider
+
+目标：
 
 ```text
-walk files
-ignore patterns
-manifest detection
-language detection
-role hint
-import extraction
-repository statistics
+normalize file / symbol / relation facts into CodeFactGraphSnapshot
+support native provider first
+keep CodeGraph as optional provider behind Praxis contract
 ```
 
-### 忽略目录
+主要包：
 
 ```text
-.git
-node_modules
-dist
-build
-target
-.next
-.turbo
-.cache
-.venv
-__pycache__
+packages/code-fact-graph/
+docs/specs/20-code-fact-graph.md
+docs/specs/24-codegraph-provider.md
 ```
 
-### 输出模型
+### Step 5. project-profiler
 
-```ts
-interface RepositorySnapshot {
-  root: string;
-  name: string;
-  scannedAt: string;
-  files: SourceFileSummary[];
-  directories: DirectorySummary[];
-  manifests: ProjectManifest[];
-  docs: DocumentSummary[];
-  git?: GitSummary;
-  statistics: RepositoryStatistics;
-}
-```
-
-### 验收
-
-对 praxis-studio 自身运行：
-
-```bash
-praxis-runtime scan --root .
-```
-
-必须识别：
+目标：
 
 ```text
-package.json
-tsconfig.base.json
-apps/studio-desktop
-packages/*
-src-tauri
+infer project kind, frameworks, module candidates and profile-level review questions
 ```
 
----
-
-## 5. Step 4：project-profiler
-
-### 目标
-
-从 RepositorySnapshot 生成 ProjectProfile。
-
-### 包
+主要包：
 
 ```text
 packages/project-profiler/
 ```
 
-### 需要识别
+### Step 6. repository-understanding
+
+目标：
 
 ```text
-projectKinds
-languages
-frameworks
-buildSystems
-packageManagers
-entrypoints
-testFiles
-testCommands
-runCommands
-buildCommands
-moduleCandidates
-confidence
-evidence
+convert repository snapshot and code facts into reviewable FACT memory patches
 ```
 
-### 规则
+主要包：
 
 ```text
-package.json + workspaces → monorepo
-tauri.conf.json → desktop_app / tauri
-Cargo.toml → rust
-vite.config.ts → vite
-apps/* → application module
-packages/* → architecture/runtime/domain modules
-docs/* → docs module
+packages/repository-understanding/
+docs/specs/21-repository-understanding-patch.md
 ```
 
-### 验收
+### Step 7. local-knowledge writer
 
-对 praxis-studio 识别：
+目标：
 
 ```text
-ProjectKind: desktop_app, monorepo
-Languages: TypeScript, Rust
-Frameworks: Tauri, React, Vite
-Modules:
-  apps/studio-desktop
-  packages/core
-  packages/development-graph
-  packages/agent-runtime
-  packages/model-router
+write .distinction using durable-vs-cache policy
+support initialization, merge review and backup-and-write
 ```
 
----
-
-## 6. Step 5：graph-generator
-
-### 目标
-
-从 ProjectProfile 生成 DevelopmentGraphCandidate。
-
-### 包
+主要包：
 
 ```text
-packages/graph-generator/
+packages/local-knowledge/
+docs/LOCAL_KNOWLEDGE_SPEC.md
 ```
 
-### 本地规则
+### Step 8. architecture-modeler
 
-节点：
+目标：
 
 ```text
-project node
-module nodes
-document nodes
-test nodes
-risk candidate nodes
+turn accepted FACT memory into ArchitectureModelPatch
+keep module and dependency meaning as reviewable inference
 ```
 
-边：
+主要包：
 
 ```text
-project contains module
-module depends_on module
-docs records project
-test validates module
-risk impacts module
+packages/architecture-modeler/
 ```
 
-### Agent 增强
+### Step 9. finding-detector
 
-如果配置模型，则调用 `project.intake.analyze`，生成：
+目标：
 
 ```text
-assumptions
-warnings
-questions
-candidate edge labels
-candidate module role refinement
+emit structured AntiPatternFinding records
+map findings to governance playbooks
 ```
 
-### 验收
-
-对 praxis-studio 生成：
+主要包：
 
 ```text
-nodes.json candidate
-edges.json candidate
-warnings
-questions
+packages/finding-detector/
+docs/specs/22-architecture-modeler-and-finding-detector.md
+docs/specs/28-default-playbooks-v0.1.md
 ```
 
----
+### Step 10. projection-engine
 
-## 7. Step 6：model-router + provider-deepseek
-
-### 目标
-
-默认 DeepSeek，但架构支持多模型。
-
-### 包
+目标：
 
 ```text
-packages/model-router/
-packages/provider-deepseek/
+project memory/models/rules into views and reports
+track fresh / stale / regenerating / failed state
 ```
 
-### 必须实现
+主要包：
 
 ```text
-DeepSeekProvider
-ModelRouter
-IDE model settings loading
-route resolution
-JSON response validation
-usage logging
+packages/projection-engine/
+docs/specs/26-projection-engine.md
 ```
 
-### 验收
+### Step 11. Project Intake Review UI
+
+目标：
 
 ```text
-Chat / Plan / Create New Project AI steps fail explicitly.
-Synthetic AI responses are forbidden.
-有 IDE 级 API key 或启动进程里的 DEEPSEEK_API_KEY 时可以调用 DeepSeekProvider。
+review repository understanding, memory patches, architecture candidates and findings before acceptance
 ```
 
----
+主要页面：
 
-## 8. Step 7：agent-runtime + prompt-registry
+```text
+HomePage
+ProjectIntakeReviewPage
+```
 
-### 目标
+### Step 12. Development Graph Workspace
 
-实现 Explain / Plan / limited Apply 的基础运行时。
+目标：
 
-### 包
+```text
+show projected views instead of one authoritative graph
+surface architecture / plan / memory / trace / finding annotations
+```
+
+### Step 13. context-builder / ContextPacket
+
+目标：
+
+```text
+resolve graph nodes, edges, findings and tasks into bounded ContextPacket
+include code fact references and scope policy
+```
+
+主要包：
+
+```text
+packages/context-builder/
+docs/specs/14-graph-anchored-context.md
+```
+
+### Step 14. MCP Server
+
+目标：
+
+```text
+expose Praxis memory/model/finding/context/task capability to external IDEs and agents
+without requiring Praxis Desktop UI
+```
+
+主要规格：
+
+```text
+docs/specs/25-mcp-server.md
+```
+
+### Step 15. agent-runtime + prompt-registry
+
+目标：
+
+```text
+run Explain / Plan / limited Apply over ContextPacket, governance playbooks and schema-validated outputs
+```
+
+主要包：
 
 ```text
 packages/agent-runtime/
 packages/prompt-registry/
-packages/context-builder/
-packages/plan-model/
 packages/trace-recorder/
 ```
 
-### Runtime Flow
+### Step 16. Coding Task Agent + ManualAdapter
+
+目标：
 
 ```text
-selected target
-→ build context
-→ choose mode
-→ resolve model
-→ load prompt
-→ call model
-→ parse output
-→ validate schema
-→ return result
-→ record trace
+turn approved plans and findings into controlled external coding tasks
+support manual result import and verification
 ```
 
-### Mode
+主要包：
 
 ```text
-Explain:
-  no mutation
-
-Plan:
-  no mutation, outputs plan
-
-Apply:
-  only .distinction/docs/tasks/new project files
+packages/coding-agent-adapter/
 ```
 
-### 验收
+### Step 17. Create New Project Wizard
+
+目标：
 
 ```text
-选中 node 可以 explain。
-选中 edge 可以 explain。
-edge explain 可以生成 plan。
-所有模型调用写入 trace。
+build the second closed loop after Open Existing Project is stable
+generate memory, models, specs, graph projections, skeleton and controlled tasks from product intent
 ```
 
----
-
-## 9. Step 8：Project Intake Review UI
-
-### 目标
-
-展示候选图谱，让用户确认。
-
-### 页面
-
-```text
-apps/studio-desktop/src/pages/ProjectIntakeReviewPage.tsx
-```
-
-### 组件
-
-```text
-ProjectProfilePanel
-ModuleCandidateTable
-GraphCandidatePreview
-WarningsPanel
-QuestionsPanel
-IntakeActions
-```
-
-### 操作
-
-```text
-Accept Graph
-Ask AI Improve
-Cancel
-```
-
-第一版 `Edit Before Save` 可先不做复杂图编辑，只做字段编辑或预留。
-
-### 验收
-
-```text
-打开真实工程后进入 Intake Review。
-能看到项目画像、模块候选、warnings、questions。
-点击 Accept Graph 写入 .distinction。
-```
-
----
-
-## 10. Step 9：local-knowledge writer
-
-### 目标
-
-把确认后的 graph 和记忆写入项目。
-
-### 包
-
-```text
-packages/local-knowledge/
-```
-
-### 写入结构
-
-```text
-.distinction/
-├─ graph/nodes.json
-├─ graph/edges.json
-├─ graph/progress.json
-├─ graph/views.json
-├─ memory/changes.md
-├─ memory/decisions.md
-├─ memory/traces.jsonl
-├─ memory/incidents.json
-├─ memory/do-not-repeat.md
-├─ rules/architecture.md
-├─ rules/boundaries.md
-├─ rules/ai-constraints.md
-├─ tasks/
-└─ reports/project-intake.md
-```
-
-### 覆盖策略
-
-```text
-如果 .distinction 不存在：创建
-如果已存在：进入 Merge Review 或备份
-第一版可以实现 backup-and-write
-```
-
-### 验收
-
-```text
-Accept Graph 后真实项目目录出现 .distinction。
-重新打开项目可以读取已有 graph。
-```
-
----
-
-## 11. Step 10：Create New Project Wizard
-
-### 目标
-
-从产品构想创建真实工程。
-
-Create New Project 是 v0.1 的第二条完整闭环，不是后续功能。它必须能生成 requirements、architecture、Development Graph、docs 和 `.distinction`。
-
-### 页面
-
-```text
-CreateProjectWizardPage
-```
-
-### 步骤
-
-```text
-1. Product Intent
-2. Project Type
-3. Stack Preference
-4. Generated Plan Review
-5. Apply
-```
-
-### 包
+主要包：
 
 ```text
 packages/project-wizard/
@@ -532,170 +303,42 @@ packages/template-generator/
 packages/file-generator/
 ```
 
-### 输出文件
+---
+
+## 3. 先完成的闭环
+
+Praxis v0.1 先证明这条链路：
 
 ```text
-README.md
-docs/PRODUCT_SPEC.md
-docs/ARCHITECTURE.md
-docs/ROADMAP.md
-.distinction/graph/nodes.json
-.distinction/graph/edges.json
-.distinction/memory/changes.md
-.distinction/memory/decisions.md
-.distinction/rules/ai-constraints.md
+RepositorySnapshot
+  -> CodeFactGraphSnapshot
+  -> RepositoryUnderstandingPatch
+  -> memory/facts.jsonl
+  -> ArchitectureModelPatch
+  -> findings
+  -> ProjectionManifest + views
+  -> ContextPacket
+  -> Explain / Plan
+  -> Coding task
+  -> external result import
+  -> detector rerun
 ```
 
-### 验收
-
-```text
-输入产品构想后能生成新工程目录。
-新工程能被 Praxis 打开并显示 Development Graph。
-```
+Create New Project 是 v0.1 的第二条闭环，但不应抢在上面这条链路之前定义产品核心。
 
 ---
 
-## 12. Step 11：Development Graph Workspace
+## 4. 验收重点
 
-### 目标
-
-展示图谱，并支持节点/边 Chat。
-
-### 技术
+v0.1 完成时，至少要硬性证明：
 
 ```text
-React Flow / xyflow
+1. .distinction 的 authority / cache 分层一致。
+2. CodeFactGraphSnapshot 不会直接越权写 durable memory。
+3. Repository understanding、architecture modeling、finding detection、projection engine 有清晰命令和缓存边界。
+4. Desktop UI 与 MCP Server 共享同一套 runtime contracts。
+5. ContextPacket 能从 graph / finding / task anchor 稳定生成。
+6. Acceptance 使用 fixtures + golden files，而不是只看手工演示。
 ```
 
-### 区域
-
-```text
-Left: Outline
-Center: Graph
-Right: Inspector + Chat
-Bottom: Trace / Memory Timeline
-```
-
-### 节点显示
-
-```text
-title
-kind
-status
-progress
-risk badge
-```
-
-### 边显示
-
-```text
-kind
-progress
-risk
-blocked indicator
-```
-
-### 验收
-
-```text
-能显示真实工程图谱。
-能选中节点。
-能选中边。
-右侧 Chat 上下文随选择变化。
-```
-
----
-
-## 13. Step 12：Coding Task Agent + ManualAdapter
-
-### 目标
-
-从 Plan 生成外部 coding agent 可执行任务。
-
-### 包
-
-```text
-packages/coding-agent-adapter/
-```
-
-### 输出
-
-```text
-.distinction/tasks/TASK-0001.md
-```
-
-### Adapter
-
-```text
-ManualAdapter
-ClaudeCodeBestAdapter skeleton
-CodexAdapter skeleton
-ClaudeCodeAdapter skeleton
-OpenCodeAdapter skeleton
-```
-
-### 验收
-
-```text
-从一个 edge plan 生成 TASK.md。
-TASK.md 可以复制给 Claude Code / Codex / CCB。
-用户可以手动回填结果并更新节点/边进度。
-```
-
----
-
-## 14. CCB / External Agent Strategy
-
-v0.1 可以研究 Claude Code Best，但采用 clean-room borrowing：
-
-```text
-study mechanism
-define Praxis-owned interfaces
-rewrite around Development Graph
-keep questionable experiments outside main build
-use CCB as optional adapter, not runtime foundation
-```
-
-允许吸收：
-
-```text
-Agentic Loop
-Tool Registry
-Context Builder
-Permission / Plan Mode
-Project Memory / Rules
-Trace System
-MCP / ACP adapter shape
-Sub-Agent role pipeline
-```
-
-不允许吸收进主工程：
-
-```text
-Claude Code compatibility logic
-reverse-engineered core loop code
-login / account / remote-control code
-brand-specific behavior
-Anthropic Claude Code emulation
-```
-
-如需实验，放入：
-
-```text
-third_party_experiments/ccb-runtime-study/
-```
-
-并且不得进入主 build 或成为发布依赖。
-
----
-
-## 15. v0.1 完成定义
-
-v0.1 完成时，必须能完成：
-
-```text
-Open Existing Project → Graph → Chat → Plan → Task
-Create New Project → Requirements → Architecture → Graph → Files
-```
-
-这两个闭环跑通，v0.1 才算完成。
+本计划的详细契约以 `docs/specs/*.md` 为准。

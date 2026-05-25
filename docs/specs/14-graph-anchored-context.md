@@ -110,6 +110,7 @@ Praxis must pass a structured `ContextPacket`, not only a natural language summa
 
 ```ts
 export interface ContextPacket {
+  schemaVersion: "praxis.contextPacket.v1";
   id: string;
   anchor: ContextAnchor;
 
@@ -152,6 +153,16 @@ export interface ContextPacket {
     riskEdges: string[];
   };
 
+  codeFacts?: {
+    snapshotGeneratedAt?: string;
+    provider?: "native" | "codegraph" | "lsp" | "scip";
+    relatedNodeIds: string[];
+    relatedEdgeIds: string[];
+    callerIds: string[];
+    calleeIds: string[];
+    impactedSymbolIds: string[];
+  };
+
   discussionPolicy: {
     defaultScope: ContextExpansionLevel;
     currentScope: ContextExpansionLevel;
@@ -163,6 +174,8 @@ export interface ContextPacket {
   generatedAt: string;
 }
 ```
+
+`praxis_context_packet` from the MCP server must return the same shape.
 
 ## 6. Anchor Resolution Chain
 
@@ -342,4 +355,6 @@ Graph-anchored context is implemented when:
 7. Finding anchors produce quality remediation context.
 8. New relevant discoveries become CANDIDATE memory.
 9. User confirmation updates memory and triggers live graph reprojection.
+10. ContextPacket can include code fact references when symbol / call / impact data is available.
+11. MCP and Desktop use the same ContextPacket schema.
 ```

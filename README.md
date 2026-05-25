@@ -36,6 +36,8 @@ Memory Updates
 Live Graph Reprojection
 ```
 
+对于 Existing Project，这条链路中的 `RepositorySnapshot`、`CodeFactGraphSnapshot` 和 projection artifacts 都是可重建输入或缓存，不是 durable project authority。
+
 ---
 
 ## 1. Praxis Studio 解决什么问题
@@ -83,6 +85,8 @@ Praxis Studio 必须遵守以下原则：
 16. AI must not directly edit graph views. AI reads code and proposes MemoryPatch / ModelPatch / PlanPatch; Praxis validates patches and regenerates UML / C4 / Gantt projections.
 17. Quality management is anti-pattern detection plus graph annotation plus finding-anchored resolution plus live reprojection.
 18. Praxis provides opinionated governance defaults. Users intervene at meaning, risk, priority and scope points; they are not forced to design architecture from scratch.
+19. Code fact providers write rebuildable cache first. Durable memory is written only through accepted patches.
+20. Praxis runtime must remain reusable through CLI, Desktop and MCP without making any one surface the source of truth.
 ```
 
 ---
@@ -288,9 +292,13 @@ Praxis Studio v0.1 支持两条入口：
 ```text
 Open Existing Project
 → Scan repository
-→ Build repository FACT memory
+→ Build RepositorySnapshot
+→ Build CodeFactGraphSnapshot
+→ Build RepositoryUnderstandingPatch
+→ Accept repository FACT memory
 → Infer structure memory
 → Build architecture model candidate
+→ Detect findings
 → Build graph projections
 → User review / confirm
 → Write .distinction
@@ -498,12 +506,23 @@ Model Call Trace
 
 ## 8. `.distinction` 项目记忆目录
 
-`.distinction` 是 Praxis 的项目级第二大脑。它借鉴 OpenWolf 的 `.wolf/` 思想，但更强调结构化、可靠性、建模和图谱投影。
+`.distinction` 是 Praxis 的项目级第二大脑。它借鉴 OpenWolf 的 `.wolf/` 思想，但更强调结构化、可靠性、建模、projection status 和 provider/cache boundary。
 
 建议 v0.1 目录结构：
 
 ```text
 .distinction/
+├─ project.json
+│
+├─ cache/
+│  ├─ repository-snapshot.json
+│  ├─ code-fact-graph.json
+│  ├─ project-profile.json
+│  ├─ repository-understanding-patch.json
+│  ├─ architecture-model-patch.json
+│  ├─ architecture-findings.json
+│  └─ projection-manifest.json
+│
 ├─ memory/
 │  ├─ facts.jsonl
 │  ├─ inferences.jsonl
@@ -575,11 +594,20 @@ Model Call Trace
 Source of truth：
 
 ```text
+project.json
 memory/*.jsonl
 models/*.json
+specs/**/*.md
 rules/*.md
 rules/playbooks/**/*.md
-confirmed specs
+confirmed project constraints
+```
+
+Rebuildable cache：
+
+```text
+cache/*.json
+provider-local scratch such as .codegraph/
 ```
 
 Derived / projection cache：
@@ -589,6 +617,8 @@ views/**/*.json
 views/**/*.mmd
 reports/*.md
 ```
+
+`cache/` 可删除、可重建。`views/` 和 `reports/` 是 derived projection cache。只有 accepted memory、models、rules 和 confirmed specs 才是 Praxis authority。
 
 ---
 
@@ -671,9 +701,11 @@ Desktop Shell: Tauri
 UI: React + TypeScript + Vite
 Graph UI: React Flow / xyflow
 Runtime: TypeScript packages + Node sidecar CLI
+Repository Intelligence: repository-scanner + code-fact-graph + repository-understanding
 Local Memory: .distinction/
 Future Runtime Cache: SQLite
 Default Model: DeepSeek
 Multi Model: Model Router
+External Protocol: MCP Server
 External Coding Agent: ManualAdapter first, Codex / Claude Code adapters later
 ```

@@ -272,6 +272,8 @@ Project-level overrides may later live in:
 .distinction/rules/playbooks/
 ```
 
+The first concrete bundled mapping for v0.1 is defined in `docs/specs/28-default-playbooks-v0.1.md`.
+
 Initial catalog:
 
 ```text
