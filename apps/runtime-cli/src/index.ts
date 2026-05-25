@@ -1733,7 +1733,9 @@ async function commandProjectView(args: Args, rest: string[]): Promise<void> {
   const manifest = buildProjectionManifest({
     root: resolvedRoot,
     dependencyView,
-    dependencyViewPath: ".distinction/views/architecture/dependency-view.json"
+    dependencyViewPath: ".distinction/views/architecture/dependency-view.json",
+    authority: "review_cache",
+    sourceCachePaths: [projectRelativePath(resolvedRoot, modelPath), projectRelativePath(resolvedRoot, findingsPath)]
   });
   const manifestPath = path.join(resolvedRoot, ".distinction", "cache", "projection-manifest.json");
   await writeJson(manifestPath, manifest);
@@ -1775,6 +1777,13 @@ function codeFactProviderArg(args: Args): CodeFactProviderSource {
   const provider = String(args.provider ?? "native");
   if (provider === "native" || provider === "codegraph" || provider === "lsp" || provider === "scip") return provider;
   throw new Error(`Unsupported code fact provider: ${provider}`);
+}
+
+function projectRelativePath(root: string, filePath: string): string {
+  const absolute = path.resolve(filePath);
+  const relative = path.relative(root, absolute);
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) return absolute.replace(/\\/g, "/");
+  return relative.replace(/\\/g, "/");
 }
 
 function numberArg(args: Args, key: string): number | undefined {

@@ -1,86 +1,27 @@
-import type { ArchitectureDependency, ArchitectureModelPatch, ArchitectureModule } from "@praxis/architecture-modeler";
-import type { ArchitectureFinding, ArchitectureFindingReport } from "@praxis/finding-detector";
+import type {
+  ArchitectureDependency,
+  ArchitectureDependencyView,
+  ArchitectureDependencyViewAnnotation,
+  ArchitectureDependencyViewEdge,
+  ArchitectureDependencyViewNode,
+  ArchitectureFinding,
+  ArchitectureFindingReport,
+  ArchitectureModelPatch,
+  ArchitectureModule,
+  ProjectArchitectureDependencyViewInput,
+  ProjectionManifest
+} from "@praxis/schema";
 
-export type ProjectionStatus = "fresh" | "stale" | "regenerating" | "failed";
-
-export interface ArchitectureDependencyView {
-  schemaVersion: "praxis.architectureDependencyView.v1";
-  id: string;
-  kind: "architecture_dependency";
-  root: string;
-  generatedAt: string;
-  nodes: ArchitectureDependencyViewNode[];
-  edges: ArchitectureDependencyViewEdge[];
-  annotations: ArchitectureDependencyViewAnnotation[];
-}
-
-export interface ArchitectureDependencyViewNode {
-  id: string;
-  label: string;
-  path: string;
-  role: string;
-  confidence: ArchitectureModule["confidence"];
-  knowledgeKind: ArchitectureModule["knowledgeKind"];
-  sourceMemoryIds: string[];
-}
-
-export interface ArchitectureDependencyViewEdge {
-  id: string;
-  source: string;
-  target: string;
-  kind: ArchitectureDependency["kind"];
-  confidence: ArchitectureDependency["confidence"];
-  knowledgeKind: ArchitectureDependency["knowledgeKind"];
-  sourceMemoryIds: string[];
-  evidenceCount: number;
-  findingIds: string[];
-}
-
-export interface ArchitectureDependencyViewAnnotation {
-  id: string;
-  findingId: string;
-  antiPatternId: string;
-  severity: ArchitectureFinding["severity"];
-  status: ArchitectureFinding["status"];
-  targetIds: string[];
-  summary: string;
-}
-
-export interface ProjectionManifest {
-  schemaVersion: "praxis.projectionManifest.v1";
-  root: string;
-  generatedAt: string;
-  views: ProjectionViewRecord[];
-}
-
-export interface ProjectionViewRecord {
-  id: string;
-  kind:
-    | "architecture_dependency"
-    | "architecture_component"
-    | "architecture_context"
-    | "uml_class"
-    | "project_plan"
-    | "memory_map"
-    | "trace_graph"
-    | "quality_inbox";
-  path: string;
-  sourceMemoryIds: string[];
-  sourceModelIds: string[];
-  sourceFindingIds: string[];
-  sourceTaskIds: string[];
-  sourceTraceIds: string[];
-  sourceSpecPaths: string[];
-  status: ProjectionStatus;
-  generatedAt?: string;
-  error?: string;
-}
-
-export interface ProjectArchitectureDependencyViewInput {
-  model: ArchitectureModelPatch;
-  findings?: ArchitectureFindingReport;
-  generatedAt?: string;
-}
+export type {
+  ArchitectureDependencyView,
+  ArchitectureDependencyViewAnnotation,
+  ArchitectureDependencyViewEdge,
+  ArchitectureDependencyViewNode,
+  ProjectArchitectureDependencyViewInput,
+  ProjectionManifest,
+  ProjectionStatus,
+  ProjectionViewRecord
+} from "@praxis/schema";
 
 export function projectArchitectureDependencyView(input: ProjectArchitectureDependencyViewInput): ArchitectureDependencyView {
   const generatedAt = input.generatedAt ?? new Date().toISOString();
@@ -103,6 +44,8 @@ export function buildProjectionManifest(input: {
   generatedAt?: string;
   dependencyView?: ArchitectureDependencyView;
   dependencyViewPath?: string;
+  authority?: "review_cache" | "durable_model";
+  sourceCachePaths?: string[];
   error?: string;
 }): ProjectionManifest {
   const generatedAt = input.generatedAt ?? new Date().toISOString();
@@ -118,6 +61,11 @@ export function buildProjectionManifest(input: {
         id: "view:architecture:dependency",
         kind: "architecture_dependency",
         path: input.dependencyViewPath ?? ".distinction/views/architecture/dependency-view.json",
+        authority: input.authority ?? "review_cache",
+        sourceCachePaths: input.sourceCachePaths ?? [
+          ".distinction/cache/architecture-model-patch.json",
+          ".distinction/cache/architecture-findings.json"
+        ],
         sourceMemoryIds,
         sourceModelIds: ["cache:architecture-model-patch"],
         sourceFindingIds,

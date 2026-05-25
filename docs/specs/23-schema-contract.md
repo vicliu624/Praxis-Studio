@@ -125,6 +125,35 @@ export * from "./repository";
 export * from "./code-fact";
 ```
 
+### 5.1 Bootstrap Implementation Status
+
+The first implemented package is intentionally narrower than the full preferred layout:
+
+```text
+packages/schema/
+  src/
+    common.ts
+    code-fact.ts
+    repository-understanding.ts
+    architecture.ts
+    finding.ts
+    projection.ts
+```
+
+This first tranche governs the current native pipeline:
+
+```text
+CodeFactGraphSnapshot
+RepositoryUnderstandingPatch
+MemoryRecord
+ArchitectureModelPatch
+ArchitectureFindingReport
+ProjectionManifest
+ArchitectureDependencyView
+```
+
+Runtime Zod schemas, fixtures and round-trip tests remain required before the schema contract is considered complete.
+
 ---
 
 ## 6. Versioning Rules

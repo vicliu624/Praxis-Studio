@@ -121,6 +121,8 @@ export interface ProjectionViewRecord {
 
   path: string;
 
+  authority: "review_cache" | "durable_model";
+  sourceCachePaths: string[];
   sourceMemoryIds: string[];
   sourceModelIds: string[];
   sourceFindingIds: string[];
@@ -133,6 +135,9 @@ export interface ProjectionViewRecord {
   error?: string;
 }
 ```
+
+`authority` tells consumers whether a view was projected from confirmed durable model state or from intake/review cache artifacts.
+`sourceCachePaths` is required whenever `authority` is `review_cache`, so Desktop and MCP clients can label the view as review-derived instead of confirmed architecture truth.
 
 ---
 

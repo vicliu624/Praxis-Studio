@@ -1,36 +1,15 @@
-import { slugify, type Confidence, type KnowledgeKind } from "@praxis/core";
-import type { ArchitectureDependency, ArchitectureModelPatch, ArchitectureModule } from "@praxis/architecture-modeler";
-import type { CodeFactEvidenceRef } from "@praxis/code-fact-graph";
+import { slugify } from "@praxis/core";
+import type {
+  ArchitectureDependency,
+  ArchitectureFinding,
+  ArchitectureFindingKind,
+  ArchitectureFindingReport,
+  ArchitectureModelPatch,
+  ArchitectureModule,
+  CodeFactEvidenceRef
+} from "@praxis/schema";
 
-export type ArchitectureFindingKind = "architecture_dependency_without_evidence" | "package_dependency_cycle";
-
-export interface ArchitectureFinding {
-  id: string;
-  antiPatternId: ArchitectureFindingKind;
-  category: "architecture";
-  title: string;
-  summary: string;
-  severity: "info" | "low" | "medium" | "high" | "critical";
-  confidence: Confidence;
-  knowledgeKind: KnowledgeKind;
-  affectedModuleIds: string[];
-  affectedDependencyIds: string[];
-  affectedSourcePaths: string[];
-  evidence: CodeFactEvidenceRef[];
-  suggestedQuestions: string[];
-  suggestedPlanActions: string[];
-  status: "open" | "acknowledged" | "planned" | "in_progress" | "mitigated" | "resolved" | "false_positive" | "accepted_risk";
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface ArchitectureFindingReport {
-  schemaVersion: "praxis.architectureFindingReport.v1";
-  root: string;
-  generatedAt: string;
-  findings: ArchitectureFinding[];
-  detectorIds: string[];
-}
+export type { ArchitectureFinding, ArchitectureFindingKind, ArchitectureFindingReport } from "@praxis/schema";
 
 export function detectArchitectureFindings(model: ArchitectureModelPatch): ArchitectureFindingReport {
   const generatedAt = new Date().toISOString();

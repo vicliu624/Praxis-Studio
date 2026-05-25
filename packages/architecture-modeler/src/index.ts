@@ -1,61 +1,21 @@
-import { slugify, type Confidence } from "@praxis/core";
-import type { CodeFactEvidenceRef } from "@praxis/code-fact-graph";
-import type { MemoryRecord } from "@praxis/repository-understanding";
+import { slugify } from "@praxis/core";
+import type {
+  ArchitectureDependency,
+  ArchitectureModelPatch,
+  ArchitectureModelWarning,
+  ArchitectureModule,
+  ArchitectureModuleRole,
+  CodeFactEvidenceRef,
+  MemoryRecord
+} from "@praxis/schema";
 
-export type ArchitectureModuleRole =
-  | "ui"
-  | "application"
-  | "domain"
-  | "port"
-  | "adapter"
-  | "infrastructure"
-  | "runtime"
-  | "model"
-  | "projection"
-  | "test"
-  | "docs"
-  | "storage"
-  | "tooling"
-  | "unknown";
-
-export interface ArchitectureModule {
-  id: string;
-  name: string;
-  path: string;
-  role: ArchitectureModuleRole;
-  responsibilities: string[];
-  sourceMemoryIds: string[];
-  evidence: CodeFactEvidenceRef[];
-  confidence: Confidence;
-  knowledgeKind: "INFERENCE" | "CANDIDATE";
-}
-
-export interface ArchitectureDependency {
-  id: string;
-  sourceModuleId: string;
-  targetModuleId: string;
-  kind: "depends_on";
-  sourceMemoryIds: string[];
-  evidence: CodeFactEvidenceRef[];
-  confidence: Confidence;
-  knowledgeKind: "INFERENCE";
-}
-
-export interface ArchitectureModelWarning {
-  id: string;
-  severity: "info" | "warning";
-  summary: string;
-}
-
-export interface ArchitectureModelPatch {
-  schemaVersion: "praxis.architectureModelPatch.v1";
-  root: string;
-  generatedAt: string;
-  modules: ArchitectureModule[];
-  dependencies: ArchitectureDependency[];
-  warnings: ArchitectureModelWarning[];
-  confidence: Confidence;
-}
+export type {
+  ArchitectureDependency,
+  ArchitectureModelPatch,
+  ArchitectureModelWarning,
+  ArchitectureModule,
+  ArchitectureModuleRole
+} from "@praxis/schema";
 
 export function buildArchitectureModelPatch(root: string, memoryRecords: MemoryRecord[]): ArchitectureModelPatch {
   const fileFacts = memoryRecords.filter((record) => record.kind === "FACT" && record.type === "code.file.exists");

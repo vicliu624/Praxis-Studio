@@ -1,0 +1,13 @@
+{
+  "name": "@praxis/schema",
+  "version": "0.1.0-alpha.0",
+  "private": true,
+  "type": "module",
+  "description": "Shared Praxis schema contracts for CLI, Desktop, MCP, and runtime packages.",
+  "main": "dist/index.js",
+  "types": "src/index.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  }
+}
