@@ -1,0 +1,53 @@
+{
+  "schemaVersion": "praxis.mcp.statusResult.v1",
+  "root": "/repo",
+  "generatedAt": "2026-05-26T00:00:00.000Z",
+  "server": {
+    "name": "praxis-mcp-server",
+    "version": "0.1.0-alpha.0",
+    "readOnly": true
+  },
+  "distinction": {
+    "exists": true,
+    "path": "/repo/.distinction",
+    "cachePath": "/repo/.distinction/cache",
+    "memoryPath": "/repo/.distinction/memory",
+    "viewsPath": "/repo/.distinction/views"
+  },
+  "cache": {
+    "codeFacts": true,
+    "findings": true,
+    "projectionManifest": true,
+    "contextPacket": false
+  },
+  "views": {
+    "codeFacts": true,
+    "findings": true,
+    "projectedGraphViewCount": 2
+  },
+  "codeFacts": {
+    "provider": {
+      "name": "native-heuristic",
+      "source": "native",
+      "version": "0.1.0-alpha.0",
+      "runId": "code-facts:native:fixture",
+      "capabilities": ["file_structure", "imports_exports"]
+    },
+    "files": 1,
+    "nodes": 2,
+    "edges": 1,
+    "warnings": []
+  },
+  "findings": {
+    "count": 1,
+    "open": 1
+  },
+  "tools": [
+    "praxis_status",
+    "praxis_code_facts",
+    "praxis_findings",
+    "praxis_projection_views",
+    "praxis_context_packet"
+  ],
+  "warnings": []
+}

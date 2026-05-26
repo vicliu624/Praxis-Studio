@@ -1,17 +1,17 @@
 {
-  "name": "@praxis/context-builder",
+  "name": "@praxis/mcp-server",
   "version": "0.1.0-alpha.0",
   "private": true,
   "type": "module",
-  "description": "Build focused model context.",
+  "description": "Read-only MCP adapter for Praxis project intelligence.",
   "main": "dist/index.js",
-  "types": "dist/index.d.ts",
+  "types": "src/index.ts",
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@praxis/development-graph": "0.1.0-alpha.0",
+    "@praxis/context-builder": "0.1.0-alpha.0",
     "@praxis/schema": "0.1.0-alpha.0"
   }
 }

@@ -1,0 +1,52 @@
+{
+  "schemaVersion": "praxis.projectedGraphView.v1",
+  "id": "view:code-facts",
+  "kind": "code_fact",
+  "root": "/repo",
+  "generatedAt": "2026-05-26T00:00:00.000Z",
+  "authority": "review_cache",
+  "nodes": [
+    {
+      "id": "projection-node:code-file",
+      "kind": "file",
+      "label": "index.ts",
+      "source": {
+        "type": "code_fact",
+        "id": "code:file:packages-core-src-index-ts"
+      },
+      "anchor": {
+        "kind": "code_fact_node",
+        "id": "code:file:packages-core-src-index-ts",
+        "path": "packages/core/src/index.ts"
+      },
+      "path": "packages/core/src/index.ts"
+    }
+  ],
+  "edges": [
+    {
+      "id": "projection-edge:contains",
+      "kind": "contains",
+      "sourceId": "projection-node:project",
+      "targetId": "projection-node:code-file",
+      "source": {
+        "type": "code_fact_edge",
+        "id": "code-edge:project-contains-core-index"
+      },
+      "anchor": {
+        "kind": "code_fact_edge",
+        "id": "code-edge:project-contains-core-index",
+        "path": "packages/core/src/index.ts"
+      },
+      "confidence": "high"
+    }
+  ],
+  "annotations": [],
+  "sourceCachePaths": [".distinction/cache/code-fact-graph.json"],
+  "sourceMemoryIds": [],
+  "sourceModelIds": [],
+  "sourceFindingIds": [],
+  "sourceTaskIds": [],
+  "sourceTraceIds": [],
+  "sourceSpecPaths": [],
+  "status": "fresh"
+}

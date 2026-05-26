@@ -1,0 +1,156 @@
+{
+  "schemaVersion": "praxis.contextPacket.v1",
+  "id": "context-packet:fixture",
+  "root": "/repo",
+  "generatedAt": "2026-05-26T00:00:00.000Z",
+  "anchor": {
+    "kind": "finding",
+    "id": "finding:package-cycle:core-runtime"
+  },
+  "purpose": "explain",
+  "memory": {
+    "facts": [
+      {
+        "id": "mem:fact:core-file",
+        "kind": "FACT",
+        "type": "code.file.exists",
+        "subject": "packages/core/src/index.ts",
+        "predicate": "exists",
+        "object": "file",
+        "summary": "File exists in repository: packages/core/src/index.ts.",
+        "evidence": [
+          {
+            "source": "repository_scan",
+            "filePath": "packages/core/src/index.ts"
+          }
+        ],
+        "source": "code_fact_graph",
+        "confidence": "high",
+        "status": "active",
+        "createdAt": "2026-05-26T00:00:00.000Z",
+        "updatedAt": "2026-05-26T00:00:00.000Z"
+      }
+    ],
+    "inferences": [],
+    "candidates": [],
+    "confirmations": [],
+    "findings": [],
+    "decisions": []
+  },
+  "models": {
+    "architecture": {
+      "modules": [
+        {
+          "id": "arch-module:packages-core",
+          "name": "packages/core",
+          "path": "packages/core",
+          "role": "domain",
+          "responsibilities": ["Owns source files under packages/core."],
+          "sourceMemoryIds": ["mem:fact:core-file"],
+          "evidence": [
+            {
+              "source": "repository_scan",
+              "filePath": "packages/core/src/index.ts"
+            }
+          ],
+          "confidence": "medium",
+          "knowledgeKind": "INFERENCE"
+        }
+      ],
+      "dependencies": [],
+      "warnings": []
+    }
+  },
+  "codeFacts": {
+    "nodes": [
+      {
+        "id": "code:file:packages-core-src-index-ts",
+        "kind": "file",
+        "name": "index.ts",
+        "qualifiedName": "packages/core/src/index.ts",
+        "filePath": "packages/core/src/index.ts",
+        "language": "TypeScript",
+        "evidence": [
+          {
+            "source": "repository_scan",
+            "filePath": "packages/core/src/index.ts"
+          }
+        ]
+      }
+    ],
+    "edges": [],
+    "callers": [],
+    "callees": [],
+    "impacted": [],
+    "relatedFiles": [
+      {
+        "id": "code:file:packages-core-src-index-ts",
+        "path": "packages/core/src/index.ts",
+        "language": "TypeScript",
+        "extension": ".ts",
+        "sizeBytes": 28,
+        "lineCount": 1,
+        "roleHint": "domain",
+        "nodeIds": ["code:file:packages-core-src-index-ts"],
+        "evidence": [
+          {
+            "source": "repository_scan",
+            "filePath": "packages/core/src/index.ts"
+          }
+        ]
+      }
+    ]
+  },
+  "projections": {
+    "views": [],
+    "nodes": [],
+    "edges": [],
+    "annotations": []
+  },
+  "findings": [
+    {
+      "id": "finding:package-cycle:core-runtime",
+      "antiPatternId": "package_dependency_cycle",
+      "category": "architecture",
+      "title": "Package dependency cycle: packages/core -> apps/runtime-cli",
+      "summary": "Package-level dependencies form a cycle and may make architecture boundaries harder to evolve.",
+      "severity": "medium",
+      "confidence": "medium",
+      "knowledgeKind": "INFERENCE",
+      "affectedModuleIds": ["arch-module:packages-core"],
+      "affectedDependencyIds": [],
+      "affectedSourcePaths": ["packages/core/src/index.ts"],
+      "evidence": [
+        {
+          "source": "repository_scan",
+          "filePath": "packages/core/src/index.ts"
+        }
+      ],
+      "suggestedQuestions": ["Which module should own the shared abstraction that currently creates this cycle?"],
+      "suggestedPlanActions": ["Introduce or identify a stable dependency direction before generating remediation tasks."],
+      "status": "open",
+      "createdAt": "2026-05-26T00:00:00.000Z",
+      "updatedAt": "2026-05-26T00:00:00.000Z"
+    }
+  ],
+  "rules": {
+    "architectureRules": ["Architecture rules are loaded from .distinction/rules/architecture.md."],
+    "boundaryRules": [],
+    "aiConstraints": ["Explain before Plan."],
+    "playbooks": []
+  },
+  "scope": {
+    "includedPaths": ["packages/core/src/index.ts"],
+    "excludedPaths": [],
+    "expansionPolicy": "explain_first"
+  },
+  "authority": {
+    "memoryAuthority": "durable",
+    "projectionAuthority": "review_cache"
+  },
+  "trace": {
+    "createdBy": "cli",
+    "sourceViewId": "view:findings"
+  },
+  "warnings": []
+}

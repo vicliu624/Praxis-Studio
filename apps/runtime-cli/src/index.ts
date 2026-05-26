@@ -4,7 +4,7 @@ import path from "node:path";
 import { buildArchitectureModelPatch, type ArchitectureModelPatch } from "@praxis/architecture-modeler";
 import { buildCodeFactGraphSnapshot, type CodeFactProviderSource } from "@praxis/code-fact-graph";
 import { detectArchitectureFindings, type ArchitectureFindingReport } from "@praxis/finding-detector";
-import { buildProjectionManifest, projectArchitectureDependencyView } from "@praxis/projection-engine";
+import { buildProjectionManifest, projectArchitectureDependencyView, projectCodeFactGraphView, projectFindingsGraphView } from "@praxis/projection-engine";
 import {
   acceptedFactRecordsFromPatch,
   buildRepositoryUnderstandingPatch,
@@ -18,6 +18,8 @@ import {
   ArchitectureFindingReportSchema,
   ArchitectureModelPatchSchema,
   CodeFactGraphSnapshotSchema,
+  ContextPacketSchema,
+  ProjectedGraphViewSchema,
   ProjectionManifestSchema,
   RepositoryUnderstandingPatchSchema
 } from "@praxis/schema";
@@ -35,7 +37,7 @@ import {
   type PermissionRequestView,
   type ToolCallView
 } from "@praxis/chat-session";
-import { buildContext, type SelectionTarget } from "@praxis/context-builder";
+import { buildContext, buildContextPacket, parseGraphAnchor, type SelectionTarget } from "@praxis/context-builder";
 import {
   appendChange,
   appendFactRecords,
@@ -66,6 +68,7 @@ import { getPrompt } from "@praxis/prompt-registry";
 import { AgentLoop, persistRun, type AgentConversationMessage, type AgentRun, type AgentStep } from "@praxis/agent-loop";
 import { ToolRegistry } from "@praxis/tool-registry";
 import { registerAgentTools } from "@praxis/agent-loop/tools";
+import { startMcpServer } from "@praxis/mcp-server";
 
 type Args = Record<string, string | boolean>;
 
@@ -100,6 +103,8 @@ async function main(argv: string[]): Promise<void> {
     if (command === "model-architecture") return await commandModelArchitecture(args);
     if (command === "detect-findings") return await commandDetectFindings(args);
     if (command === "project:view") return await commandProjectView(args, rest);
+    if (command === "context-packet") return await commandContextPacket(args);
+    if (command === "serve") return await commandServe(args);
     if (command === "init-memory") return await commandInitMemory(args);
     if (command === "chat") return await commandChat(args);
     if (command === "chat-session-create") return await commandChatSessionCreate(args);
@@ -117,6 +122,12 @@ async function main(argv: string[]): Promise<void> {
     console.error(error instanceof Error ? error.message : String(error));
     process.exitCode = 1;
   }
+}
+
+async function commandServe(args: Args): Promise<void> {
+  if (args.mcp !== true) throw new Error("Unsupported serve mode. Use: praxis-runtime serve --mcp --path <project>");
+  const root = typeof args.path === "string" ? args.path : required(args, "root");
+  await startMcpServer({ root: path.resolve(root) });
 }
 
 async function commandScan(args: Args): Promise<void> {
@@ -1741,10 +1752,44 @@ async function commandDetectFindings(args: Args): Promise<void> {
 
 async function commandProjectView(args: Args, rest: string[]): Promise<void> {
   const view = rest.find((item) => !item.startsWith("--")) ?? String(args.view ?? "");
-  if (view !== "architecture") throw new Error(`Unsupported project:view target: ${view || "(missing)"}`);
+  if (view !== "architecture" && view !== "code-facts" && view !== "findings") {
+    throw new Error(`Unsupported project:view target: ${view || "(missing)"}`);
+  }
 
   const root = required(args, "root");
   const resolvedRoot = path.resolve(root);
+  if (view === "code-facts") {
+    const codeFacts = args["code-facts"]
+      ? await readJsonWithSchema(String(args["code-facts"]), CodeFactGraphSnapshotSchema)
+      : await readOrBuildCodeFacts(root, args);
+    const codeFactView = ProjectedGraphViewSchema.parse(
+      projectCodeFactGraphView({
+        codeFacts,
+        sourceCachePaths: [".distinction/cache/code-fact-graph.json"]
+      })
+    );
+    const codeFactViewPath = path.join(resolvedRoot, ".distinction", "views", "code", "code-fact-view.json");
+    await writeJson(codeFactViewPath, codeFactView, ProjectedGraphViewSchema);
+    const manifest = buildProjectionManifest({
+      root: resolvedRoot,
+      projectedViews: [{ view: codeFactView, path: ".distinction/views/code/code-fact-view.json" }]
+    });
+    const manifestPath = await writeProjectionManifest(resolvedRoot, manifest);
+    await maybeWriteJson(args, "out", codeFactView);
+    outputJson({
+      ok: true,
+      root: resolvedRoot,
+      view: "code-facts",
+      codeFactViewPath,
+      manifestPath,
+      nodes: codeFactView.nodes.length,
+      edges: codeFactView.edges.length,
+      annotations: codeFactView.annotations.length,
+      status: codeFactView.status
+    });
+    return;
+  }
+
   const modelPath =
     typeof args.model === "string"
       ? args.model
@@ -1773,6 +1818,35 @@ async function commandProjectView(args: Args, rest: string[]): Promise<void> {
     await writeJson(findingsPath, findings, ArchitectureFindingReportSchema);
   }
 
+  if (view === "findings") {
+    const findingView = ProjectedGraphViewSchema.parse(
+      projectFindingsGraphView({
+        findings,
+        sourceCachePaths: [projectRelativePath(resolvedRoot, findingsPath)]
+      })
+    );
+    const findingViewPath = path.join(resolvedRoot, ".distinction", "views", "findings", "finding-view.json");
+    await writeJson(findingViewPath, findingView, ProjectedGraphViewSchema);
+    const manifest = buildProjectionManifest({
+      root: resolvedRoot,
+      projectedViews: [{ view: findingView, path: ".distinction/views/findings/finding-view.json" }]
+    });
+    const manifestPath = await writeProjectionManifest(resolvedRoot, manifest);
+    await maybeWriteJson(args, "out", findingView);
+    outputJson({
+      ok: true,
+      root: resolvedRoot,
+      view: "findings",
+      findingViewPath,
+      manifestPath,
+      nodes: findingView.nodes.length,
+      edges: findingView.edges.length,
+      annotations: findingView.annotations.length,
+      status: findingView.status
+    });
+    return;
+  }
+
   const dependencyView = ArchitectureDependencyViewSchema.parse(projectArchitectureDependencyView({ model, findings }));
   const dependencyViewPath = path.join(resolvedRoot, ".distinction", "views", "architecture", "dependency-view.json");
   await writeJson(dependencyViewPath, dependencyView, ArchitectureDependencyViewSchema);
@@ -1785,7 +1859,7 @@ async function commandProjectView(args: Args, rest: string[]): Promise<void> {
     sourceCachePaths: [projectRelativePath(resolvedRoot, modelPath), projectRelativePath(resolvedRoot, findingsPath)]
   });
   const manifestPath = path.join(resolvedRoot, ".distinction", "cache", "projection-manifest.json");
-  await writeJson(manifestPath, manifest, ProjectionManifestSchema);
+  await writeProjectionManifest(resolvedRoot, manifest);
   await maybeWriteJson(args, "out", dependencyView);
 
   outputJson({
@@ -1799,6 +1873,79 @@ async function commandProjectView(args: Args, rest: string[]): Promise<void> {
     annotations: dependencyView.annotations.length,
     status: manifest.views[0]?.status ?? "fresh"
   });
+}
+
+async function writeProjectionManifest(root: string, next: ReturnType<typeof buildProjectionManifest>): Promise<string> {
+  const manifestPath = path.join(root, ".distinction", "cache", "projection-manifest.json");
+  let existing: ReturnType<typeof buildProjectionManifest> | undefined;
+  try {
+    existing = await readJsonWithSchema(manifestPath, ProjectionManifestSchema);
+  } catch (error) {
+    if (!isMissingFileError(error)) throw error;
+  }
+  const nextIds = new Set(next.views.map((view) => view.id));
+  const merged = ProjectionManifestSchema.parse({
+    schemaVersion: "praxis.projectionManifest.v1",
+    root,
+    generatedAt: next.generatedAt,
+    views: [...(existing?.views.filter((view) => !nextIds.has(view.id)) ?? []), ...next.views]
+  });
+  await writeJson(manifestPath, merged, ProjectionManifestSchema);
+  return manifestPath;
+}
+
+async function commandContextPacket(args: Args): Promise<void> {
+  const root = required(args, "root");
+  const resolvedRoot = path.resolve(root);
+  const anchor = parseGraphAnchor(required(args, "anchor"));
+  const purpose = contextPacketPurposeArg(args);
+  const packet = ContextPacketSchema.parse(
+    await buildContextPacket({
+      root: resolvedRoot,
+      anchor,
+      purpose,
+      createdBy: "cli",
+      limit: {
+        codeFacts: numberArg(args, "limit-code-facts"),
+        findings: numberArg(args, "limit-findings"),
+        memory: numberArg(args, "limit-memory"),
+        projectionNodes: numberArg(args, "limit-projection-nodes")
+      }
+    })
+  );
+  if (args["write-cache"] === true) {
+    await writeJson(path.join(resolvedRoot, ".distinction", "cache", "context-packet.json"), packet, ContextPacketSchema);
+  }
+  await maybeWriteJsonWithSchema(args, "out", packet, ContextPacketSchema);
+  outputJson({
+    ok: true,
+    root: resolvedRoot,
+    contextPacketId: packet.id,
+    anchor: packet.anchor,
+    purpose: packet.purpose,
+    codeFactNodes: packet.codeFacts.nodes.length,
+    codeFactEdges: packet.codeFacts.edges.length,
+    findings: packet.findings.length,
+    projectionViews: packet.projections.views.length,
+    memoryFacts: packet.memory.facts.length,
+    includedPaths: packet.scope.includedPaths,
+    warnings: packet.warnings
+  });
+}
+
+function contextPacketPurposeArg(args: Args) {
+  const purpose = String(args.purpose ?? "explain");
+  if (
+    purpose === "explain" ||
+    purpose === "plan" ||
+    purpose === "task" ||
+    purpose === "review" ||
+    purpose === "governance" ||
+    purpose === "external_agent"
+  ) {
+    return purpose;
+  }
+  throw new Error(`Unsupported context packet purpose: ${purpose}`);
 }
 
 async function readOrBuildCodeFacts(root: string, args: Args) {
@@ -1867,6 +2014,11 @@ function safeJson(content: string): unknown {
 async function maybeWriteJson(args: Args, key: string, value: unknown): Promise<void> {
   const out = args[key];
   if (typeof out === "string") await writeFile(out, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+}
+
+async function maybeWriteJsonWithSchema<T>(args: Args, key: string, value: T, schema: JsonSchema<T>): Promise<void> {
+  const out = args[key];
+  if (typeof out === "string") await writeFile(out, `${JSON.stringify(schema.parse(value), null, 2)}\n`, "utf8");
 }
 
 async function writeJson<T>(filePath: string, value: T, schema?: JsonSchema<T>): Promise<void> {

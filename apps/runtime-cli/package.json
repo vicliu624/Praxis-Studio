@@ -26,6 +26,7 @@
     "@praxis/finding-detector": "0.1.0-alpha.0",
     "@praxis/graph-generator": "0.1.0-alpha.0",
     "@praxis/local-knowledge": "0.1.0-alpha.0",
+    "@praxis/mcp-server": "0.1.0-alpha.0",
     "@praxis/model-router": "0.1.0-alpha.0",
     "@praxis/plan-model": "0.1.0-alpha.0",
     "@praxis/prompt-registry": "0.1.0-alpha.0",

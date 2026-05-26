@@ -7,7 +7,13 @@ import {
   ArchitectureFindingReportSchema,
   ArchitectureModelPatchSchema,
   CodeFactGraphSnapshotSchema,
+  ContextPacketSchema,
+  PraxisMcpCodeFactsResultSchema,
+  PraxisMcpFindingsResultSchema,
+  PraxisMcpProjectionViewsResultSchema,
+  PraxisMcpStatusResultSchema,
   ProjectionManifestSchema,
+  ProjectedGraphViewSchema,
   RepositoryUnderstandingPatchSchema
 } from "../dist/index.js";
 
@@ -43,6 +49,36 @@ const fixtures = [
     name: "ProjectionManifest",
     path: "fixtures/projection-manifest/minimal.json",
     schema: ProjectionManifestSchema
+  },
+  {
+    name: "ProjectedGraphView",
+    path: "fixtures/projected-graph-view/minimal.json",
+    schema: ProjectedGraphViewSchema
+  },
+  {
+    name: "ContextPacket",
+    path: "fixtures/context-packet/minimal.json",
+    schema: ContextPacketSchema
+  },
+  {
+    name: "PraxisMcpStatusResult",
+    path: "fixtures/mcp-status-result/minimal.json",
+    schema: PraxisMcpStatusResultSchema
+  },
+  {
+    name: "PraxisMcpCodeFactsResult",
+    path: "fixtures/mcp-code-facts-result/minimal.json",
+    schema: PraxisMcpCodeFactsResultSchema
+  },
+  {
+    name: "PraxisMcpFindingsResult",
+    path: "fixtures/mcp-findings-result/minimal.json",
+    schema: PraxisMcpFindingsResultSchema
+  },
+  {
+    name: "PraxisMcpProjectionViewsResult",
+    path: "fixtures/mcp-projection-views-result/minimal.json",
+    schema: PraxisMcpProjectionViewsResultSchema
   }
 ];
 
