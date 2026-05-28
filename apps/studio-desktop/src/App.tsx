@@ -4,7 +4,10 @@ import { ProjectIntakeReviewPage } from "./pages/ProjectIntakeReviewPage";
 import { CreateProjectWizardPage } from "./pages/CreateProjectWizardPage";
 import { DevelopmentGraphWorkspacePage } from "./pages/DevelopmentGraphWorkspacePage";
 import { AgentWorkspacePage } from "./pages/AgentWorkspacePage";
+import { CodingWorkerPage } from "./pages/CodingWorkerPage";
 import { ModelSettingsPage } from "./pages/ModelSettingsPage";
+import { ReviewQueuePage } from "./pages/ReviewQueuePage";
+import { ProjectedGraphInspectorPage } from "./pages/ProjectedGraphInspectorPage";
 import { type AppRoute, routes } from "./routes";
 import { I18nProvider, type TranslationKey, useI18n } from "./i18n";
 import {
@@ -13,6 +16,7 @@ import {
   readRecentProjects,
   recordRecentProject,
   type RecentProject,
+  type RuntimeGraphAnchor,
   type RuntimeGraph,
   type RuntimeIntakeResult
 } from "./runtimeClient";
@@ -32,6 +36,8 @@ function AppContent() {
   const [graph, setGraph] = useState<RuntimeGraph | null>(null);
   const [autoIntakeToken, setAutoIntakeToken] = useState(0);
   const [recentProjects, setRecentProjects] = useState<RecentProject[]>([]);
+  const [projectionFocus, setProjectionFocus] = useState<{ anchor: RuntimeGraphAnchor; token: number } | null>(null);
+  const [reviewFocus, setReviewFocus] = useState<{ findingId: string; token: number } | null>(null);
   const { locale, setLocale, t } = useI18n();
 
   useEffect(() => {
@@ -76,6 +82,16 @@ function AppContent() {
     setRoute("agent-workspace");
   }
 
+  function openProjectionAnchor(anchor: RuntimeGraphAnchor) {
+    setProjectionFocus({ anchor, token: Date.now() });
+    setRoute("projection-inspector");
+  }
+
+  function openReviewFinding(findingId: string) {
+    setReviewFocus({ findingId, token: Date.now() });
+    setRoute("review-queue");
+  }
+
   return (
     <main className="app-shell">
       <header className="app-header">
@@ -107,7 +123,11 @@ function AppContent() {
         </label>
       </header>
 
-      <section className={route === "agent-workspace" ? "app-content app-content-fill" : "app-content app-content-scroll"}>
+      <section
+        className={
+          route === "agent-workspace" || route === "projection-inspector" ? "app-content app-content-fill" : "app-content app-content-scroll"
+        }
+      >
         {route === "home" ? (
           <HomePage
             onOpenExistingProject={openExistingProject}
@@ -123,12 +143,16 @@ function AppContent() {
           <ProjectIntakeReviewPage
             projectRoot={projectRoot}
             intakeResult={intakeResult}
-            onProjectRootChange={setProjectRoot}
+            onProjectRootChange={(root) => {
+              setProjectRoot(root);
+              setIntakeResult(null);
+            }}
             onIntakeResult={setIntakeResult}
             autoIntakeToken={autoIntakeToken}
             onGraphAccepted={(acceptedGraph) => {
               void finishProjectOpen(projectRoot, acceptedGraph);
             }}
+            onFoundationAccepted={() => setRoute("projection-inspector")}
           />
         ) : null}
         {route === "create-project" ? (
@@ -146,6 +170,31 @@ function AppContent() {
             onNavigateHome={() => setRoute("home")}
           />
         ) : null}
+        {route === "coding-worker" ? (
+          <CodingWorkerPage
+            projectRoot={projectRoot}
+            onProjectRootChange={setProjectRoot}
+            onOpenReviewQueue={() => setRoute("review-queue")}
+          />
+        ) : null}
+        {route === "review-queue" ? (
+          <ReviewQueuePage
+            projectRoot={projectRoot}
+            onProjectRootChange={setProjectRoot}
+            focusFindingId={reviewFocus?.findingId}
+            focusToken={reviewFocus?.token}
+            onOpenProjectionAnchor={openProjectionAnchor}
+          />
+        ) : null}
+        {route === "projection-inspector" ? (
+          <ProjectedGraphInspectorPage
+            projectRoot={projectRoot}
+            onProjectRootChange={setProjectRoot}
+            focusAnchor={projectionFocus?.anchor}
+            focusToken={projectionFocus?.token}
+            onOpenReviewFinding={openReviewFinding}
+          />
+        ) : null}
         {route === "graph-workspace" ? <DevelopmentGraphWorkspacePage projectRoot={projectRoot} graph={graph} onGraphLoaded={setGraph} /> : null}
         {route === "model-settings" ? <ModelSettingsPage projectRoot={projectRoot} /> : null}
       </section>
@@ -158,6 +207,9 @@ const routeLabelKeys: Record<AppRoute, TranslationKey> = {
   "project-intake": "route.projectIntake",
   "create-project": "route.createProject",
   "agent-workspace": "route.agentWorkspace",
+  "coding-worker": "route.codingWorker",
+  "review-queue": "route.reviewQueue",
+  "projection-inspector": "route.projectionInspector",
   "graph-workspace": "route.graphWorkspace",
   "model-settings": "route.modelSettings"
 };

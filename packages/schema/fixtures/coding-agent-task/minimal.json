@@ -1,0 +1,14 @@
+{
+  "schemaVersion": "praxis.codingAgentTask.v1",
+  "id": "TASK-0001",
+  "sourceFindingIds": ["finding:package-cycle:core-runtime"],
+  "sourceContextPacketId": "context-packet:fixture",
+  "goal": "Address the package dependency cycle through a controlled task.",
+  "nonGoals": ["Do not edit source outside allowed paths."],
+  "allowedPaths": ["packages/core/src/index.ts"],
+  "forbiddenPaths": [".distinction/cache", ".distinction/views"],
+  "acceptanceCriteria": ["Explain the change and provide verification evidence."],
+  "expectedOutputs": ["patch summary", "changed files", "test result"],
+  "riskNotes": ["External agent must return results to Praxis."],
+  "createdAt": "2026-05-26T00:00:00.000Z"
+}

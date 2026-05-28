@@ -1,0 +1,36 @@
+{
+  "schemaVersion": "praxis.memorySuggestionPatch.v1",
+  "id": "memory-suggestion:TASK-0001:fixture",
+  "sourceResultId": "external-result:TASK-0001:fixture",
+  "sourceTaskId": "TASK-0001",
+  "summary": "Record the external agent result as candidate memory.",
+  "memoryPatches": [
+    {
+      "id": "memory-patch:TASK-0001:result",
+      "operation": "append",
+      "status": "proposed",
+      "record": {
+        "id": "memory:external-result:TASK-0001",
+        "kind": "CANDIDATE",
+        "type": "external_agent_result",
+        "subject": "TASK-0001",
+        "predicate": "reported_result",
+        "object": "Applied the controlled task and ran verification.",
+        "summary": "External agent reported completion for TASK-0001.",
+        "evidence": [
+          {
+            "source": "agent_inference",
+            "filePath": "packages/core/src/index.ts"
+          }
+        ],
+        "source": "agent",
+        "confidence": "medium",
+        "status": "proposed",
+        "createdAt": "2026-05-26T00:00:00.000Z",
+        "updatedAt": "2026-05-26T00:00:00.000Z"
+      },
+      "sourceCodeFactIds": []
+    }
+  ],
+  "createdAt": "2026-05-26T00:00:00.000Z"
+}

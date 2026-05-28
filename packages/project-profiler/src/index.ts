@@ -93,6 +93,25 @@ export class RuleBasedProjectProfiler implements ProjectProfiler {
       buildSystems.add("Cargo");
       evidence.push({ id: "profile:cargo", summary: "Detected Cargo.toml", references: matching(snapshot, "Cargo.toml") });
     }
+    const dotnetManifests = snapshot.manifests.filter((manifest) => manifest.kind === "dotnet_project" || manifest.kind === "dotnet_solution");
+    if (dotnetManifests.length > 0 || snapshot.files.some((file) => file.language === "C#")) {
+      buildSystems.add("MSBuild");
+      packageManagers.add("dotnet");
+      evidence.push({
+        id: "profile:dotnet",
+        summary: "Detected .NET solution/project files or C# source files",
+        references: dotnetManifests.map((manifest) => manifest.path).slice(0, 12)
+      });
+    }
+    if (hasAvaloniaSignal(snapshot)) {
+      projectKinds.add("desktop_app");
+      frameworks.add("Avalonia");
+      evidence.push({
+        id: "profile:avalonia",
+        summary: "Detected Avalonia project signals",
+        references: avaloniaReferences(snapshot).slice(0, 12)
+      });
+    }
     if (snapshot.manifests.some((manifest) => manifest.path.endsWith("vite.config.ts"))) {
       buildSystems.add("Vite");
       frameworks.add("Vite");
@@ -109,8 +128,9 @@ export class RuleBasedProjectProfiler implements ProjectProfiler {
 
     const moduleCandidates = detectModules(snapshot);
     if (moduleCandidates.some((module) => module.path.startsWith("apps/"))) projectKinds.add("web_app");
+    if (moduleCandidates.some((module) => module.path.endsWith(".Main") || module.path.endsWith(".Shell"))) projectKinds.add("desktop_app");
     if (moduleCandidates.some((module) => module.path.startsWith("packages/"))) projectKinds.add("library");
-    if (snapshot.docs.length > 0) projectKinds.add("docs");
+    if (snapshot.docs.length > 0 && projectKinds.size === 0) projectKinds.add("docs");
 
     return {
       name: snapshot.name,
@@ -170,10 +190,14 @@ function detectModules(snapshot: RepositorySnapshot): ModuleCandidate[] {
     if (/^apps\/[^/]+$/.test(directory.path)) modulePaths.add(directory.path);
     if (/^packages\/[^/]+$/.test(directory.path)) modulePaths.add(directory.path);
     if (directory.path === "docs") modulePaths.add(directory.path);
+    if (/^[A-Za-z0-9_.-]+$/.test(directory.path) && snapshot.manifests.some((manifest) => manifest.path.startsWith(`${directory.path}/`) && manifest.kind === "dotnet_project")) {
+      modulePaths.add(directory.path);
+    }
   }
   for (const manifest of snapshot.manifests) {
     if (manifest.path.includes("/package.json")) modulePaths.add(manifest.path.split("/").slice(0, -1).join("/"));
     if (manifest.path.includes("/Cargo.toml")) modulePaths.add(manifest.path.split("/").slice(0, -1).join("/"));
+    if (manifest.path.includes("/") && manifest.kind === "dotnet_project") modulePaths.add(manifest.path.split("/").slice(0, -1).join("/"));
   }
 
   return Array.from(modulePaths)
@@ -198,6 +222,9 @@ function detectModules(snapshot: RepositorySnapshot): ModuleCandidate[] {
 function moduleKind(modulePath: string, roleHints: SourceRoleHint[]): ModuleCandidate["kind"] {
   const lower = modulePath.toLowerCase();
   if (modulePath === "docs") return "docs";
+  if (lower.endsWith(".sharedui") || lower.endsWith(".shell") || lower.endsWith(".main") || /(^|[\/._-])(ui|views?|components?|pages?)([\/._-]|$)/.test(lower)) return "ui";
+  if (lower.endsWith(".services") || lower.endsWith(".runtime")) return "runtime";
+  if (lower.includes("contracts")) return "domain";
   if (lower.includes("studio-desktop")) return "ui";
   if (lower.includes("runtime-cli")) return "tooling";
   if (lower.includes("agent")) return "agent";
@@ -211,6 +238,24 @@ function moduleKind(modulePath: string, roleHints: SourceRoleHint[]): ModuleCand
   if (roleHints.includes("domain")) return "domain";
   if (roleHints.includes("infrastructure")) return "infrastructure";
   return modulePath.startsWith("apps/") ? "application" : "unknown";
+}
+
+function hasAvaloniaSignal(snapshot: RepositorySnapshot): boolean {
+  return avaloniaReferences(snapshot).length > 0;
+}
+
+function avaloniaReferences(snapshot: RepositorySnapshot): string[] {
+  const references = new Set<string>();
+  for (const file of snapshot.files) {
+    if (file.path.endsWith(".axaml") || file.path.endsWith(".xaml") || file.importedPaths.some((item) => item.includes("Avalonia"))) {
+      references.add(file.path);
+    }
+  }
+  for (const manifest of snapshot.manifests) {
+    const packages = Array.isArray(manifest.data?.packageReferences) ? manifest.data.packageReferences : [];
+    if (packages.some((item) => typeof item === "string" && item.includes("Avalonia"))) references.add(manifest.path);
+  }
+  return Array.from(references);
 }
 
 function matching(snapshot: RepositorySnapshot, name: string): string[] {

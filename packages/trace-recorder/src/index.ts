@@ -1,4 +1,5 @@
 import type { Id } from "@praxis/core";
+import { TraceRecordSchema, type TraceRecord, type TraceTarget } from "@praxis/schema";
 
 export type TraceEventKind =
   | "project.opened"
@@ -14,30 +15,18 @@ export type TraceEventKind =
   | "memory.recorded"
   | "permission.denied";
 
-export interface TraceTarget {
-  type: "project" | "node" | "edge" | "subgraph";
-  id?: string;
-}
-
-export interface TraceEvent {
-  id: Id;
-  traceId: Id;
-  timestamp: string;
-  kind: TraceEventKind;
-  target?: TraceTarget;
-  summary: string;
-  data?: Record<string, unknown>;
-}
+export type { TraceRecord, TraceTarget };
+export type TraceEvent = TraceRecord;
 
 export class InMemoryTraceRecorder {
   private events: TraceEvent[] = [];
 
   record(event: Omit<TraceEvent, "id" | "timestamp"> & { id?: Id; timestamp?: string }): TraceEvent {
-    const full: TraceEvent = {
+    const full = TraceRecordSchema.parse({
       ...event,
       id: event.id ?? `trace-event:${this.events.length + 1}`,
       timestamp: event.timestamp ?? new Date().toISOString()
-    };
+    });
     this.events.push(full);
     return full;
   }
@@ -48,5 +37,5 @@ export class InMemoryTraceRecorder {
 }
 
 export function serializeTraceEvent(event: TraceEvent): string {
-  return JSON.stringify(event);
+  return JSON.stringify(TraceRecordSchema.parse(event));
 }

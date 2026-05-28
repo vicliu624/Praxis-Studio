@@ -3,15 +3,63 @@ import { open } from "@tauri-apps/plugin-dialog";
 
 export interface RuntimeIntakeResult {
   ok: boolean;
-  snapshot: unknown;
-  profile: {
+  snapshot?: unknown;
+  root?: string;
+  reviewOnly?: boolean;
+  provider?: {
+    name: string;
+    source: string;
+    version?: string;
+    runId?: string;
+    capabilities?: string[];
+  };
+  cache?: {
+    repositorySnapshot?: string;
+    codeFacts?: string;
+    projectProfile?: string;
+    repositoryUnderstandingPatch?: string;
+    architectureModelPatch?: string;
+    architectureFindings?: string;
+  };
+  summary?: {
+    files: number;
+    codeFactNodes: number;
+    codeFactEdges: number;
+    memoryPatches: number;
+    modules: number;
+    dependencies: number;
+    findings: number;
+  };
+  next?: string;
+  profile?: {
     moduleCandidates: { id: string; title: string; path: string; kind: string; confidence: string }[];
     projectKinds: string[];
     languages: string[];
     frameworks: string[];
     warnings?: string[];
   };
-  candidate: {
+  architecture?: {
+    modules: {
+      id: string;
+      name: string;
+      path: string;
+      role: string;
+      confidence?: string;
+      responsibilities?: string[];
+    }[];
+    dependencies: {
+      id: string;
+      sourceModuleId: string;
+      targetModuleId: string;
+      kind: string;
+      confidence?: string;
+    }[];
+    warnings?: { id: string; severity: string; summary: string }[];
+  };
+  findings?: {
+    findings: { id: string; title?: string; summary: string; severity?: string; status?: string }[];
+  };
+  candidate?: {
     graph: RuntimeGraph;
     warnings: { id: string; severity: string; summary: string; targetId?: string }[];
     unresolvedQuestions: { id: string; question: string; targetId?: string }[];
@@ -24,6 +72,7 @@ export interface RuntimeGraph {
   rootPath?: string;
   nodes: RuntimeNode[];
   edges: RuntimeEdge[];
+  metadata?: Record<string, unknown>;
 }
 
 export interface RuntimeNode {
@@ -35,6 +84,7 @@ export interface RuntimeNode {
   status: string;
   confidence: string;
   knowledgeKind: string;
+  metadata?: Record<string, unknown>;
 }
 
 export interface RuntimeEdge {
@@ -50,6 +100,7 @@ export interface RuntimeEdge {
   blockedReason?: string;
   confidence: string;
   knowledgeKind: string;
+  metadata?: Record<string, unknown>;
 }
 
 
@@ -97,12 +148,21 @@ export interface RuntimeAgentRunResult {
   sessionId: string;
   runId: string;
   runPath: string;
+  logPaths?: RuntimeAgentLogPaths;
   runStatus: "running" | "waiting_for_permission" | "completed" | "failed" | "cancelled";
   terminalReason?: string;
   transitions?: Array<{ reason: string; timestamp: string; detail?: string }>;
   stepCount: number;
   finalMessage: string;
   finalStructured?: unknown;
+}
+
+export interface RuntimeAgentLogPaths {
+  chatSessionsIndex: string;
+  chatTranscript: string;
+  runsIndex: string;
+  runPath?: string;
+  traces: string;
 }
 
 export interface RuntimeChatResult {
@@ -234,6 +294,7 @@ export interface RuntimeChatTranscriptResult {
   session: RuntimeChatSession;
   messages: RuntimeChatMessage[];
   appendedMessages?: RuntimeChatMessage[];
+  logPaths?: RuntimeAgentLogPaths;
   pendingPermission?: RuntimePermissionRequestView;
   plan?: RuntimeGraphPlan;
 }
@@ -254,6 +315,353 @@ export interface NewProjectPlan {
   files: { path: string; content: string }[];
   assumptions: { id: string; summary: string }[];
   questions: { id: string; question: string }[];
+}
+
+export interface RuntimeReviewQueueResult {
+  ok: boolean;
+  root: string;
+  generatedAt: string;
+  includeAccepted: boolean;
+  counts: {
+    memorySuggestions: number;
+    findingStatusPatches: number;
+    total: number;
+  };
+  foundation?: RuntimeFoundationReviewStatus;
+  memorySuggestions: RuntimeMemorySuggestionReviewItem[];
+  findingStatusPatches: RuntimeFindingStatusReviewItem[];
+}
+
+export interface RuntimeFoundationReviewStatus {
+  status: "not_initialized" | "needs_intake" | "understanding_pending" | "foundation_ready" | string;
+  generatedAt: string;
+  artifacts: {
+    repositorySnapshot: RuntimeFoundationArtifact & { files?: number };
+    codeFacts: RuntimeFoundationArtifact & {
+      provider?: {
+        name?: string;
+        source?: string;
+        version?: string;
+        runId?: string;
+        capabilities?: string[];
+      };
+      files: number;
+      nodes: number;
+      edges: number;
+      warnings: number;
+    };
+    projectProfile: RuntimeFoundationArtifact & {
+      projectKinds: string[];
+      languages: string[];
+      frameworks: string[];
+    };
+    repositoryUnderstanding: RuntimeFoundationArtifact & {
+      memoryPatches: number;
+      warnings: number;
+      reviewQuestions: number;
+      pendingAcceptance: boolean;
+    };
+    factMemory: RuntimeFoundationArtifact & { records: number };
+    architectureModel: RuntimeFoundationArtifact & {
+      modules: number;
+      dependencies: number;
+      warnings: number;
+    };
+    findings: RuntimeFoundationArtifact & {
+      detected: number;
+      detectorIds: string[];
+    };
+    projections: RuntimeFoundationArtifact & {
+      manifestViews: number;
+      schemaValidViews: number;
+      freshViews: number;
+      failedViews: number;
+      kinds: string[];
+    };
+    traces: { records: number };
+    tasks: { records: number };
+  };
+  nextActions: string[];
+}
+
+export interface RuntimeFoundationArtifact {
+  exists: boolean;
+  path?: string;
+}
+
+export interface RuntimeMemorySuggestionReviewItem {
+  id: string;
+  path: string;
+  sourceResultId?: string;
+  sourceTaskId?: string;
+  summary: string;
+  createdAt: string;
+  acceptedAt?: string;
+  memoryPatchCount: number;
+  records: RuntimeMemorySuggestionRecordPreview[];
+}
+
+export interface RuntimeMemorySuggestionRecordPreview {
+  patchId: string;
+  patchStatus: string;
+  id: string;
+  kind: string;
+  type: string;
+  subject: string;
+  predicate: string;
+  object?: string;
+  summary: string;
+  confidence: string;
+  source: string;
+  status: string;
+}
+
+export interface RuntimeFindingStatusReviewItem {
+  id: string;
+  path: string;
+  sourceResultId?: string;
+  sourceTaskId?: string;
+  findingId: string;
+  status: string;
+  summary: string;
+  rationale?: string;
+  createdAt: string;
+  acceptedAt?: string;
+  evidenceCount: number;
+}
+
+export interface RuntimeFindingAuditResult {
+  ok: boolean;
+  root: string;
+  generatedAt: string;
+  findingsPath: string;
+  counts: {
+    findings: number;
+    currentlyDetected: number;
+    historicalOnly: number;
+    acceptedHistoryEvents: number;
+  };
+  findings: RuntimeFindingAuditItem[];
+}
+
+export interface RuntimeFindingAuditItem {
+  findingId: string;
+  currentlyDetected: boolean;
+  detectorState: string;
+  currentStatus?: string;
+  currentTitle?: string;
+  currentSummary?: string;
+  severity?: string;
+  latestAcceptedStatus?: string;
+  latestAcceptedAt?: string;
+  history: RuntimeFindingAuditHistoryEntry[];
+  memoryRecords: RuntimeFindingAuditMemoryRecord[];
+  traces: RuntimeFindingAuditTraceEntry[];
+}
+
+export interface RuntimeFindingAuditHistoryEntry {
+  patchId: string;
+  patchPath: string;
+  status: string;
+  summary: string;
+  rationale?: string;
+  sourceTaskId?: string;
+  sourceResultId?: string;
+  createdAt: string;
+  acceptedAt?: string;
+  evidenceCount: number;
+}
+
+export interface RuntimeFindingAuditMemoryRecord {
+  id: string;
+  status?: string;
+  summary: string;
+  createdAt: string;
+  patchId?: string;
+  sourceResultId?: string;
+  sourceTaskId?: string;
+}
+
+export interface RuntimeFindingAuditTraceEntry {
+  id: string;
+  kind: string;
+  timestamp: string;
+  summary: string;
+  patchId?: string;
+  status?: string;
+}
+
+export type RuntimeProjectedGraphViewKind =
+  | "architecture_dependency"
+  | "architecture_component"
+  | "code_fact"
+  | "finding"
+  | "context"
+  | "task_plan"
+  | "trace"
+  | "memory";
+
+export interface RuntimeGraphAnchor {
+  kind:
+    | "file"
+    | "symbol"
+    | "code_fact_node"
+    | "code_fact_edge"
+    | "architecture_module"
+    | "architecture_dependency"
+    | "finding"
+    | "task"
+    | "trace"
+    | "memory"
+    | "projection_node"
+    | "projection_edge";
+  id: string;
+  path?: string;
+}
+
+export interface RuntimeProjectedGraphSource {
+  type: string;
+  id: string;
+}
+
+export interface RuntimeProjectedGraphNode {
+  id: string;
+  kind: string;
+  label: string;
+  source: RuntimeProjectedGraphSource;
+  anchor: RuntimeGraphAnchor;
+  path?: string;
+  summary?: string;
+  status?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface RuntimeProjectedGraphEdge {
+  id: string;
+  kind: string;
+  sourceId: string;
+  targetId: string;
+  source: RuntimeProjectedGraphSource;
+  anchor: RuntimeGraphAnchor;
+  confidence?: string;
+  summary?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface RuntimeProjectedGraphAnnotation {
+  id: string;
+  kind: string;
+  sourceFindingId?: string;
+  targetNodeIds: string[];
+  targetEdgeIds: string[];
+  severity?: string;
+  status?: string;
+  summary: string;
+  anchor?: RuntimeGraphAnchor;
+  metadata?: Record<string, unknown>;
+}
+
+export interface RuntimeProjectedGraphView {
+  schemaVersion: "praxis.projectedGraphView.v1";
+  id: string;
+  kind: RuntimeProjectedGraphViewKind;
+  root: string;
+  generatedAt: string;
+  authority: "review_cache" | "durable_model";
+  nodes: RuntimeProjectedGraphNode[];
+  edges: RuntimeProjectedGraphEdge[];
+  annotations: RuntimeProjectedGraphAnnotation[];
+  sourceCachePaths: string[];
+  sourceMemoryIds: string[];
+  sourceModelIds: string[];
+  sourceFindingIds: string[];
+  sourceTaskIds: string[];
+  sourceTraceIds: string[];
+  sourceSpecPaths: string[];
+  status: "fresh" | "stale" | "regenerating" | "failed";
+  error?: string;
+}
+
+export interface RuntimeProjectionManifestView {
+  id: string;
+  kind: RuntimeProjectedGraphViewKind;
+  path: string;
+  authority: "review_cache" | "durable_model";
+  status: "fresh" | "stale" | "regenerating" | "failed";
+  generatedAt?: string;
+  error?: string;
+  sourceCachePaths: string[];
+  sourceMemoryIds: string[];
+  sourceModelIds: string[];
+  sourceFindingIds: string[];
+  sourceTaskIds: string[];
+  sourceTraceIds: string[];
+  sourceSpecPaths: string[];
+}
+
+export interface RuntimeProjectionManifest {
+  schemaVersion: "praxis.projectionManifest.v1";
+  root: string;
+  generatedAt: string;
+  views: RuntimeProjectionManifestView[];
+}
+
+export interface RuntimeProjectedGraphViewRecord {
+  path: string;
+  manifest?: RuntimeProjectionManifestView;
+  view: RuntimeProjectedGraphView;
+}
+
+export interface RuntimeProjectionViewsResult {
+  manifest: RuntimeProjectionManifest | null;
+  records: RuntimeProjectedGraphViewRecord[];
+  skippedPaths: string[];
+}
+
+export interface RuntimeContextPacketSummary {
+  schemaVersion: "praxis.contextPacket.v1";
+  id: string;
+  root: string;
+  generatedAt: string;
+  anchor: RuntimeGraphAnchor;
+  purpose: "explain" | "plan" | "task" | "review" | "governance" | "external_agent";
+  memory: {
+    facts: unknown[];
+    inferences: unknown[];
+    candidates: unknown[];
+    confirmations: unknown[];
+    findings: unknown[];
+    decisions: unknown[];
+  };
+  codeFacts: {
+    nodes: unknown[];
+    edges: unknown[];
+    callers: unknown[];
+    callees: unknown[];
+    impacted: unknown[];
+    relatedFiles: unknown[];
+  };
+  projections: {
+    views: RuntimeProjectedGraphView[];
+    nodes: RuntimeProjectedGraphNode[];
+    edges: RuntimeProjectedGraphEdge[];
+    annotations: RuntimeProjectedGraphAnnotation[];
+  };
+  findings: Array<{ id: string; title: string; status: string; severity: string; summary: string }>;
+  scope: {
+    includedPaths: string[];
+    excludedPaths: string[];
+    expansionPolicy: string;
+  };
+  authority: {
+    memoryAuthority: string;
+    projectionAuthority: string;
+  };
+  trace: {
+    createdBy: string;
+    sourceViewId?: string;
+  };
+  warnings: string[];
 }
 
 export interface ModelSettings {
@@ -303,14 +711,30 @@ export async function openProjectDialog(title = "Open Existing Project"): Promis
 
 export async function runProjectIntake(root: string): Promise<RuntimeIntakeResult> {
   const stdout = await runRuntimeCommand("intake", ["--root", root]);
-  return JSON.parse(stdout) as RuntimeIntakeResult;
+  const result = JSON.parse(stdout) as RuntimeIntakeResult;
+  if (result.cache?.projectProfile && !result.profile) {
+    result.profile = await readDistinctionJson<RuntimeIntakeResult["profile"]>(root, result.cache.projectProfile).catch(() => undefined);
+  }
+  if (result.cache?.architectureModelPatch && !result.architecture) {
+    result.architecture = await readDistinctionJson<RuntimeIntakeResult["architecture"]>(root, result.cache.architectureModelPatch).catch(() => undefined);
+  }
+  if (result.cache?.architectureFindings && !result.findings) {
+    result.findings = await readDistinctionJson<RuntimeIntakeResult["findings"]>(root, result.cache.architectureFindings).catch(() => undefined);
+  }
+  return result;
 }
 
 export async function acceptGraph(root: string, candidate: RuntimeIntakeResult["candidate"]): Promise<void> {
+  if (!candidate) throw new Error("DevelopmentGraphCandidate is required.");
   await invoke<string>("initialize_project_memory", {
     projectRoot: root,
     candidateJson: JSON.stringify(candidate)
   });
+}
+
+export async function acceptUnderstanding(root: string): Promise<unknown> {
+  const stdout = await runRuntimeCommand("accept-understanding", ["--root", root]);
+  return JSON.parse(stdout) as unknown;
 }
 
 export async function runChat(root: string, targetId: string, mode: "explain" | "plan", instruction: string): Promise<RuntimeChatResult> {
@@ -520,6 +944,113 @@ export async function createProjectFromPlan(root: string, plan: NewProjectPlan):
   return JSON.parse(stdout) as unknown;
 }
 
+export async function readReviewQueue(root: string, includeAccepted = false): Promise<RuntimeReviewQueueResult> {
+  const args = ["--root", root];
+  if (includeAccepted) args.push("--include-accepted");
+  const stdout = await runRuntimeCommand("review-queue", args);
+  return JSON.parse(stdout) as RuntimeReviewQueueResult;
+}
+
+export async function readFindingAudit(root: string): Promise<RuntimeFindingAuditResult> {
+  const stdout = await runRuntimeCommand("finding-audit", ["--root", root]);
+  return JSON.parse(stdout) as RuntimeFindingAuditResult;
+}
+
+async function readDistinctionJson<T>(root: string, relativePath: string): Promise<T> {
+  const content = await invoke<string>("read_project_distinction_file", {
+    projectRoot: root,
+    relativePath
+  });
+  return JSON.parse(content) as T;
+}
+
+export async function readProjectionManifest(root: string): Promise<RuntimeProjectionManifest | null> {
+  try {
+    const content = await invoke<string>("read_project_distinction_file", {
+      projectRoot: root,
+      relativePath: ".distinction/cache/projection-manifest.json"
+    });
+    return JSON.parse(content) as RuntimeProjectionManifest;
+  } catch {
+    return null;
+  }
+}
+
+export async function readProjectedGraphViews(root: string): Promise<RuntimeProjectionViewsResult> {
+  const manifest = await readProjectionManifest(root);
+  const records: RuntimeProjectedGraphViewRecord[] = [];
+  const skippedPaths: string[] = [];
+  for (const view of manifest?.views ?? []) {
+    try {
+      const content = await invoke<string>("read_project_distinction_file", {
+        projectRoot: root,
+        relativePath: view.path
+      });
+      const parsed = JSON.parse(content) as Partial<RuntimeProjectedGraphView>;
+      if (parsed.schemaVersion !== "praxis.projectedGraphView.v1") {
+        skippedPaths.push(view.path);
+        continue;
+      }
+      records.push({ path: view.path, manifest: view, view: parsed as RuntimeProjectedGraphView });
+    } catch {
+      skippedPaths.push(view.path);
+    }
+  }
+  return { manifest, records, skippedPaths };
+}
+
+export async function refreshProjectedGraphViews(root: string): Promise<RuntimeProjectionViewsResult> {
+  const targets = ["architecture", "code-facts", "findings", "memory", "trace", "tasks"];
+  for (const target of targets) {
+    await runRuntimeCommand("project:view", [target, "--root", root]);
+  }
+  return await readProjectedGraphViews(root);
+}
+
+export async function buildContextPacketForAnchor(
+  root: string,
+  anchor: RuntimeGraphAnchor,
+  purpose: RuntimeContextPacketSummary["purpose"] = "explain"
+): Promise<RuntimeContextPacketSummary> {
+  await runRuntimeCommand("context-packet", [
+    "--root",
+    root,
+    "--anchor",
+    graphAnchorToRuntimeArg(anchor),
+    "--purpose",
+    purpose,
+    "--write-cache"
+  ]);
+  const content = await invoke<string>("read_project_distinction_file", {
+    projectRoot: root,
+    relativePath: ".distinction/cache/context-packet.json"
+  });
+  return JSON.parse(content) as RuntimeContextPacketSummary;
+}
+
+export async function acceptMemorySuggestion(root: string, suggestionIdOrPath: string): Promise<unknown> {
+  const stdout = await runRuntimeCommand("accept-memory-suggestion", ["--root", root, "--suggestion", suggestionIdOrPath]);
+  return JSON.parse(stdout) as unknown;
+}
+
+export async function acceptFindingStatus(root: string, patchIdOrPath: string): Promise<unknown> {
+  const stdout = await runRuntimeCommand("accept-finding-status", ["--root", root, "--patch", patchIdOrPath]);
+  return JSON.parse(stdout) as unknown;
+}
+
+export async function acceptExternalResult(root: string, resultIdOrPath: string): Promise<unknown> {
+  const stdout = await runRuntimeCommand("accept-external-result", ["--root", root, "--result", resultIdOrPath]);
+  return JSON.parse(stdout) as unknown;
+}
+
+export async function writeDistinctionFile(root: string, relativePath: string, content: string): Promise<void> {
+  await invoke<void>("write_project_distinction_file", {
+    projectRoot: root,
+    relativePath,
+    content
+  });
+}
+
 export async function readRecentProjects(): Promise<RecentProject[]> {
   const stdout = await invoke<string>("read_recent_projects");
   return JSON.parse(stdout) as RecentProject[];
@@ -531,23 +1062,351 @@ export async function recordRecentProject(root: string): Promise<RecentProject[]
 }
 
 export async function readGraph(root: string): Promise<RuntimeGraph> {
-  const [nodes, edges] = await Promise.all([
-    invoke<string>("read_project_distinction_file", { projectRoot: root, relativePath: ".distinction/graph/nodes.json" }),
-    invoke<string>("read_project_distinction_file", { projectRoot: root, relativePath: ".distinction/graph/edges.json" })
-  ]);
+  try {
+    const [nodes, edges] = await Promise.all([
+      invoke<string>("read_project_distinction_file", { projectRoot: root, relativePath: ".distinction/graph/nodes.json" }),
+      invoke<string>("read_project_distinction_file", { projectRoot: root, relativePath: ".distinction/graph/edges.json" })
+    ]);
+    return {
+      id: "graph:local",
+      title: "Development Graph",
+      rootPath: root,
+      nodes: JSON.parse(nodes) as RuntimeNode[],
+      edges: JSON.parse(edges) as RuntimeEdge[]
+    };
+  } catch {
+    const projected = await readProjectedGraphViews(root);
+    if (projected.records.length > 0) return runtimeGraphFromProjectedViews(root, projected.records.map((record) => record.view));
+
+    try {
+      const codeFacts = await readDistinctionJson<RuntimeCodeFactGraphSnapshot>(root, ".distinction/cache/code-fact-graph.json");
+      return runtimeGraphFromCodeFacts(root, codeFacts);
+    } catch {
+      return minimalRuntimeFoundationGraph(root, "未找到旧 DevelopmentGraph；请先运行项目接入，或在投影检查器生成 Foundation views。");
+    }
+  }
+}
+
+interface RuntimeCodeFactGraphSnapshot {
+  provider?: unknown;
+  nodes?: {
+    id: string;
+    kind: string;
+    name?: string;
+    qualifiedName?: string;
+    filePath?: string;
+    language?: string;
+    range?: unknown;
+  }[];
+  edges?: {
+    id: string;
+    kind: string;
+    sourceId: string;
+    targetId: string;
+    confidence?: number;
+    filePath?: string;
+    range?: unknown;
+  }[];
+}
+
+function minimalRuntimeFoundationGraph(root: string, description?: string): RuntimeGraph {
   return {
-    id: "graph:local",
-    title: "Development Graph",
+    id: "graph:foundation:fallback",
+    title: `${basenameFromPath(root) || "Project"} Foundation Graph`,
     rootPath: root,
-    nodes: JSON.parse(nodes) as RuntimeNode[],
-    edges: JSON.parse(edges) as RuntimeEdge[]
+    metadata: {
+      foundationFallback: true,
+      source: "empty_foundation_fallback",
+      readOnly: true
+    },
+    nodes: [
+      {
+        id: "project:foundation",
+        kind: "project",
+        title: basenameFromPath(root) || "Project",
+        description,
+        progress: 0,
+        status: "active",
+        confidence: "medium",
+        knowledgeKind: "FACT",
+        metadata: { foundationFallback: true, path: root }
+      }
+    ],
+    edges: []
   };
+}
+
+function runtimeGraphFromProjectedViews(root: string, views: RuntimeProjectedGraphView[]): RuntimeGraph {
+  const nodeLimit = 420;
+  const edgeLimit = 720;
+  const graph = minimalRuntimeFoundationGraph(root, "Synthesized from Foundation ProjectedGraphView cache because legacy .distinction/graph is absent.");
+  graph.metadata = {
+    ...(graph.metadata ?? {}),
+    source: "projected_graph_views",
+    projectedViewIds: views.map((view) => view.id),
+    projectedViewKinds: Array.from(new Set(views.map((view) => view.kind)))
+  };
+
+  const nodeIdByViewNode = new Map<string, string>();
+  const seenNodes = new Set(graph.nodes.map((node) => node.id));
+  const seenEdges = new Set<string>();
+  let truncatedNodes = 0;
+  let truncatedEdges = 0;
+
+  for (const view of views) {
+    for (const projectedNode of view.nodes) {
+      const graphNodeId = runtimeProjectionNodeId(view.id, projectedNode.id);
+      nodeIdByViewNode.set(`${view.id}\u0000${projectedNode.id}`, graphNodeId);
+      if (seenNodes.has(graphNodeId)) continue;
+      if (graph.nodes.length >= nodeLimit) {
+        truncatedNodes += 1;
+        continue;
+      }
+      seenNodes.add(graphNodeId);
+      graph.nodes.push({
+        id: graphNodeId,
+        kind: runtimeNodeKindFromProjection(projectedNode.kind, projectedNode.anchor.kind),
+        title: projectedNode.label || projectedNode.id,
+        description: projectedNode.summary,
+        progress: 0,
+        status: runtimeStatusFromString(projectedNode.status),
+        confidence: view.authority === "durable_model" ? "high" : "medium",
+        knowledgeKind: view.authority === "durable_model" ? "CONFIRMED" : "INFERENCE",
+        metadata: {
+          foundationFallback: true,
+          projectionViewId: view.id,
+          projectionViewKind: view.kind,
+          projectionNodeId: projectedNode.id,
+          anchor: projectedNode.anchor,
+          source: projectedNode.source,
+          path: projectedNode.path,
+          projectedGraphMetadata: projectedNode.metadata
+        }
+      });
+    }
+  }
+
+  for (const node of graph.nodes.slice(1, 41)) {
+    const edgeId = `foundation-root:${node.id}`;
+    seenEdges.add(edgeId);
+    graph.edges.push({
+      id: edgeId,
+      source: "project:foundation",
+      target: node.id,
+      kind: "contains",
+      title: "Contains",
+      progress: 0,
+      status: "active",
+      riskLevel: "none",
+      confidence: "medium",
+      knowledgeKind: "INFERENCE",
+      metadata: { foundationFallback: true, synthetic: true }
+    });
+  }
+
+  for (const view of views) {
+    for (const projectedEdge of view.edges) {
+      const source = nodeIdByViewNode.get(`${view.id}\u0000${projectedEdge.sourceId}`);
+      const target = nodeIdByViewNode.get(`${view.id}\u0000${projectedEdge.targetId}`);
+      if (!source || !target) {
+        truncatedEdges += 1;
+        continue;
+      }
+      const graphEdgeId = runtimeProjectionEdgeId(view.id, projectedEdge.id);
+      if (seenEdges.has(graphEdgeId)) continue;
+      if (graph.edges.length >= edgeLimit) {
+        truncatedEdges += 1;
+        continue;
+      }
+      seenEdges.add(graphEdgeId);
+      graph.edges.push({
+        id: graphEdgeId,
+        source,
+        target,
+        kind: runtimeEdgeKindFromProjection(projectedEdge.kind),
+        title: projectedEdge.kind,
+        description: projectedEdge.summary,
+        progress: 0,
+        status: "active",
+        riskLevel: projectedEdge.kind.includes("conflict") ? "medium" : "none",
+        confidence: projectedEdge.confidence ?? "medium",
+        knowledgeKind: view.authority === "durable_model" ? "CONFIRMED" : "INFERENCE",
+        metadata: {
+          foundationFallback: true,
+          projectionViewId: view.id,
+          projectionViewKind: view.kind,
+          projectionEdgeId: projectedEdge.id,
+          anchor: projectedEdge.anchor,
+          source: projectedEdge.source,
+          projectedGraphMetadata: projectedEdge.metadata
+        }
+      });
+    }
+  }
+
+  graph.metadata = {
+    ...(graph.metadata ?? {}),
+    truncatedNodes,
+    truncatedEdges
+  };
+  return graph;
+}
+
+function runtimeGraphFromCodeFacts(root: string, snapshot: RuntimeCodeFactGraphSnapshot): RuntimeGraph {
+  const nodeLimit = 420;
+  const edgeLimit = 720;
+  const graph = minimalRuntimeFoundationGraph(root, "Synthesized from CodeFactGraphSnapshot cache because legacy .distinction/graph is absent.");
+  graph.metadata = {
+    ...(graph.metadata ?? {}),
+    source: "code_fact_graph_snapshot",
+    provider: snapshot.provider,
+    readOnly: true
+  };
+
+  const selectedNodes = (snapshot.nodes ?? []).filter((node) => node.kind !== "project").slice(0, nodeLimit - 1);
+  const idMap = new Map<string, string>();
+  for (const node of selectedNodes) {
+    const graphNodeId = runtimeCodeFactNodeId(node.id);
+    idMap.set(node.id, graphNodeId);
+    graph.nodes.push({
+      id: graphNodeId,
+      kind: runtimeNodeKindFromProjection(node.kind, node.kind === "file" ? "file" : "symbol"),
+      title: node.name || node.qualifiedName || node.id,
+      description: node.qualifiedName,
+      progress: 0,
+      status: "active",
+      confidence: "high",
+      knowledgeKind: "FACT",
+      metadata: {
+        foundationFallback: true,
+        codeFactNodeId: node.id,
+        path: node.filePath,
+        language: node.language,
+        range: node.range
+      }
+    });
+  }
+
+  for (const node of graph.nodes.slice(1, 41)) {
+    graph.edges.push({
+      id: `foundation-root:${node.id}`,
+      source: "project:foundation",
+      target: node.id,
+      kind: "contains",
+      title: "Contains",
+      progress: 0,
+      status: "active",
+      riskLevel: "none",
+      confidence: "high",
+      knowledgeKind: "FACT",
+      metadata: { foundationFallback: true, synthetic: true }
+    });
+  }
+
+  let truncatedEdges = 0;
+  for (const edge of snapshot.edges ?? []) {
+    const source = idMap.get(edge.sourceId);
+    const target = idMap.get(edge.targetId);
+    if (!source || !target) {
+      truncatedEdges += 1;
+      continue;
+    }
+    if (graph.edges.length >= edgeLimit) {
+      truncatedEdges += 1;
+      continue;
+    }
+    graph.edges.push({
+      id: runtimeCodeFactEdgeId(edge.id),
+      source,
+      target,
+      kind: runtimeEdgeKindFromProjection(edge.kind),
+      title: edge.kind,
+      progress: 0,
+      status: "active",
+      riskLevel: "none",
+      confidence: runtimeConfidenceFromNumber(edge.confidence ?? 0.5),
+      knowledgeKind: "FACT",
+      metadata: {
+        foundationFallback: true,
+        codeFactEdgeId: edge.id,
+        filePath: edge.filePath,
+        range: edge.range
+      }
+    });
+  }
+
+  graph.metadata = {
+    ...(graph.metadata ?? {}),
+    truncatedNodes: Math.max(0, (snapshot.nodes?.length ?? 0) - selectedNodes.length - 1),
+    truncatedEdges
+  };
+  return graph;
+}
+
+function runtimeProjectionNodeId(viewId: string, nodeId: string): string {
+  return `projection:${viewId}:${nodeId}`;
+}
+
+function runtimeProjectionEdgeId(viewId: string, edgeId: string): string {
+  return `projection:${viewId}:${edgeId}`;
+}
+
+function runtimeCodeFactNodeId(nodeId: string): string {
+  return `code-fact:${nodeId}`;
+}
+
+function runtimeCodeFactEdgeId(edgeId: string): string {
+  return `code-fact:${edgeId}`;
+}
+
+function runtimeNodeKindFromProjection(kind: string, anchorKind?: string): string {
+  if (anchorKind === "finding" || kind.includes("finding") || kind.includes("risk")) return "risk";
+  if (anchorKind === "task" || kind.includes("task")) return "task";
+  if (anchorKind === "trace" || anchorKind === "memory" || kind.includes("trace") || kind.includes("memory")) return "memory_event";
+  if (anchorKind === "architecture_module" || kind.includes("architecture") || kind.includes("module")) return "architecture_component";
+  if (anchorKind === "file" || anchorKind === "symbol" || kind.includes("file") || kind.includes("function") || kind.includes("class")) return "code_unit";
+  if (kind.includes("decision")) return "decision";
+  if (kind.includes("document") || kind.includes("spec")) return "document";
+  return "code_unit";
+}
+
+function runtimeEdgeKindFromProjection(kind: string): string {
+  if (kind === "contains" || kind === "owns") return "contains";
+  if (kind === "implements") return "implements";
+  if (kind === "impacts" || kind === "affects") return "impacts";
+  if (kind === "blocks") return "blocks";
+  if (kind === "conflicts_with") return "conflicts_with";
+  if (kind === "derived_from") return "derived_from";
+  if (kind === "validates") return "validates";
+  if (kind === "records" || kind.includes("finding") || kind.includes("trace") || kind.includes("memory")) return "records";
+  return "depends_on";
+}
+
+function runtimeStatusFromString(value: string | undefined): string {
+  if (value === "draft" || value === "active" || value === "wip" || value === "blocked" || value === "done" || value === "stale" || value === "deprecated") {
+    return value;
+  }
+  return "active";
+}
+
+function runtimeConfidenceFromNumber(value: number): string {
+  if (value >= 0.75) return "high";
+  if (value >= 0.4) return "medium";
+  return "low";
+}
+
+function basenameFromPath(value: string): string {
+  return value.replace(/[\\/]+$/, "").split(/[\\/]/).filter(Boolean).pop() ?? value;
 }
 
 function chatTargetArgs(target: RuntimeChatTarget): string[] {
   if (target.type === "project") return ["--target-type", "project"];
   if (target.type === "node" || target.type === "edge") return ["--target-type", target.type, "--target-id", target.id];
   return ["--target-json", JSON.stringify(target)];
+}
+
+function graphAnchorToRuntimeArg(anchor: RuntimeGraphAnchor): string {
+  return `${anchor.kind}:${anchor.id}`;
 }
 
 export function renderRuntimeRoutePreview(settings: ModelSettings): string {
@@ -606,6 +1465,11 @@ export async function readAppModelSettings(): Promise<Partial<ModelSettings> | n
     return settings;
   }
   return readLocalModelSettings();
+}
+
+export async function readAppModelSettingsPath(): Promise<string | null> {
+  if (!hasTauriRuntime()) return null;
+  return await invoke<string>("read_app_model_settings_path");
 }
 
 export async function saveAppModelSettings(settings: ModelSettings): Promise<void> {

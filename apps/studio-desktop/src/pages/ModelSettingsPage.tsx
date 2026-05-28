@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import {
   defaultModelSettings,
   readAppModelSettings,
+  readAppModelSettingsPath,
   renderRuntimeRoutePreview,
   saveAppModelSettings,
   type ModelSettings
@@ -12,9 +13,10 @@ interface ModelSettingsPageProps {
   projectRoot: string;
 }
 
-export function ModelSettingsPage(_props: ModelSettingsPageProps) {
+export function ModelSettingsPage({ projectRoot }: ModelSettingsPageProps) {
   const { t } = useI18n();
   const [settings, setSettings] = useState<ModelSettings>(defaultModelSettings);
+  const [settingsPath, setSettingsPath] = useState<string | null>(null);
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
 
@@ -26,6 +28,13 @@ export function ModelSettingsPage(_props: ModelSettingsPageProps) {
       })
       .catch(() => {
         if (active) setSettings(defaultModelSettings);
+      });
+    void readAppModelSettingsPath()
+      .then((path) => {
+        if (active) setSettingsPath(path);
+      })
+      .catch(() => {
+        if (active) setSettingsPath(null);
       });
     return () => {
       active = false;
@@ -41,7 +50,7 @@ export function ModelSettingsPage(_props: ModelSettingsPageProps) {
     setError("");
     try {
       await saveAppModelSettings(settings);
-      setStatus(t("settings.savedSession"));
+      setStatus(settingsPath ? t("settings.savedToPath", { path: settingsPath }) : t("settings.savedSession"));
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
       setStatus(t("settings.savedLocalOnly"));
@@ -58,6 +67,10 @@ export function ModelSettingsPage(_props: ModelSettingsPageProps) {
         <p className="muted-copy">
           {t("settings.copy")}
         </p>
+        <div className="settings-path-note">
+          <span>{t("settings.configPath")}</span>
+          <code>{settingsPath ?? t("settings.browserOnly")}</code>
+        </div>
 
         <div className="form-grid">
           <label htmlFor="default-provider">{t("settings.defaultProvider")}</label>
@@ -67,7 +80,9 @@ export function ModelSettingsPage(_props: ModelSettingsPageProps) {
           <input id="base-url" className="path-input" value={settings.baseUrl} onChange={(event) => update("baseUrl", event.target.value)} />
 
           <label htmlFor="api-key">{t("settings.apiKey")}</label>
-          <input id="api-key" className="path-input" type="password" value={settings.apiKey} onChange={(event) => update("apiKey", event.target.value)} />
+          <input id="api-key" className="path-input" type="text" value={settings.apiKey} onChange={(event) => update("apiKey", event.target.value)} />
+          <div />
+          <p className="settings-inline-note">{t("settings.apiKeyPlaintext")}</p>
 
           <label htmlFor="intake-model">{t("settings.intakeModel")}</label>
           <input id="intake-model" className="path-input" value={settings.intakeModel} onChange={(event) => update("intakeModel", event.target.value)} />
@@ -98,6 +113,14 @@ export function ModelSettingsPage(_props: ModelSettingsPageProps) {
           <span className="pill">{t("settings.localOnly")}</span>
         </div>
         <pre className="agent-output">{runtimePreview}</pre>
+        <div className="settings-log-locations">
+          <h3>{t("settings.agentLogs")}</h3>
+          <p>{t("settings.agentLogsCopy")}</p>
+          <code>{projectRoot ? `${projectRoot}\\.distinction\\chat\\sessions\\*.jsonl` : t("settings.noProjectRoot")}</code>
+          <code>{projectRoot ? `${projectRoot}\\.distinction\\runs\\*.json` : t("settings.noProjectRoot")}</code>
+          <code>{projectRoot ? `${projectRoot}\\.distinction\\runs\\runs.jsonl` : t("settings.noProjectRoot")}</code>
+          <code>{projectRoot ? `${projectRoot}\\.distinction\\memory\\traces.jsonl` : t("settings.noProjectRoot")}</code>
+        </div>
       </section>
     </section>
   );

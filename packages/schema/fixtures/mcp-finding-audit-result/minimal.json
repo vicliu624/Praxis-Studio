@@ -1,0 +1,61 @@
+{
+  "schemaVersion": "praxis.mcp.findingAuditResult.v1",
+  "root": "/repo",
+  "generatedAt": "2026-05-26T00:00:00.000Z",
+  "findingsPath": ".distinction/cache/architecture-findings.json",
+  "counts": {
+    "findings": 1,
+    "currentlyDetected": 1,
+    "historicalOnly": 0,
+    "acceptedHistoryEvents": 1
+  },
+  "findings": [
+    {
+      "findingId": "finding:cycle",
+      "currentlyDetected": true,
+      "detectorState": "still_detected_with_accepted_status",
+      "currentStatus": "in_progress",
+      "currentTitle": "Package dependency cycle",
+      "currentSummary": "packages/a and packages/b depend on each other.",
+      "severity": "medium",
+      "latestAcceptedStatus": "in_progress",
+      "latestAcceptedAt": "2026-05-26T00:01:00.000Z",
+      "history": [
+        {
+          "patchId": "finding-status-patch:TASK-0001:finding-cycle",
+          "patchPath": ".distinction/cache/finding-status-patches/finding-status-patch-TASK-0001-finding-cycle.json",
+          "status": "in_progress",
+          "summary": "External agent started breaking the package cycle.",
+          "rationale": "Partial result accepted after smoke verification.",
+          "sourceTaskId": "TASK-0001",
+          "sourceResultId": "external-result:TASK-0001",
+          "createdAt": "2026-05-26T00:00:30.000Z",
+          "acceptedAt": "2026-05-26T00:01:00.000Z",
+          "evidenceCount": 1
+        }
+      ],
+      "memoryRecords": [
+        {
+          "id": "memory:finding-status:finding-cycle",
+          "status": "in_progress",
+          "summary": "Finding status accepted as in progress.",
+          "createdAt": "2026-05-26T00:01:00.000Z",
+          "patchId": "finding-status-patch:TASK-0001:finding-cycle",
+          "sourceResultId": "external-result:TASK-0001",
+          "sourceTaskId": "TASK-0001"
+        }
+      ],
+      "traces": [
+        {
+          "id": "trace-event:finding-status-accepted",
+          "kind": "finding.status_accepted",
+          "timestamp": "2026-05-26T00:01:00.000Z",
+          "summary": "External agent started breaking the package cycle.",
+          "patchId": "finding-status-patch:TASK-0001:finding-cycle",
+          "status": "in_progress"
+        }
+      ]
+    }
+  ],
+  "truncated": false
+}

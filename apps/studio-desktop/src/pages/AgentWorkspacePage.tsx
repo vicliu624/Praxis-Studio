@@ -8,6 +8,7 @@ import {
   startAgentRun,
   readGraph,
   type RuntimeAgentRunResult,
+  type RuntimeAgentLogPaths,
   type RuntimeAgentStep,
   type RuntimeChatMessage,
   type RuntimeChatSession,
@@ -47,7 +48,7 @@ export function AgentWorkspacePage({ projectRoot, onNavigateToGraph, onNavigateT
   const [runSteps, setRunSteps] = useState<RuntimeAgentStep[]>([]);
   const [error, setError] = useState("");
   const [leftView, setLeftView] = useState<WorkspaceView>("files");
-  const [rightView, setRightView] = useState<"context" | "plan" | "tools" | "memory" | "diff">("context");
+  const [rightView, setRightView] = useState<"context" | "plan" | "tools" | "memory" | "diff" | "logs">("context");
   const [selectedNode, setSelectedNode] = useState<string | null>(null);
   const [selectedEdge, setSelectedEdge] = useState<string | null>(null);
   const [slashQuery, setSlashQuery] = useState("");
@@ -267,7 +268,7 @@ export function AgentWorkspacePage({ projectRoot, onNavigateToGraph, onNavigateT
       {/* ── Left Sidebar ────────────────────────── */}
       <aside className="workspace-sidebar left-sidebar" style={{ width: 260, flexShrink: 0, borderRight: "1px solid #1a2332", display: "flex", flexDirection: "column", background: "#0d1117" }}>
         <div className="sidebar-header" style={{ padding: "12px 16px", borderBottom: "1px solid #1a2332", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <span style={{ fontWeight: 600, fontSize: 14 }}>Praxis Studio</span>
+          <span style={{ fontWeight: 600, fontSize: 14 }}>{t("agent.betaTitle")}</span>
           <button className="icon-btn" onClick={onNavigateHome} title={t("nav.home")} style={{ background: "none", border: "none", color: "#96a3b5", cursor: "pointer", fontSize: 16 }}>&#x2302;</button>
         </div>
 
@@ -322,6 +323,10 @@ export function AgentWorkspacePage({ projectRoot, onNavigateToGraph, onNavigateT
         {/* Chat Header */}
         <div className="chat-header" style={{ padding: "10px 16px", borderBottom: "1px solid #1a2332", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <div>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 3 }}>
+              <span style={{ fontSize: 11, color: "#8deadd", fontWeight: 700 }}>{t("agent.betaBadge")}</span>
+              <span style={{ fontSize: 11, color: "#96a3b5" }}>{t("agent.betaCopy")}</span>
+            </div>
             <span style={{ fontWeight: 600, fontSize: 14 }}>
               {currentTarget
                 ? `${"kind" in currentTarget ? (currentTarget as RuntimeNode).kind : (currentTarget as RuntimeEdge).kind}: ${currentTarget.title ?? currentTarget.id}`
@@ -507,7 +512,7 @@ export function AgentWorkspacePage({ projectRoot, onNavigateToGraph, onNavigateT
       {/* ── Right Sidebar ───────────────────────── */}
       <aside className="workspace-sidebar right-sidebar" style={{ width: 300, flexShrink: 0, borderLeft: "1px solid #1a2332", display: "flex", flexDirection: "column", background: "#0d1117" }}>
         <div className="sidebar-tabs" style={{ display: "flex", borderBottom: "1px solid #1a2332" }}>
-          {(["context", "tools", "plan", "memory", "diff"] as const).map((v) => (
+          {(["context", "tools", "plan", "memory", "diff", "logs"] as const).map((v) => (
             <button
               key={v}
               className={`sidebar-tab ${rightView === v ? "active" : ""}`}
@@ -517,7 +522,7 @@ export function AgentWorkspacePage({ projectRoot, onNavigateToGraph, onNavigateT
                 border: "none", color: rightView === v ? "#e8edf2" : "#96a3b5", cursor: "pointer", fontSize: 11, borderBottom: rightView === v ? "2px solid #eba341" : "2px solid transparent"
               }}
             >
-              {v === "context" ? t("panel.context") : v === "tools" ? t("panel.tools") : v === "plan" ? t("panel.plan") : v === "memory" ? t("panel.memory") : t("panel.diff")}
+              {v === "context" ? t("panel.context") : v === "tools" ? t("panel.tools") : v === "plan" ? t("panel.plan") : v === "memory" ? t("panel.memory") : v === "logs" ? t("panel.logs") : t("panel.diff")}
             </button>
           ))}
         </div>
@@ -537,6 +542,9 @@ export function AgentWorkspacePage({ projectRoot, onNavigateToGraph, onNavigateT
           )}
           {rightView === "diff" && (
             <DiffPanel messages={messages} />
+          )}
+          {rightView === "logs" && (
+            <LogsPanel projectRoot={projectRoot} sessionId={session?.id ?? ""} runResult={runResult} />
           )}
         </div>
       </aside>
@@ -980,6 +988,49 @@ function DiffPanel({ messages }: { messages: RuntimeChatMessage[] }) {
       ))}
     </div>
   );
+}
+
+function LogsPanel({
+  projectRoot,
+  sessionId,
+  runResult
+}: {
+  projectRoot: string;
+  sessionId: string;
+  runResult: RuntimeAgentRunResult | null;
+}) {
+  const paths = runResult?.logPaths ?? agentLogPaths(projectRoot, sessionId, runResult?.runPath);
+  return (
+    <div style={{ fontSize: 12, color: "#96a3b5", padding: 8 }}>
+      <div style={{ fontWeight: 600, marginBottom: 8, color: "#e8edf2", fontSize: 11, textTransform: "uppercase" }}>Agent Logs</div>
+      <div style={{ marginBottom: 8 }}>Agent Workspace writes chat transcript, run details and traces into the project .distinction directory.</div>
+      <LogPath label="Chat transcript" value={paths.chatTranscript} />
+      <LogPath label="Chat sessions index" value={paths.chatSessionsIndex} />
+      <LogPath label="Run record" value={paths.runPath || "Run record appears after an agent run finishes."} />
+      <LogPath label="Runs index" value={paths.runsIndex} />
+      <LogPath label="Trace log" value={paths.traces} />
+    </div>
+  );
+}
+
+function LogPath({ label, value }: { label: string; value: string }) {
+  return (
+    <div style={{ display: "grid", gap: 3, padding: "7px 0", borderTop: "1px solid #1a2332" }}>
+      <strong style={{ color: "#e8edf2", fontSize: 11 }}>{label}</strong>
+      <code style={{ color: "#8deadd", fontSize: 11, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{value}</code>
+    </div>
+  );
+}
+
+function agentLogPaths(projectRoot: string, sessionId: string, runPath?: string): RuntimeAgentLogPaths {
+  const base = `${projectRoot}\\.distinction`;
+  return {
+    chatSessionsIndex: `${base}\\chat\\sessions.json`,
+    chatTranscript: sessionId ? `${base}\\chat\\sessions\\${sessionId}.jsonl` : `${base}\\chat\\sessions\\<session-id>.jsonl`,
+    runsIndex: `${base}\\runs\\runs.jsonl`,
+    runPath,
+    traces: `${base}\\memory\\traces.jsonl`
+  };
 }
 
 // ─── Legacy card wrappers (used by right panels) ─────────────

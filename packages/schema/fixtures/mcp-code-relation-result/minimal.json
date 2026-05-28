@@ -1,0 +1,31 @@
+{
+  "schemaVersion": "praxis.mcp.codeRelationResult.v1",
+  "root": "/repo",
+  "generatedAt": "2026-05-26T00:00:00.000Z",
+  "relation": "callees",
+  "symbolId": "code:function:main",
+  "supported": true,
+  "nodes": [
+    {
+      "id": "code:function:main",
+      "kind": "function",
+      "name": "main",
+      "qualifiedName": "main",
+      "filePath": "src/index.ts",
+      "language": "TypeScript",
+      "range": {
+        "startLine": 1,
+        "endLine": 1
+      },
+      "evidence": [
+        {
+          "source": "codegraph",
+          "filePath": "src/index.ts"
+        }
+      ]
+    }
+  ],
+  "edges": [],
+  "truncated": false,
+  "sourceCachePath": ".distinction/cache/code-fact-graph.json"
+}

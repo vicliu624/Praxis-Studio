@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import initSqlJs, { type Database, type SqlValue } from "sql.js";
 import { CodeGraphCli } from "./CodeGraphCli.js";
+import { probeCodeGraphDbSchema } from "./CodeGraphDbSchemaProbe.js";
 import type { CodeGraphIndexedEdge, CodeGraphIndexedFile, CodeGraphIndexedNode, CodeGraphIndexReadResult, CodeGraphIndexStatus } from "./CodeGraphTypes.js";
 
 export class SqliteCodeGraphIndexReader {
@@ -33,6 +34,17 @@ export class SqliteCodeGraphIndexReader {
     const SQL = await initSqlJs();
     const db = new SQL.Database(databaseBytes);
     try {
+      const probe = probeCodeGraphDbSchema(db);
+      if (!probe.ok) {
+        return {
+          status,
+          files: [],
+          nodes: [],
+          edges: [],
+          readMode: "cli_fallback",
+          warnings: probe.warnings
+        };
+      }
       return {
         status,
         files: readFiles(db),

@@ -1,0 +1,16 @@
+{
+  "schemaVersion": "praxis.traceRecord.v1",
+  "id": "trace-event:external-result:TASK-0001",
+  "traceId": "trace:task:TASK-0001",
+  "timestamp": "2026-05-26T00:00:00.000Z",
+  "kind": "external_agent.result_accepted",
+  "target": {
+    "type": "external_agent_result",
+    "id": "external-result:TASK-0001:fixture"
+  },
+  "summary": "Accepted external result TASK-0001 into governance review.",
+  "data": {
+    "taskId": "TASK-0001",
+    "status": "done"
+  }
+}

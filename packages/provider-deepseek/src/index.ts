@@ -55,6 +55,7 @@ export class DeepSeekProvider implements ModelProvider {
 
   constructor(
     private options: {
+      apiKey?: string;
       apiKeyEnv?: string;
       baseUrl?: string;
       timeoutMs?: number;
@@ -63,7 +64,7 @@ export class DeepSeekProvider implements ModelProvider {
 
   async call(request: ModelCallRequest): Promise<ModelCallResponse> {
     const apiKeyEnv = this.options.apiKeyEnv ?? "DEEPSEEK_API_KEY";
-    const apiKey = process.env[apiKeyEnv];
+    const apiKey = this.options.apiKey?.trim() || process.env[apiKeyEnv];
     if (!apiKey) {
       throw new Error(
         `DeepSeek API key is required. Add it in Praxis Studio Model Settings or set ${apiKeyEnv} before launching Praxis.`
@@ -133,7 +134,7 @@ export class DeepSeekProvider implements ModelProvider {
   }
 }
 
-export function createProvider(providerName: string, options?: { apiKeyEnv?: string; baseUrl?: string }): ModelProvider {
+export function createProvider(providerName: string, options?: { apiKey?: string; apiKeyEnv?: string; baseUrl?: string }): ModelProvider {
   if (providerName === "deepseek") return new DeepSeekProvider(options);
   throw new Error(`Unsupported model provider: ${providerName}`);
 }

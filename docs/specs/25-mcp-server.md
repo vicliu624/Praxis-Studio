@@ -55,9 +55,9 @@ Expected behavior:
 
 ```text
 loads .distinction if present
-can initialize read-only intake context when .distinction is absent
 exposes the same governed schemas used by CLI and Desktop
 refuses unsupported write operations in v0.1
+allows only governed artifact writes, never source-editing bypasses
 ```
 
 ---
@@ -69,12 +69,13 @@ v0.1 tool surface:
 ```text
 praxis_status
 praxis_project_profile
-praxis_memory_search
 praxis_code_facts
 praxis_callers
 praxis_callees
 praxis_impact
 praxis_findings
+praxis_finding_audit
+praxis_projection_views
 praxis_context_packet
 praxis_explain_anchor
 praxis_plan_from_finding
@@ -91,16 +92,11 @@ praxis_project_profile({
   refresh?: boolean;
 }): ProjectProfile
 
-praxis_memory_search({
-  query: string;
-  kinds?: Array<"FACT" | "INFERENCE" | "CANDIDATE" | "CONFIRMED">;
-  limit?: number;
-}): MemorySearchResult
-
 praxis_code_facts({
   path?: string;
-  symbolId?: string;
-  refresh?: boolean;
+  kind?: CodeFactNodeKind;
+  name?: string;
+  limit?: number;
 }): CodeFactQueryResult
 
 praxis_callers({
@@ -124,13 +120,26 @@ praxis_findings({
   limit?: number;
 }): FindingListResult
 
+// Read-only. It never accepts a patch, mutates memory, or reruns detectors.
+praxis_finding_audit({
+  findingId?: string;
+  state?: string;
+  limit?: number;
+}): FindingAuditResult
+
+praxis_projection_views({
+  kind?: ProjectedGraphViewKind;
+  anchor?: GraphAnchor;
+  limit?: number;
+}): ProjectionViewsResult
+
 praxis_context_packet({
-  anchor: ContextAnchor;
-  expansionLevel?: ContextExpansionLevel;
+  anchor: GraphAnchor;
+  purpose?: ContextPacketPurpose;
 }): ContextPacket
 
 praxis_explain_anchor({
-  anchor: ContextAnchor;
+  anchor: GraphAnchor;
 }): ExplainResult
 
 praxis_plan_from_finding({
@@ -139,16 +148,18 @@ praxis_plan_from_finding({
 }): GovernancePlanResult
 
 praxis_generate_task({
-  anchor?: ContextAnchor;
+  anchor?: GraphAnchor;
   findingId?: string;
   adapter?: "manual" | "codex" | "claude-code" | "claude-code-best" | "opencode";
 }): CodingAgentTask
 
 praxis_record_external_result({
   taskId: string;
+  status: "done" | "partial" | "failed";
   summary: string;
+  changedFiles?: string[];
+  testResult?: string;
   evidencePaths?: string[];
-  suggestedProgress?: number;
 }): ExternalResultReceipt
 ```
 
@@ -170,9 +181,23 @@ respect durable-vs-cache boundaries
 v0.1 MCP writes are limited to governed project artifacts such as:
 
 ```text
-task generation
-external result import
-candidate memory or trace creation through approved runtime commands
+PlanPatch under .distinction/cache/plan-patches/
+CodingAgentTask under .distinction/tasks/
+ExternalAgentResult under .distinction/reports/external-results/
+Trace event append under .distinction/memory/traces.jsonl
+```
+
+ExternalAgentResult acceptance is intentionally outside the MCP write itself:
+
+```text
+praxis-runtime accept-external-result
+  -> materializes MemorySuggestionPatch and FindingStatusPatch review artifacts
+
+praxis-runtime accept-memory-suggestion
+  -> converts selected MemorySuggestionPatch records into CONFIRMED durable memory
+
+praxis-runtime accept-finding-status
+  -> confirms selected FindingStatusPatch, writes finding status memory, and reruns detector reconciliation
 ```
 
 v0.1 MCP must not:
@@ -203,8 +228,11 @@ An external agent may call:
 ```text
 praxis_context_packet
 praxis_findings
+praxis_finding_audit
+praxis_projection_views
 praxis_plan_from_finding
 praxis_generate_task
+praxis_record_external_result
 ```
 
 without using Praxis's built-in chat loop.
@@ -219,6 +247,6 @@ The MCP contract is implemented when:
 1. Praxis can run headless through `praxis-runtime serve --mcp`.
 2. Desktop UI is not required for MCP use.
 3. MCP tools use the same schema package as CLI and Desktop.
-4. External agents can retrieve ContextPacket, findings and tasks through MCP.
+4. External agents can retrieve ContextPacket, findings, projected graph views and tasks through MCP.
 5. v0.1 write safety boundaries remain enforced.
 ```

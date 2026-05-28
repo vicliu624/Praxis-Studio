@@ -11,13 +11,13 @@ import {
   type DevelopmentGraphCandidate,
   type DevelopmentNode
 } from "@praxis/development-graph";
+import { readProjectedGraphViewRecords } from "@praxis/projection-engine";
 import {
   ArchitectureFindingReportSchema,
   ArchitectureModelPatchSchema,
   CodeFactGraphSnapshotSchema,
   ContextPacketSchema,
   MemoryRecordSchema,
-  ProjectedGraphViewSchema,
   type ArchitectureFinding,
   type ArchitectureModelPatch,
   type CodeFactEdge,
@@ -325,8 +325,18 @@ function resolveAnchor(anchor: GraphAnchor, input: {
     }
   } else if (anchor.kind === "symbol" || anchor.kind === "code_fact_node") {
     resolution.codeFactNodeIds.push(anchor.id);
+    const node = input.codeFacts?.nodes.find((item) => item.id === anchor.id);
+    if (node?.filePath && node.filePath !== ".") resolution.includedPaths.push(node.filePath);
   } else if (anchor.kind === "code_fact_edge") {
     resolution.codeFactEdgeIds.push(anchor.id);
+    const edge = input.codeFacts?.edges.find((item) => item.id === anchor.id);
+    if (edge?.filePath && edge.filePath !== ".") resolution.includedPaths.push(edge.filePath);
+    if (edge) {
+      for (const nodeId of [edge.sourceId, edge.targetId]) {
+        const node = input.codeFacts?.nodes.find((item) => item.id === nodeId);
+        if (node?.filePath && node.filePath !== ".") resolution.includedPaths.push(node.filePath);
+      }
+    }
   } else if (anchor.kind === "finding") {
     resolution.findingIds.push(anchor.id);
     const finding = input.findingReport?.findings.find((item) => item.id === anchor.id);
@@ -447,7 +457,8 @@ function collectProjectionSlice(anchor: GraphAnchor, resolution: AnchorResolutio
 function isProjectionNodeRelated(node: ProjectedGraphNode, anchor: GraphAnchor, resolution: AnchorResolution): boolean {
   if (resolution.projectionNodeIds.includes(node.id)) return true;
   if (node.anchor.id === anchor.id || node.source.id === anchor.id) return true;
-  if (node.path && resolution.includedPaths.includes(node.path)) return true;
+  const nodePath = node.path;
+  if (nodePath && resolution.includedPaths.some((filePath) => pathsRelated(nodePath, filePath))) return true;
   if (node.anchor.kind === "finding" && resolution.findingIds.includes(node.anchor.id)) return true;
   if (node.anchor.kind === "architecture_module" && resolution.architectureModuleIds.includes(node.anchor.id)) return true;
   if (node.anchor.kind === "architecture_dependency" && resolution.architectureDependencyIds.includes(node.anchor.id)) return true;
@@ -463,7 +474,9 @@ function isProjectionEdgeRelated(edge: ProjectedGraphEdge, anchor: GraphAnchor, 
 
 function collectMemorySlice(records: MemoryRecord[], paths: string[], limit: number): ContextPacket["memory"] {
   const related = records
-    .filter((record) => paths.some((filePath) => record.subject.includes(filePath) || record.object?.includes(filePath) || record.evidence.some((item) => item.filePath === filePath)))
+    .filter((record) =>
+      paths.some((filePath) => record.subject.includes(filePath) || record.object?.includes(filePath) || record.evidence.some((item) => item.filePath && pathsRelated(item.filePath, filePath)))
+    )
     .slice(0, limit);
   return {
     facts: related.filter((record) => record.kind === "FACT"),
@@ -478,9 +491,15 @@ function collectMemorySlice(records: MemoryRecord[], paths: string[], limit: num
 function filterArchitectureModules(model: ArchitectureModelPatch, resolution: AnchorResolution, findings: ArchitectureFinding[]) {
   const moduleIds = new Set([...resolution.architectureModuleIds, ...findings.flatMap((finding) => finding.affectedModuleIds)]);
   if (moduleIds.size === 0 && resolution.includedPaths.length) {
-    return model.modules.filter((module) => resolution.includedPaths.some((filePath) => filePath.startsWith(module.path)));
+    return model.modules.filter((module) => resolution.includedPaths.some((filePath) => pathsRelated(module.path, filePath)));
   }
   return model.modules.filter((module) => moduleIds.has(module.id));
+}
+
+function pathsRelated(left: string, right: string): boolean {
+  const normalizedLeft = left.replace(/\\/g, "/").replace(/\/+$/g, "");
+  const normalizedRight = right.replace(/\\/g, "/").replace(/\/+$/g, "");
+  return normalizedLeft === normalizedRight || normalizedLeft.startsWith(`${normalizedRight}/`) || normalizedRight.startsWith(`${normalizedLeft}/`);
 }
 
 function filterArchitectureDependencies(model: ArchitectureModelPatch, resolution: AnchorResolution, findings: ArchitectureFinding[]) {
@@ -490,16 +509,12 @@ function filterArchitectureDependencies(model: ArchitectureModelPatch, resolutio
 }
 
 async function readProjectedViews(root: string, warnings: string[]): Promise<ProjectedGraphView[]> {
-  const candidates = [
-    ".distinction/views/code/code-fact-view.json",
-    ".distinction/views/findings/finding-view.json"
-  ];
-  const result: ProjectedGraphView[] = [];
-  for (const relativePath of candidates) {
-    const view = await readOptionalJson(path.join(root, relativePath), ProjectedGraphViewSchema, warnings);
-    if (view) result.push(view);
+  try {
+    return (await readProjectedGraphViewRecords(root)).map((record) => record.view);
+  } catch (error) {
+    warnings.push(`Failed to read projected graph views: ${error instanceof Error ? error.message : String(error)}`);
+    return [];
   }
-  return result;
 }
 
 async function readMemoryRecords(root: string, warnings: string[]): Promise<MemoryRecord[]> {

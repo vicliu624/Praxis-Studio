@@ -183,6 +183,7 @@ export class AgentLoop {
     const route = resolveModelRoute(config, taskType);
     const providerConfig = config.providers[route.provider];
     const provider = createProvider(route.provider, {
+      apiKey: providerConfig?.apiKey,
       apiKeyEnv: providerConfig?.apiKeyEnv,
       baseUrl: providerConfig?.baseUrl
     });

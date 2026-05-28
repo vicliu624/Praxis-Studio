@@ -106,7 +106,9 @@ const MANIFESTS = new Set([
   "requirements.txt",
   "go.mod",
   "pom.xml",
-  "build.gradle"
+  "build.gradle",
+  "Directory.Build.props",
+  "Directory.Build.targets"
 ]);
 
 export class FileSystemRepositoryScanner implements RepositoryScanner {
@@ -254,9 +256,14 @@ function detectLanguage(filePath: string, extension: string): string {
   if (extension === ".js" || extension === ".jsx" || extension === ".mjs" || extension === ".cjs") return "JavaScript";
   if (extension === ".rs") return "Rust";
   if (extension === ".py") return "Python";
+  if (extension === ".cs") return "C#";
+  if (extension === ".xaml" || extension === ".axaml") return "XAML";
   if ([".cpp", ".cc", ".cxx", ".c", ".h", ".hpp"].includes(extension)) return "C/C++";
+  if (extension === ".sh") return "Shell";
+  if (extension === ".ps1") return "PowerShell";
+  if (extension === ".bat" || extension === ".cmd") return "Batch";
   if (extension === ".md") return "Markdown";
-  if ([".json", ".yaml", ".yml", ".toml", ".ini"].includes(extension)) return "Config";
+  if ([".json", ".yaml", ".yml", ".toml", ".ini", ".csproj", ".sln", ".props", ".targets"].includes(extension)) return "Config";
   if (name === "CMakeLists.txt" || name === "Dockerfile") return "Config";
   return "Unknown";
 }
@@ -265,12 +272,29 @@ function detectRoleHint(filePath: string, isDirectory: boolean): SourceRoleHint 
   const lower = filePath.toLowerCase();
   if (lower.includes("test") || lower.includes("spec")) return "test";
   if (lower.includes("readme") || lower.startsWith("docs") || lower.endsWith(".md")) return "documentation";
-  if (lower.includes("ui") || lower.includes("view") || lower.includes("component") || lower.includes("page")) return "ui";
+  if (
+    lower.endsWith(".xaml") ||
+    lower.endsWith(".axaml") ||
+    /(^|[\/._-])(ui|views?|components?|pages?)([\/._-]|$)/.test(lower)
+  ) {
+    return "ui";
+  }
   if (lower.includes("domain") || lower.includes("model") || lower.includes("entity")) return "domain";
   if (lower.includes("runtime") || lower.includes("agent")) return "runtime";
   if (lower.includes("infra") || lower.includes("adapter") || lower.includes("platform")) return "infrastructure";
   if (lower.includes("storage") || lower.includes("store") || lower.includes("knowledge")) return "storage";
-  if (!isDirectory && (lower.endsWith(".json") || lower.endsWith(".yaml") || lower.endsWith(".toml"))) return "config";
+  if (
+    !isDirectory &&
+    (lower.endsWith(".json") ||
+      lower.endsWith(".yaml") ||
+      lower.endsWith(".toml") ||
+      lower.endsWith(".csproj") ||
+      lower.endsWith(".sln") ||
+      lower.endsWith(".props") ||
+      lower.endsWith(".targets"))
+  ) {
+    return "config";
+  }
   return "unknown";
 }
 
@@ -283,9 +307,11 @@ function extractImports(content: string, language: string): string[] {
         ? [/\buse\s+([^;]+);/g, /\bmod\s+([A-Za-z0-9_]+)\s*;/g]
         : language === "C/C++"
           ? [/#include\s+[<"]([^>"]+)[>"]/g]
-          : language === "Python"
-            ? [/^\s*import\s+([A-Za-z0-9_.,\s]+)/gm, /^\s*from\s+([A-Za-z0-9_.]+)\s+import\s+/gm]
-            : [];
+          : language === "C#"
+            ? [/^\s*using\s+([A-Za-z0-9_.]+)\s*;/gm]
+            : language === "Python"
+              ? [/^\s*import\s+([A-Za-z0-9_.,\s]+)/gm, /^\s*from\s+([A-Za-z0-9_.]+)\s+import\s+/gm]
+              : [];
 
   for (const pattern of patterns) {
     let match: RegExpExecArray | null;
@@ -302,7 +328,8 @@ function isTextLike(language: string, extension: string, filePath: string): bool
 
 function isManifest(filePath: string): boolean {
   const name = path.basename(filePath);
-  return MANIFESTS.has(name) || filePath.startsWith(".github/workflows/");
+  const extension = path.extname(filePath).toLowerCase();
+  return MANIFESTS.has(name) || extension === ".csproj" || extension === ".sln" || filePath.startsWith(".github/workflows/");
 }
 
 function manifestKind(filePath: string): string {
@@ -313,6 +340,9 @@ function manifestKind(filePath: string): string {
   if (name === "tauri.conf.json") return "tauri_config";
   if (name === "Cargo.toml") return "rust_package";
   if (name === "vite.config.ts") return "vite_config";
+  if (name.endsWith(".csproj")) return "dotnet_project";
+  if (name.endsWith(".sln")) return "dotnet_solution";
+  if (name === "Directory.Build.props" || name === "Directory.Build.targets") return "msbuild_config";
   return name;
 }
 
@@ -324,6 +354,22 @@ function parseManifestData(filePath: string, content: string): Record<string, un
     } catch {
       return undefined;
     }
+  }
+  if (filePath.endsWith(".csproj")) {
+    return {
+      packageReferences: [...content.matchAll(/<PackageReference\s+[^>]*Include=["']([^"']+)["']/gi)].map((match) => match[1]),
+      projectReferences: [...content.matchAll(/<ProjectReference\s+[^>]*Include=["']([^"']+)["']/gi)].map((match) => match[1]),
+      targetFrameworks:
+        content.match(/<TargetFrameworks?>([^<]+)<\/TargetFrameworks?>/i)?.[1]?.split(";").map((item) => item.trim()).filter(Boolean) ?? []
+    };
+  }
+  if (filePath.endsWith(".sln")) {
+    return {
+      projects: [...content.matchAll(/Project\("[^"]+"\)\s*=\s*"([^"]+)",\s*"([^"]+)"/g)].map((match) => ({
+        name: match[1],
+        path: match[2]
+      }))
+    };
   }
   return undefined;
 }

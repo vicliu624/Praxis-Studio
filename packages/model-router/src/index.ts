@@ -1,3 +1,7 @@
+import { readFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+
 export type ModelTaskType =
   | "project.intake.analyze"
   | "project.create.requirements"
@@ -22,6 +26,7 @@ export interface ModelRoute {
 export interface ModelProviderConfig {
   type: string;
   baseUrl?: string;
+  apiKey?: string;
   apiKeyEnv?: string;
 }
 
@@ -62,7 +67,25 @@ export function resolveModelRoute(config: ModelRouterConfig, taskType: ModelTask
 }
 
 export async function loadModelConfig(_projectRoot: string): Promise<ModelRouterConfig> {
-  return applyIdeModelSettings(defaultModelRouterConfig, process.env.PRAXIS_MODEL_SETTINGS_JSON);
+  return applyIdeModelSettings(defaultModelRouterConfig, await loadModelSettingsJson());
+}
+
+async function loadModelSettingsJson(): Promise<string | undefined> {
+  if (process.env.PRAXIS_MODEL_SETTINGS_JSON?.trim()) return process.env.PRAXIS_MODEL_SETTINGS_JSON;
+  const configuredPath = process.env.PRAXIS_MODEL_SETTINGS_PATH?.trim();
+  const candidates = [
+    configuredPath,
+    path.join(os.homedir(), ".praxis-studio", "model-settings.json")
+  ].filter((item): item is string => Boolean(item));
+  for (const candidate of candidates) {
+    try {
+      return await readFile(candidate, "utf8");
+    } catch (error) {
+      if (isMissingFileError(error)) continue;
+      throw error;
+    }
+  }
+  return undefined;
 }
 
 function applyIdeModelSettings(config: ModelRouterConfig, settingsJson: string | undefined): ModelRouterConfig {
@@ -71,6 +94,12 @@ function applyIdeModelSettings(config: ModelRouterConfig, settingsJson: string |
   if (!settings) return config;
   const defaultProvider = stringValue(settings.defaultProvider) ?? config.defaultProvider;
   const baseUrl = stringValue(settings.baseUrl) ?? config.providers.deepseek?.baseUrl;
+  const legacyApiKeyEnv = stringValue(settings.apiKeyEnv);
+  const apiKey = stringValue(settings.apiKey) ?? (legacyApiKeyEnv && looksLikeApiKey(legacyApiKeyEnv) ? legacyApiKeyEnv : undefined);
+  const apiKeyEnv =
+    legacyApiKeyEnv && !looksLikeApiKey(legacyApiKeyEnv)
+      ? legacyApiKeyEnv
+      : config.providers.deepseek?.apiKeyEnv;
   return {
     ...config,
     defaultProvider,
@@ -79,7 +108,9 @@ function applyIdeModelSettings(config: ModelRouterConfig, settingsJson: string |
       deepseek: {
         ...(config.providers.deepseek ?? {}),
         type: "openai-compatible",
-        baseUrl
+        baseUrl,
+        apiKey,
+        apiKeyEnv
       }
     },
     routes: {
@@ -111,4 +142,12 @@ function safeJsonRecord(value: string): Record<string, unknown> | undefined {
 
 function stringValue(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function looksLikeApiKey(value: string): boolean {
+  return value.startsWith("sk-") || value.startsWith("sk_");
+}
+
+function isMissingFileError(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "ENOENT";
 }

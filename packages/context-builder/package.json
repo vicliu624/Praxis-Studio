@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@praxis/development-graph": "0.1.0-alpha.0",
+    "@praxis/projection-engine": "0.1.0-alpha.0",
     "@praxis/schema": "0.1.0-alpha.0"
   }
 }

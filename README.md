@@ -4,6 +4,8 @@
 
 **Praxis Studio** 是一个 **记忆优先（memory-first）、模型驱动（model-driven）、图谱投影（graph-projected）、Agent 可治理（agent-governed）** 的 AI 原生产品开发 IDE。
 
+快速启动和当前可用路径见 [START.md](docs/START.md)。
+
 中文定义：
 
 > Praxis Studio 是一个以可靠结构化项目记忆为源、以建模为核心、以图谱投影为界面、以可治理 Agent 为执行层的产品开发环境。

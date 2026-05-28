@@ -1,0 +1,17 @@
+{
+  "schemaVersion": "praxis.findingStatusPatch.v1",
+  "id": "finding-status-patch:fixture",
+  "sourceResultId": "external-result:TASK-0001:fixture",
+  "sourceTaskId": "TASK-0001",
+  "findingId": "finding:package-cycle:core-runtime",
+  "status": "mitigated",
+  "summary": "Cycle appears mitigated after external result.",
+  "rationale": "External agent reports a boundary change and verification evidence.",
+  "evidence": [
+    {
+      "source": "agent_inference",
+      "filePath": "packages/core/src/index.ts"
+    }
+  ],
+  "createdAt": "2026-05-26T00:00:00.000Z"
+}

@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "praxis.planPatch.v1",
+  "id": "plan-patch:fixture",
+  "sourceFindingId": "finding:package-cycle:core-runtime",
+  "sourceContextPacketId": "context-packet:fixture",
+  "title": "Plan remediation for package dependency cycle",
+  "summary": "Break the cycle through a stable boundary.",
+  "strength": "conservative",
+  "steps": ["Explain evidence.", "Generate a controlled task.", "Record external result."],
+  "createdAt": "2026-05-26T00:00:00.000Z"
+}

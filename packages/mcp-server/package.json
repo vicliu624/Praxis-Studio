@@ -3,7 +3,7 @@
   "version": "0.1.0-alpha.0",
   "private": true,
   "type": "module",
-  "description": "Read-only MCP adapter for Praxis project intelligence.",
+  "description": "MCP adapter for Praxis project intelligence and governed external-agent workflow.",
   "main": "dist/index.js",
   "types": "src/index.ts",
   "scripts": {
@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@praxis/context-builder": "0.1.0-alpha.0",
+    "@praxis/projection-engine": "0.1.0-alpha.0",
     "@praxis/schema": "0.1.0-alpha.0"
   }
 }

@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Deterministic Praxis projection engine for derived view cache and projection manifests.",
   "main": "dist/index.js",
-  "types": "dist/index.d.ts",
+  "types": "src/index.ts",
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit"

@@ -1,10 +1,23 @@
 #!/usr/bin/env node
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { buildArchitectureModelPatch, type ArchitectureModelPatch } from "@praxis/architecture-modeler";
 import { buildCodeFactGraphSnapshot, type CodeFactProviderSource } from "@praxis/code-fact-graph";
 import { detectArchitectureFindings, type ArchitectureFindingReport } from "@praxis/finding-detector";
-import { buildProjectionManifest, projectArchitectureDependencyView, projectCodeFactGraphView, projectFindingsGraphView } from "@praxis/projection-engine";
+import {
+  buildProjectionManifest,
+  projectArchitectureDependencyGraphView,
+  projectArchitectureDependencyView,
+  projectCodeFactGraphView,
+  projectContextGraphView,
+  projectFindingsGraphView,
+  projectMemoryGraphView,
+  readProjectedGraphViewRecords,
+  projectTaskPlanGraphView,
+  projectTraceGraphView,
+  type TaskProjectionRecord,
+  type TraceProjectionRecord
+} from "@praxis/projection-engine";
 import {
   acceptedFactRecordsFromPatch,
   buildRepositoryUnderstandingPatch,
@@ -19,14 +32,29 @@ import {
   ArchitectureModelPatchSchema,
   CodeFactGraphSnapshotSchema,
   ContextPacketSchema,
+  ExternalAgentResultSchema,
+  FindingStatusPatchSchema,
+  MemorySuggestionPatchSchema,
+  MemoryRecordSchema,
   ProjectedGraphViewSchema,
   ProjectionManifestSchema,
-  RepositoryUnderstandingPatchSchema
+  RepositoryUnderstandingPatchSchema,
+  TraceRecordSchema,
+  type ArchitectureFinding,
+  type CodeFactGraphSnapshot,
+  type ExternalAgentResult,
+  type FindingStatusPatch,
+  type MemoryRecord,
+  type MemoryPatch,
+  type MemorySuggestionPatch,
+  type ProjectedGraphView,
+  type TraceRecord
 } from "@praxis/schema";
 import { generateDevelopmentGraphCandidate } from "@praxis/graph-generator";
 import {
   appendMessage,
   createSessionForTarget,
+  getChatSessionPaths,
   loadSessions,
   readMessages,
   readSession,
@@ -102,6 +130,11 @@ async function main(argv: string[]): Promise<void> {
     if (command === "accept-understanding") return await commandAcceptUnderstanding(args);
     if (command === "model-architecture") return await commandModelArchitecture(args);
     if (command === "detect-findings") return await commandDetectFindings(args);
+    if (command === "review-queue") return await commandReviewQueue(args);
+    if (command === "finding-audit") return await commandFindingAudit(args);
+    if (command === "accept-external-result") return await commandAcceptExternalResult(args);
+    if (command === "accept-memory-suggestion") return await commandAcceptMemorySuggestion(args);
+    if (command === "accept-finding-status") return await commandAcceptFindingStatus(args);
     if (command === "project:view") return await commandProjectView(args, rest);
     if (command === "context-packet") return await commandContextPacket(args);
     if (command === "serve") return await commandServe(args);
@@ -264,7 +297,7 @@ async function commandChat(args: Args): Promise<void> {
   const target = required(args, "target");
   const mode = (args.mode === "plan" ? "plan" : "explain") as "explain" | "plan";
   const instruction = String(args.instruction ?? (mode === "plan" ? "Generate plan" : "Explain selected target"));
-  const graph = await readDevelopmentGraph(projectRoot);
+  const graph = await readRuntimeDevelopmentGraph(projectRoot);
   const runtime = new PraxisAgentRuntime();
   const targetObject = target.startsWith("edge:") ? { type: "edge" as const, id: target } : { type: "node" as const, id: target };
   const result = await runtime.run({
@@ -282,7 +315,7 @@ async function commandChat(args: Args): Promise<void> {
 async function commandAgentRun(args: Args): Promise<void> {
   console.error("[agent-run] Starting agent run...");
   const projectRoot = required(args, "project-root");
-  const graph = await readDevelopmentGraph(projectRoot);
+  const graph = await readRuntimeDevelopmentGraph(projectRoot);
   const target = chatTargetFromArgs(args);
   const instruction = String(args.instruction ?? args.message ?? "Explain the selected target.");
   const mode = (args.mode === "plan" ? "plan" : "explain") as "explain" | "plan";
@@ -440,6 +473,7 @@ async function commandAgentRun(args: Args): Promise<void> {
     sessionId: session.id,
     runId: result.run.id,
     runPath,
+    logPaths: agentLogPaths(projectRoot, session.id, runPath),
     runStatus: result.run.status,
     terminalReason: result.terminalReason,
     transitions: result.run.transitions,
@@ -451,7 +485,7 @@ async function commandAgentRun(args: Args): Promise<void> {
 
 async function commandChatSessionCreate(args: Args): Promise<void> {
   const projectRoot = required(args, "project-root");
-  const graph = await readDevelopmentGraph(projectRoot);
+  const graph = await readRuntimeDevelopmentGraph(projectRoot);
   const target = chatTargetFromArgs(args);
   const session = await createSessionForTarget(projectRoot, target, {
     title: sessionTitleForTarget(graph, target),
@@ -522,12 +556,12 @@ async function commandChatSessionList(args: Args): Promise<void> {
 async function commandChatSessionRead(args: Args): Promise<void> {
   const projectRoot = required(args, "project-root");
   const sessionId = required(args, "session");
-  outputJson({ ok: true, ...(await readSessionTranscript(projectRoot, sessionId)) });
+  outputJson({ ok: true, ...(await readSessionTranscript(projectRoot, sessionId)), logPaths: agentLogPaths(projectRoot, sessionId) });
 }
 
 async function commandChatSend(args: Args): Promise<void> {
   const projectRoot = required(args, "project-root");
-  const graph = await readDevelopmentGraph(projectRoot);
+  const graph = await readRuntimeDevelopmentGraph(projectRoot);
   const target = chatTargetFromArgs(args);
   const session =
     typeof args.session === "string" && (await readSession(projectRoot, args.session))
@@ -706,7 +740,7 @@ async function commandGenerateTask(args: Args): Promise<void> {
 }
 
 async function generateTaskFromPlan(projectRoot: string, plan: GraphPlan): Promise<{ taskPath: string; task: ReturnType<typeof createCodingAgentTask> }> {
-  const graph = await readDevelopmentGraph(projectRoot);
+  const graph = await readRuntimeDevelopmentGraph(projectRoot);
   const draft = plan.codingTasks[0];
   const action = plan.actions.find((item) => item.type === "create_coding_task" || item.type === "create_task");
   const context = buildCodingTaskContext(graph, plan, action);
@@ -760,7 +794,7 @@ async function commandApplyPlan(args: Args): Promise<void> {
   const projectRoot = required(args, "project-root");
   const plan = (await readJson(required(args, "plan"))) as GraphPlan;
   const actionIds = typeof args.actions === "string" ? new Set(args.actions.split(",").map((item) => item.trim()).filter(Boolean)) : undefined;
-  const graph = await readDevelopmentGraph(projectRoot);
+  const graph = await readRuntimeDevelopmentGraph(projectRoot);
   const result = await applyPlanActions(projectRoot, graph, plan, actionIds);
   outputJson({ ok: true, ...result });
 }
@@ -769,6 +803,331 @@ async function commandImportTaskResult(args: Args): Promise<void> {
   const projectRoot = required(args, "project-root");
   const result = (await readJson(required(args, "result"))) as CodingAgentResultInput;
   outputJson({ ok: true, ...(await importTaskResultPayload(projectRoot, result)) });
+}
+
+async function readRuntimeDevelopmentGraph(projectRoot: string): Promise<DevelopmentGraph> {
+  const root = path.resolve(projectRoot);
+  try {
+    return await readDevelopmentGraph(root);
+  } catch (error) {
+    if (!isMissingLegacyDevelopmentGraphError(error)) throw error;
+    return await readFoundationDevelopmentGraphFallback(root);
+  }
+}
+
+function isMissingLegacyDevelopmentGraphError(error: unknown): boolean {
+  if (isMissingFileError(error)) return true;
+  if (!(error instanceof Error)) return false;
+  const message = error.message.replace(/\\/g, "/");
+  return message.includes(".distinction/graph/") && (message.includes("nodes.json") || message.includes("edges.json"));
+}
+
+async function readFoundationDevelopmentGraphFallback(root: string): Promise<DevelopmentGraph> {
+  const projectedRecords = await readProjectedGraphViewRecords(root);
+  if (projectedRecords.length > 0) {
+    return developmentGraphFromProjectedViews(root, projectedRecords.map((record) => record.view));
+  }
+
+  const codeFacts = await tryReadJsonWithSchema(path.join(root, ".distinction", "cache", "code-fact-graph.json"), CodeFactGraphSnapshotSchema);
+  if (codeFacts) return developmentGraphFromCodeFacts(root, codeFacts);
+
+  return minimalFoundationDevelopmentGraph(root, "No legacy DevelopmentGraph or Foundation projection cache was found. Run intake and project:view to populate project intelligence.");
+}
+
+function minimalFoundationDevelopmentGraph(root: string, description?: string): DevelopmentGraph {
+  return {
+    id: "graph:foundation:fallback",
+    title: `${path.basename(root) || "Project"} Foundation Graph`,
+    rootPath: root,
+    updatedAt: new Date().toISOString(),
+    metadata: {
+      foundationFallback: true,
+      source: "empty_foundation_fallback",
+      readOnly: true
+    },
+    nodes: [
+      {
+        id: "project:foundation",
+        kind: "project",
+        title: path.basename(root) || "Project",
+        description,
+        status: "active",
+        progress: 0,
+        confidence: "medium",
+        knowledgeKind: "FACT",
+        metadata: {
+          path: root,
+          foundationFallback: true
+        }
+      }
+    ],
+    edges: []
+  };
+}
+
+function developmentGraphFromProjectedViews(root: string, views: ProjectedGraphView[]): DevelopmentGraph {
+  const nodeLimit = 420;
+  const edgeLimit = 720;
+  const graph = minimalFoundationDevelopmentGraph(root, "Synthesized from Foundation ProjectedGraphView cache because legacy .distinction/graph is absent.");
+  graph.metadata = {
+    ...(graph.metadata ?? {}),
+    source: "projected_graph_views",
+    projectedViewIds: views.map((view) => view.id),
+    projectedViewKinds: Array.from(new Set(views.map((view) => view.kind)))
+  };
+
+  const nodeIdByViewNode = new Map<string, string>();
+  const seenNodes = new Set(graph.nodes.map((node) => node.id));
+  const seenEdges = new Set<string>();
+  let truncatedNodes = 0;
+  let truncatedEdges = 0;
+
+  for (const view of views) {
+    for (const projectedNode of view.nodes) {
+      const graphNodeId = foundationProjectionNodeId(view.id, projectedNode.id);
+      nodeIdByViewNode.set(`${view.id}\u0000${projectedNode.id}`, graphNodeId);
+      if (seenNodes.has(graphNodeId)) continue;
+      if (graph.nodes.length >= nodeLimit) {
+        truncatedNodes += 1;
+        continue;
+      }
+      seenNodes.add(graphNodeId);
+      graph.nodes.push({
+        id: graphNodeId,
+        kind: developmentNodeKindFromProjection(projectedNode.kind, projectedNode.anchor.kind),
+        title: projectedNode.label || projectedNode.id,
+        description: projectedNode.summary,
+        status: statusFromString(projectedNode.status),
+        progress: 0,
+        confidence: view.authority === "durable_model" ? "high" : "medium",
+        knowledgeKind: view.authority === "durable_model" ? "CONFIRMED" : "INFERENCE",
+        tags: ["foundation", "projection", view.kind],
+        metadata: {
+          foundationFallback: true,
+          projectionViewId: view.id,
+          projectionViewKind: view.kind,
+          projectionNodeId: projectedNode.id,
+          anchor: projectedNode.anchor,
+          source: projectedNode.source,
+          path: projectedNode.path,
+          projectedGraphMetadata: projectedNode.metadata
+        }
+      });
+    }
+  }
+
+  for (const node of graph.nodes.slice(1, 41)) {
+    const edgeId = `foundation-root:${node.id}`;
+    seenEdges.add(edgeId);
+    graph.edges.push({
+      id: edgeId,
+      source: "project:foundation",
+      target: node.id,
+      kind: "contains",
+      title: "Contains",
+      status: "active",
+      progress: 0,
+      riskLevel: "none",
+      confidence: "medium",
+      knowledgeKind: "INFERENCE",
+      metadata: { foundationFallback: true, synthetic: true }
+    });
+  }
+
+  for (const view of views) {
+    for (const projectedEdge of view.edges) {
+      const source = nodeIdByViewNode.get(`${view.id}\u0000${projectedEdge.sourceId}`);
+      const target = nodeIdByViewNode.get(`${view.id}\u0000${projectedEdge.targetId}`);
+      if (!source || !target) {
+        truncatedEdges += 1;
+        continue;
+      }
+      const graphEdgeId = foundationProjectionEdgeId(view.id, projectedEdge.id);
+      if (seenEdges.has(graphEdgeId)) continue;
+      if (graph.edges.length >= edgeLimit) {
+        truncatedEdges += 1;
+        continue;
+      }
+      seenEdges.add(graphEdgeId);
+      graph.edges.push({
+        id: graphEdgeId,
+        source,
+        target,
+        kind: developmentEdgeKindFromProjection(projectedEdge.kind),
+        title: projectedEdge.kind,
+        description: projectedEdge.summary,
+        status: "active",
+        progress: 0,
+        riskLevel: projectedEdge.kind.includes("conflict") ? "medium" : "none",
+        confidence: projectedEdge.confidence ?? "medium",
+        knowledgeKind: view.authority === "durable_model" ? "CONFIRMED" : "INFERENCE",
+        metadata: {
+          foundationFallback: true,
+          projectionViewId: view.id,
+          projectionViewKind: view.kind,
+          projectionEdgeId: projectedEdge.id,
+          anchor: projectedEdge.anchor,
+          source: projectedEdge.source,
+          projectedGraphMetadata: projectedEdge.metadata
+        }
+      });
+    }
+  }
+
+  graph.metadata = {
+    ...(graph.metadata ?? {}),
+    truncatedNodes,
+    truncatedEdges
+  };
+  return graph;
+}
+
+function developmentGraphFromCodeFacts(root: string, snapshot: CodeFactGraphSnapshot): DevelopmentGraph {
+  const nodeLimit = 420;
+  const edgeLimit = 720;
+  const graph = minimalFoundationDevelopmentGraph(root, "Synthesized from CodeFactGraphSnapshot cache because legacy .distinction/graph is absent.");
+  graph.metadata = {
+    ...(graph.metadata ?? {}),
+    source: "code_fact_graph_snapshot",
+    provider: snapshot.provider,
+    readOnly: true
+  };
+
+  const selectedNodes = snapshot.nodes.filter((node) => node.kind !== "project").slice(0, nodeLimit - 1);
+  const idMap = new Map<string, string>();
+  for (const node of selectedNodes) {
+    const graphNodeId = foundationCodeFactNodeId(node.id);
+    idMap.set(node.id, graphNodeId);
+    graph.nodes.push({
+      id: graphNodeId,
+      kind: developmentNodeKindFromProjection(node.kind, node.kind === "file" ? "file" : "symbol"),
+      title: node.name || node.qualifiedName || node.id,
+      description: node.qualifiedName,
+      status: "active",
+      progress: 0,
+      confidence: "high",
+      knowledgeKind: "FACT",
+      tags: ["foundation", "code-fact", node.kind],
+      metadata: {
+        foundationFallback: true,
+        codeFactNodeId: node.id,
+        path: node.filePath,
+        language: node.language,
+        range: node.range
+      }
+    });
+  }
+
+  for (const node of graph.nodes.slice(1, 41)) {
+    graph.edges.push({
+      id: `foundation-root:${node.id}`,
+      source: "project:foundation",
+      target: node.id,
+      kind: "contains",
+      title: "Contains",
+      status: "active",
+      progress: 0,
+      riskLevel: "none",
+      confidence: "high",
+      knowledgeKind: "FACT",
+      metadata: { foundationFallback: true, synthetic: true }
+    });
+  }
+
+  let truncatedEdges = 0;
+  for (const edge of snapshot.edges) {
+    const source = idMap.get(edge.sourceId);
+    const target = idMap.get(edge.targetId);
+    if (!source || !target) {
+      truncatedEdges += 1;
+      continue;
+    }
+    if (graph.edges.length >= edgeLimit) {
+      truncatedEdges += 1;
+      continue;
+    }
+    graph.edges.push({
+      id: foundationCodeFactEdgeId(edge.id),
+      source,
+      target,
+      kind: developmentEdgeKindFromProjection(edge.kind),
+      title: edge.kind,
+      status: "active",
+      progress: 0,
+      riskLevel: "none",
+      confidence: confidenceFromNumber(edge.confidence),
+      knowledgeKind: "FACT",
+      metadata: {
+        foundationFallback: true,
+        codeFactEdgeId: edge.id,
+        filePath: edge.filePath,
+        range: edge.range
+      }
+    });
+  }
+
+  graph.metadata = {
+    ...(graph.metadata ?? {}),
+    truncatedNodes: Math.max(0, snapshot.nodes.length - selectedNodes.length - 1),
+    truncatedEdges
+  };
+  return graph;
+}
+
+function foundationProjectionNodeId(viewId: string, nodeId: string): string {
+  return `projection:${viewId}:${nodeId}`;
+}
+
+function foundationProjectionEdgeId(viewId: string, edgeId: string): string {
+  return `projection:${viewId}:${edgeId}`;
+}
+
+function foundationCodeFactNodeId(nodeId: string): string {
+  return `code-fact:${nodeId}`;
+}
+
+function foundationCodeFactEdgeId(edgeId: string): string {
+  return `code-fact:${edgeId}`;
+}
+
+function developmentNodeKindFromProjection(kind: string, anchorKind?: string): DevelopmentNode["kind"] {
+  if (anchorKind === "finding" || kind.includes("finding") || kind.includes("risk")) return "risk";
+  if (anchorKind === "task" || kind.includes("task")) return "task";
+  if (anchorKind === "trace" || anchorKind === "memory" || kind.includes("trace") || kind.includes("memory")) return "memory_event";
+  if (anchorKind === "architecture_module" || kind.includes("architecture") || kind.includes("module")) return "architecture_component";
+  if (anchorKind === "file" || anchorKind === "symbol" || kind.includes("file") || kind.includes("function") || kind.includes("class")) return "code_unit";
+  if (kind.includes("decision")) return "decision";
+  if (kind.includes("document") || kind.includes("spec")) return "document";
+  return "code_unit";
+}
+
+function developmentEdgeKindFromProjection(kind: string): DevelopmentEdge["kind"] {
+  if (kind === "contains" || kind === "owns") return "contains";
+  if (kind === "implements") return "implements";
+  if (kind === "impacts" || kind === "affects") return "impacts";
+  if (kind === "blocks") return "blocks";
+  if (kind === "conflicts_with") return "conflicts_with";
+  if (kind === "derived_from") return "derived_from";
+  if (kind === "validates") return "validates";
+  if (kind === "records" || kind.includes("finding") || kind.includes("trace") || kind.includes("memory")) return "records";
+  return "depends_on";
+}
+
+function statusFromString(value: string | undefined): DevelopmentNode["status"] {
+  if (value === "draft" || value === "active" || value === "wip" || value === "blocked" || value === "done" || value === "stale" || value === "deprecated") {
+    return value;
+  }
+  return "active";
+}
+
+function confidenceFromNumber(value: number): DevelopmentEdge["confidence"] {
+  if (value >= 0.75) return "high";
+  if (value >= 0.4) return "medium";
+  return "low";
+}
+
+function isFoundationFallbackGraph(graph: DevelopmentGraph): boolean {
+  return graph.metadata?.foundationFallback === true;
 }
 
 async function importTaskResultPayload(projectRoot: string, result: CodingAgentResultInput): Promise<{ resultPath: string; progressPlan?: GraphPlan }> {
@@ -901,7 +1260,19 @@ async function handlePermissionResponse(input: {
 
 async function outputChatSendResult(projectRoot: string, sessionId: string, appendedMessages: ChatMessage[], extra: Record<string, unknown> = {}): Promise<void> {
   const transcript = await readSessionTranscript(projectRoot, sessionId);
-  outputJson({ ok: true, sessionId, appendedMessages, ...transcript, ...extra });
+  outputJson({ ok: true, sessionId, appendedMessages, ...transcript, logPaths: agentLogPaths(projectRoot, sessionId), ...extra });
+}
+
+function agentLogPaths(projectRoot: string, sessionId: string, runPath?: string) {
+  const root = path.resolve(projectRoot);
+  const chatPaths = getChatSessionPaths(root);
+  return {
+    chatSessionsIndex: chatPaths.sessionsIndexPath,
+    chatTranscript: path.join(chatPaths.sessionsDir, `${sessionId}.jsonl`),
+    runsIndex: path.join(root, ".distinction", "runs", "runs.jsonl"),
+    runPath,
+    traces: path.join(root, ".distinction", "memory", "traces.jsonl")
+  };
 }
 
 function chatTargetFromArgs(args: Args): ChatTarget {
@@ -1120,6 +1491,14 @@ async function applyPlanActions(projectRoot: string, graph: DevelopmentGraph, pl
     let graphChangedByAction = false;
     if (!isSupportedApplyAction(action)) {
       skippedActions.push({ id: action.id, type: action.type, reason: "Action is not supported by v0.1 limited Apply." });
+      continue;
+    }
+    if (isFoundationFallbackGraph(graph) && isDevelopmentGraphMutationAction(action)) {
+      skippedActions.push({
+        id: action.id,
+        type: action.type,
+        reason: "Foundation projection fallback graph is read-only; rerun projection commands instead of writing legacy .distinction/graph."
+      });
       continue;
     }
     if (action.type === "update_edge") {
@@ -1341,6 +1720,10 @@ function isSupportedApplyAction(action: PlanAction): boolean {
   ].includes(action.type);
 }
 
+function isDevelopmentGraphMutationAction(action: PlanAction): boolean {
+  return action.type === "update_edge" || action.type === "update_node_progress" || action.type === "update_edge_progress";
+}
+
 function progressFromAction(action: PlanAction): number | undefined {
   const raw = action.data?.progress ?? action.data?.value;
   if (typeof raw !== "number" || !Number.isFinite(raw)) return undefined;
@@ -1476,7 +1859,11 @@ async function callProjectCreationAgent(
 ): Promise<Record<string, unknown> | undefined> {
   const route = resolveModelRoute(config, taskType);
   const providerConfig = config.providers[route.provider];
-  const provider = createProvider(route.provider, { apiKeyEnv: providerConfig?.apiKeyEnv, baseUrl: providerConfig?.baseUrl });
+  const provider = createProvider(route.provider, {
+    apiKey: providerConfig?.apiKey,
+    apiKeyEnv: providerConfig?.apiKeyEnv,
+    baseUrl: providerConfig?.baseUrl
+  });
   const response = await provider.call({
     route,
     responseFormat: "json",
@@ -1737,8 +2124,10 @@ async function commandDetectFindings(args: Args): Promise<void> {
     model = ArchitectureModelPatchSchema.parse(buildArchitectureModelPatch(path.resolve(root), records as any[]));
     await writeJson(modelPath, model, ArchitectureModelPatchSchema);
   }
-  const report = ArchitectureFindingReportSchema.parse(detectArchitectureFindings(model));
+  const detectedReport = ArchitectureFindingReportSchema.parse(detectArchitectureFindings(model));
   const cachePath = path.join(path.resolve(root), ".distinction", "cache", "architecture-findings.json");
+  const previousReport = await tryReadJsonWithSchema(cachePath, ArchitectureFindingReportSchema);
+  const report = previousReport ? reconcileFindingReport(previousReport, detectedReport) : detectedReport;
   await writeJson(cachePath, report, ArchitectureFindingReportSchema);
   await maybeWriteJson(args, "out", report);
   outputJson({
@@ -1750,14 +2139,846 @@ async function commandDetectFindings(args: Args): Promise<void> {
   });
 }
 
+async function commandReviewQueue(args: Args): Promise<void> {
+  const root = path.resolve(required(args, "root"));
+  const includeAccepted = args["include-accepted"] === true;
+  const accepted = await readAcceptedReviewArtifactIds(root);
+  const memorySuggestionPaths = await listJsonFiles(path.join(root, ".distinction", "cache", "memory-suggestions"));
+  const findingStatusPatchPaths = await listJsonFiles(path.join(root, ".distinction", "cache", "finding-status-patches"));
+
+  const memorySuggestions = [];
+  for (const filePath of memorySuggestionPaths) {
+    const suggestion = await readJsonWithSchema(filePath, MemorySuggestionPatchSchema);
+    const acceptedAt = accepted.memorySuggestions.get(suggestion.id);
+    if (acceptedAt && !includeAccepted) continue;
+    memorySuggestions.push({
+      id: suggestion.id,
+      path: projectRelativePath(root, filePath),
+      sourceResultId: suggestion.sourceResultId,
+      sourceTaskId: suggestion.sourceTaskId,
+      summary: suggestion.summary,
+      createdAt: suggestion.createdAt,
+      acceptedAt,
+      memoryPatchCount: suggestion.memoryPatches.length,
+      records: suggestion.memoryPatches.map((patch) => ({
+        patchId: patch.id,
+        patchStatus: patch.status,
+        id: patch.record.id,
+        kind: patch.record.kind,
+        type: patch.record.type,
+        subject: patch.record.subject,
+        predicate: patch.record.predicate,
+        object: patch.record.object,
+        summary: patch.record.summary,
+        confidence: patch.record.confidence,
+        source: patch.record.source,
+        status: patch.record.status
+      }))
+    });
+  }
+
+  const findingStatusPatches = [];
+  for (const filePath of findingStatusPatchPaths) {
+    const patch = await readJsonWithSchema(filePath, FindingStatusPatchSchema);
+    const acceptedAt = accepted.findingStatusPatches.get(patch.id);
+    if (acceptedAt && !includeAccepted) continue;
+    findingStatusPatches.push({
+      id: patch.id,
+      path: projectRelativePath(root, filePath),
+      sourceResultId: patch.sourceResultId,
+      sourceTaskId: patch.sourceTaskId,
+      findingId: patch.findingId,
+      status: patch.status,
+      summary: patch.summary,
+      rationale: patch.rationale,
+      createdAt: patch.createdAt,
+      acceptedAt,
+      evidenceCount: patch.evidence.length
+    });
+  }
+
+  const foundation = await buildFoundationReviewStatus(root);
+  const result = {
+    ok: true,
+    root,
+    generatedAt: new Date().toISOString(),
+    includeAccepted,
+    counts: {
+      memorySuggestions: memorySuggestions.length,
+      findingStatusPatches: findingStatusPatches.length,
+      total: memorySuggestions.length + findingStatusPatches.length
+    },
+    foundation,
+    memorySuggestions,
+    findingStatusPatches
+  };
+  await maybeWriteJson(args, "out", result);
+  outputJson(result);
+}
+
+async function buildFoundationReviewStatus(root: string) {
+  const cacheDir = path.join(root, ".distinction", "cache");
+  const memoryDir = path.join(root, ".distinction", "memory");
+  const distinctionExists = await exists(path.join(root, ".distinction"));
+  const repositorySnapshotPath = path.join(cacheDir, "repository-snapshot.json");
+  const codeFactsPath = path.join(cacheDir, "code-fact-graph.json");
+  const profilePath = path.join(cacheDir, "project-profile.json");
+  const understandingPath = path.join(cacheDir, "repository-understanding-patch.json");
+  const factsPath = path.join(memoryDir, "facts.jsonl");
+  const architecturePath = path.join(cacheDir, "architecture-model-patch.json");
+  const findingsPath = path.join(cacheDir, "architecture-findings.json");
+  const manifestPath = path.join(cacheDir, "projection-manifest.json");
+
+  const [repositorySnapshot, codeFacts, profile, understanding, factRecords, architecture, findings, manifest, projectedViews, traces, tasks] = await Promise.all([
+    tryReadJsonFile(repositorySnapshotPath),
+    tryReadJsonWithSchema(codeFactsPath, CodeFactGraphSnapshotSchema),
+    tryReadJsonFile(profilePath),
+    tryReadJsonWithSchema(understandingPath, RepositoryUnderstandingPatchSchema),
+    readMemoryRecordJsonl(factsPath),
+    tryReadJsonWithSchema(architecturePath, ArchitectureModelPatchSchema),
+    tryReadJsonWithSchema(findingsPath, ArchitectureFindingReportSchema),
+    tryReadJsonWithSchema(manifestPath, ProjectionManifestSchema),
+    readProjectedGraphViewRecords(root),
+    readTraceRecordJsonl(root),
+    readTaskProjectionRecords(root)
+  ]);
+
+  const repositoryFiles = isRecord(repositorySnapshot) && Array.isArray(repositorySnapshot.files) ? repositorySnapshot.files.length : undefined;
+  const projectKinds = isRecord(profile) && Array.isArray(profile.projectKinds) ? profile.projectKinds.filter((item): item is string => typeof item === "string") : [];
+  const languages = isRecord(profile) && Array.isArray(profile.languages) ? profile.languages.filter((item): item is string => typeof item === "string") : [];
+  const frameworks = isRecord(profile) && Array.isArray(profile.frameworks) ? profile.frameworks.filter((item): item is string => typeof item === "string") : [];
+  const pendingUnderstanding = Boolean(understanding && factRecords.length === 0);
+  const status = !distinctionExists
+    ? "not_initialized"
+    : !repositorySnapshot
+      ? "needs_intake"
+      : pendingUnderstanding
+        ? "understanding_pending"
+        : "foundation_ready";
+
+  const nextActions: string[] = [];
+  if (!repositorySnapshot) nextActions.push("Run project intake to create repository/cache facts.");
+  if (pendingUnderstanding) nextActions.push("Accept repository understanding to persist FACT memory.");
+  if (!manifest || projectedViews.length === 0) nextActions.push("Generate projected graph views for architecture, code facts, findings and memory.");
+  if (findings && findings.findings.length > 0) nextActions.push("Review open findings or create governed finding status patches.");
+  if (!nextActions.length) nextActions.push("No pending governance review items. Use Projection Inspector or Agent Session for exploration.");
+
+  return {
+    status,
+    generatedAt: new Date().toISOString(),
+    artifacts: {
+      repositorySnapshot: {
+        exists: Boolean(repositorySnapshot),
+        path: projectRelativePath(root, repositorySnapshotPath),
+        files: repositoryFiles
+      },
+      codeFacts: {
+        exists: Boolean(codeFacts),
+        path: projectRelativePath(root, codeFactsPath),
+        provider: codeFacts?.provider,
+        files: codeFacts?.statistics.fileCount ?? 0,
+        nodes: codeFacts?.statistics.nodeCount ?? 0,
+        edges: codeFacts?.statistics.edgeCount ?? 0,
+        warnings: codeFacts?.warnings.length ?? 0
+      },
+      projectProfile: {
+        exists: Boolean(profile),
+        path: projectRelativePath(root, profilePath),
+        projectKinds,
+        languages,
+        frameworks
+      },
+      repositoryUnderstanding: {
+        exists: Boolean(understanding),
+        path: projectRelativePath(root, understandingPath),
+        memoryPatches: understanding?.memoryPatches.length ?? 0,
+        warnings: understanding?.warnings.length ?? 0,
+        reviewQuestions: understanding?.reviewQuestions.length ?? 0,
+        pendingAcceptance: pendingUnderstanding
+      },
+      factMemory: {
+        exists: factRecords.length > 0,
+        path: projectRelativePath(root, factsPath),
+        records: factRecords.length
+      },
+      architectureModel: {
+        exists: Boolean(architecture),
+        path: projectRelativePath(root, architecturePath),
+        modules: architecture?.modules.length ?? 0,
+        dependencies: architecture?.dependencies.length ?? 0,
+        warnings: architecture?.warnings.length ?? 0
+      },
+      findings: {
+        exists: Boolean(findings),
+        path: projectRelativePath(root, findingsPath),
+        detected: findings?.findings.length ?? 0,
+        detectorIds: findings?.detectorIds ?? []
+      },
+      projections: {
+        exists: Boolean(manifest),
+        path: projectRelativePath(root, manifestPath),
+        manifestViews: manifest?.views.length ?? 0,
+        schemaValidViews: projectedViews.length,
+        freshViews: projectedViews.filter((record) => record.view.status === "fresh").length,
+        failedViews: projectedViews.filter((record) => record.view.status === "failed").length,
+        kinds: Array.from(new Set(projectedViews.map((record) => record.view.kind)))
+      },
+      traces: {
+        records: traces.length
+      },
+      tasks: {
+        records: tasks.length
+      }
+    },
+    nextActions
+  };
+}
+
+async function commandFindingAudit(args: Args): Promise<void> {
+  const root = path.resolve(required(args, "root"));
+  const filterFindingId = typeof args.finding === "string" ? args.finding : undefined;
+  const audit = await buildFindingAudit(root, filterFindingId);
+  await maybeWriteJson(args, "out", audit);
+  outputJson(audit);
+}
+
+async function commandAcceptExternalResult(args: Args): Promise<void> {
+  const root = required(args, "root");
+  const resolvedRoot = path.resolve(root);
+  const resultPath = await resolveExternalResultPath(resolvedRoot, required(args, "result"));
+  const result = await readJsonWithSchema(resultPath, ExternalAgentResultSchema);
+  const materializedMemorySuggestions: string[] = [];
+  const materializedFindingStatusPatches: string[] = [];
+  for (const suggestion of result.memorySuggestions) {
+    materializedMemorySuggestions.push(await writeMemorySuggestionPatch(resolvedRoot, suggestion));
+  }
+  for (const patch of result.findingStatusSuggestions) {
+    materializedFindingStatusPatches.push(await writeFindingStatusPatch(resolvedRoot, patch));
+  }
+
+  const traceRecord = TraceRecordSchema.parse({
+    schemaVersion: "praxis.traceRecord.v1",
+    id: `trace-event:external-result-accepted:${safeFilePart(result.id)}:${Date.now()}`,
+    traceId: `trace:task:${result.taskId}`,
+    timestamp: new Date().toISOString(),
+    kind: "external_agent.result_accepted",
+    target: { type: "external_agent_result", id: result.id },
+    summary: `Accepted external result ${result.id} into governance review.`,
+    data: {
+      taskId: result.taskId,
+      status: result.status,
+      resultPath: projectRelativePath(resolvedRoot, resultPath),
+      memorySuggestionPaths: materializedMemorySuggestions,
+      findingStatusPatchPaths: materializedFindingStatusPatches
+    }
+  } satisfies TraceRecord);
+  const tracePath = await appendTraceRecord(resolvedRoot, traceRecord);
+  await appendChange(resolvedRoot, {
+    title: `Accepted external result ${result.id}`,
+    summary: `Accepted ${result.status} result for ${result.taskId}. Materialized ${materializedMemorySuggestions.length} memory suggestion(s) and ${materializedFindingStatusPatches.length} finding status patch(es).`,
+    kind: "CANDIDATE"
+  });
+
+  outputJson({
+    ok: true,
+    root: resolvedRoot,
+    resultId: result.id,
+    resultPath: projectRelativePath(resolvedRoot, resultPath),
+    memorySuggestionPaths: materializedMemorySuggestions,
+    findingStatusPatchPaths: materializedFindingStatusPatches,
+    tracePath
+  });
+}
+
+async function commandAcceptMemorySuggestion(args: Args): Promise<void> {
+  const root = required(args, "root");
+  const resolvedRoot = path.resolve(root);
+  const suggestionArg = typeof args.suggestion === "string" ? args.suggestion : typeof args.patch === "string" ? args.patch : "";
+  if (!suggestionArg) throw new Error("Missing required --suggestion");
+  const suggestionPath = await resolveMemorySuggestionPatchPath(resolvedRoot, suggestionArg);
+  const suggestion = await readJsonWithSchema(suggestionPath, MemorySuggestionPatchSchema);
+  const now = new Date().toISOString();
+  const records = suggestion.memoryPatches.map((patch, index) =>
+    confirmedMemoryRecordFromSuggestion(suggestion, patch, now, index, projectRelativePath(resolvedRoot, suggestionPath))
+  );
+  const memoryPath = await appendMemoryRecords(resolvedRoot, "confirmations.jsonl", records);
+  const tracePath = await appendTraceRecord(
+    resolvedRoot,
+    TraceRecordSchema.parse({
+      schemaVersion: "praxis.traceRecord.v1",
+      id: `trace-event:memory-suggestion-accepted:${safeFilePart(suggestion.id)}:${Date.now()}`,
+      traceId: suggestion.sourceTaskId ? `trace:task:${suggestion.sourceTaskId}` : `trace:memory:${suggestion.id}`,
+      timestamp: now,
+      kind: "memory_suggestion.accepted",
+      target: { type: "memory", id: suggestion.id },
+      summary: suggestion.summary,
+      data: {
+        suggestionId: suggestion.id,
+        suggestionPath: projectRelativePath(resolvedRoot, suggestionPath),
+        sourceResultId: suggestion.sourceResultId,
+        sourceTaskId: suggestion.sourceTaskId,
+        memoryPatchIds: suggestion.memoryPatches.map((patch) => patch.id),
+        acceptedMemoryIds: records.map((record) => record.id)
+      }
+    } satisfies TraceRecord)
+  );
+  await appendChange(resolvedRoot, {
+    title: `Accepted memory suggestion ${suggestion.id}`,
+    summary: `Accepted ${records.length} memory record(s) from ${projectRelativePath(resolvedRoot, suggestionPath)}.`,
+    kind: "CONFIRMED"
+  });
+  outputJson({
+    ok: true,
+    root: resolvedRoot,
+    suggestionId: suggestion.id,
+    suggestionPath: projectRelativePath(resolvedRoot, suggestionPath),
+    memoryPath,
+    acceptedMemoryIds: records.map((record) => record.id),
+    tracePath
+  });
+}
+
+async function commandAcceptFindingStatus(args: Args): Promise<void> {
+  const root = required(args, "root");
+  const resolvedRoot = path.resolve(root);
+  const patchPath = await resolveFindingStatusPatchPath(resolvedRoot, required(args, "patch"));
+  const patch = await readJsonWithSchema(patchPath, FindingStatusPatchSchema);
+  const findingsPath = path.join(resolvedRoot, ".distinction", "cache", "architecture-findings.json");
+  const existingReport = await readJsonWithSchema(findingsPath, ArchitectureFindingReportSchema);
+  const now = new Date().toISOString();
+  const updatedReport = applyFindingStatusPatch(existingReport, patch, now);
+  await writeJson(findingsPath, updatedReport, ArchitectureFindingReportSchema);
+  const findingMemoryPath = await appendFindingStatusMemory(resolvedRoot, patch, now);
+  const tracePath = await appendTraceRecord(
+    resolvedRoot,
+    TraceRecordSchema.parse({
+      schemaVersion: "praxis.traceRecord.v1",
+      id: `trace-event:finding-status-accepted:${safeFilePart(patch.id)}:${Date.now()}`,
+      traceId: `trace:finding:${patch.findingId}`,
+      timestamp: now,
+      kind: "finding.status_accepted",
+      target: { type: "finding", id: patch.findingId },
+      summary: patch.summary,
+      data: {
+        patchId: patch.id,
+        patchPath: projectRelativePath(resolvedRoot, patchPath),
+        status: patch.status,
+        sourceResultId: patch.sourceResultId,
+        sourceTaskId: patch.sourceTaskId
+      }
+    } satisfies TraceRecord)
+  );
+  const rerunReport = await rerunDetectorWithFindingStatusReconciliation(resolvedRoot, updatedReport);
+  await appendChange(resolvedRoot, {
+    title: `Accepted finding status ${patch.status}`,
+    summary: `${patch.findingId}: ${patch.summary}`,
+    kind: "CONFIRMED"
+  });
+  outputJson({
+    ok: true,
+    root: resolvedRoot,
+    patchId: patch.id,
+    findingId: patch.findingId,
+    status: patch.status,
+    findingsPath,
+    findingMemoryPath,
+    tracePath,
+    detectorRerun: {
+      findings: rerunReport.findings.length,
+      statusPreserved: rerunReport.findings.some((finding) => finding.id === patch.findingId && finding.status === patch.status)
+    }
+  });
+}
+
+async function resolveExternalResultPath(root: string, value: string): Promise<string> {
+  const direct = path.isAbsolute(value) ? value : path.resolve(root, value);
+  if (await exists(direct)) return direct;
+  const reportsDir = path.join(root, ".distinction", "reports", "external-results");
+  const candidates = await listJsonFiles(reportsDir);
+  for (const candidate of candidates) {
+    const result = await readJsonWithSchema(candidate, ExternalAgentResultSchema);
+    if (result.id === value || safeFilePart(result.id) === safeFilePart(value) || path.basename(candidate, ".json") === value) return candidate;
+  }
+  throw new Error(`ExternalAgentResult not found: ${value}`);
+}
+
+async function resolveFindingStatusPatchPath(root: string, value: string): Promise<string> {
+  const direct = path.isAbsolute(value) ? value : path.resolve(root, value);
+  if (await exists(direct)) return direct;
+  const patchDir = path.join(root, ".distinction", "cache", "finding-status-patches");
+  const candidates = await listJsonFiles(patchDir);
+  for (const candidate of candidates) {
+    const patch = await readJsonWithSchema(candidate, FindingStatusPatchSchema);
+    if (patch.id === value || safeFilePart(patch.id) === safeFilePart(value) || path.basename(candidate, ".json") === value) return candidate;
+  }
+  throw new Error(`FindingStatusPatch not found: ${value}`);
+}
+
+async function resolveMemorySuggestionPatchPath(root: string, value: string): Promise<string> {
+  const direct = path.isAbsolute(value) ? value : path.resolve(root, value);
+  if (await exists(direct)) return direct;
+  const patchDir = path.join(root, ".distinction", "cache", "memory-suggestions");
+  const candidates = await listJsonFiles(patchDir);
+  for (const candidate of candidates) {
+    const patch = await readJsonWithSchema(candidate, MemorySuggestionPatchSchema);
+    if (patch.id === value || safeFilePart(patch.id) === safeFilePart(value) || path.basename(candidate, ".json") === value) return candidate;
+  }
+  throw new Error(`MemorySuggestionPatch not found: ${value}`);
+}
+
+async function writeMemorySuggestionPatch(root: string, suggestion: MemorySuggestionPatch): Promise<string> {
+  const parsed = MemorySuggestionPatchSchema.parse(suggestion);
+  const relative = `.distinction/cache/memory-suggestions/${safeFilePart(parsed.id)}.json`;
+  await writeJson(path.join(root, relative), parsed, MemorySuggestionPatchSchema);
+  return relative;
+}
+
+function confirmedMemoryRecordFromSuggestion(
+  suggestion: MemorySuggestionPatch,
+  patch: MemoryPatch,
+  timestamp: string,
+  index: number,
+  suggestionPath: string
+): MemoryRecord {
+  if (patch.status === "rejected") throw new Error(`Cannot accept rejected memory patch: ${patch.id}`);
+  const base = patch.record;
+  return MemoryRecordSchema.parse({
+    ...base,
+    id: `memory:confirmed:${safeFilePart(suggestion.id)}:${index + 1}:${Date.now()}`,
+    kind: "CONFIRMED",
+    evidence: [
+      ...base.evidence,
+      {
+        source: "user_confirmation",
+        filePath: suggestionPath,
+        excerpt: suggestion.summary
+      }
+    ],
+    source: "user",
+    status: "active",
+    createdAt: timestamp,
+    updatedAt: timestamp
+  } satisfies MemoryRecord);
+}
+
+async function appendMemoryRecords(root: string, fileName: string, records: MemoryRecord[]): Promise<string> {
+  const memoryPath = path.join(root, ".distinction", "memory", fileName);
+  await mkdir(path.dirname(memoryPath), { recursive: true });
+  if (!records.length) {
+    await appendFile(memoryPath, "", "utf8");
+    return memoryPath;
+  }
+  const lines = records.map((record) => JSON.stringify(MemoryRecordSchema.parse(record))).join("\n");
+  await appendFile(memoryPath, `${lines}\n`, "utf8");
+  return memoryPath;
+}
+
+async function writeFindingStatusPatch(root: string, patch: FindingStatusPatch): Promise<string> {
+  const parsed = FindingStatusPatchSchema.parse(patch);
+  const relative = `.distinction/cache/finding-status-patches/${safeFilePart(parsed.id)}.json`;
+  await writeJson(path.join(root, relative), parsed, FindingStatusPatchSchema);
+  return relative;
+}
+
+function applyFindingStatusPatch(report: ArchitectureFindingReport, patch: FindingStatusPatch, timestamp: string): ArchitectureFindingReport {
+  let matched = false;
+  const findings = report.findings.map((finding) => {
+    if (finding.id !== patch.findingId) return finding;
+    matched = true;
+    return {
+      ...finding,
+      status: patch.status,
+      updatedAt: timestamp
+    } satisfies ArchitectureFinding;
+  });
+  if (!matched) throw new Error(`Finding not found in architecture-findings cache: ${patch.findingId}`);
+  return ArchitectureFindingReportSchema.parse({
+    ...report,
+    generatedAt: timestamp,
+    findings
+  });
+}
+
+function reconcileFindingReport(previous: ArchitectureFindingReport, detected: ArchitectureFindingReport): ArchitectureFindingReport {
+  const previousById = new Map(previous.findings.map((finding) => [finding.id, finding]));
+  const findings = detected.findings.map((finding) => {
+    const previousFinding = previousById.get(finding.id);
+    if (!previousFinding) return finding;
+    if (previousFinding.status === "open") {
+      return {
+        ...finding,
+        createdAt: previousFinding.createdAt
+      };
+    }
+    return {
+      ...finding,
+      status: previousFinding.status,
+      createdAt: previousFinding.createdAt,
+      updatedAt: previousFinding.updatedAt
+    };
+  });
+  return ArchitectureFindingReportSchema.parse({
+    ...detected,
+    findings
+  });
+}
+
+async function rerunDetectorWithFindingStatusReconciliation(root: string, previousReport: ArchitectureFindingReport): Promise<ArchitectureFindingReport> {
+  const modelPath = path.join(root, ".distinction", "cache", "architecture-model-patch.json");
+  const model = await readJsonWithSchema(modelPath, ArchitectureModelPatchSchema);
+  const detected = ArchitectureFindingReportSchema.parse(detectArchitectureFindings(model));
+  const reconciled = reconcileFindingReport(previousReport, detected);
+  await writeJson(path.join(root, ".distinction", "cache", "architecture-findings.json"), reconciled, ArchitectureFindingReportSchema);
+  return reconciled;
+}
+
+async function appendFindingStatusMemory(root: string, patch: FindingStatusPatch, timestamp: string): Promise<string> {
+  const record = MemoryRecordSchema.parse({
+    id: `memory:finding-status:${safeFilePart(patch.id)}:${Date.now()}`,
+    kind: "CONFIRMED",
+    type: "finding_status",
+    subject: patch.findingId,
+    predicate: "status",
+    object: patch.status,
+    value: {
+      patchId: patch.id,
+      sourceResultId: patch.sourceResultId,
+      sourceTaskId: patch.sourceTaskId,
+      rationale: patch.rationale
+    },
+    summary: patch.summary,
+    evidence: patch.evidence,
+    source: "user",
+    confidence: "high",
+    status: "active",
+    createdAt: timestamp,
+    updatedAt: timestamp
+  } satisfies MemoryRecord);
+  const findingsPath = path.join(root, ".distinction", "memory", "findings.jsonl");
+  await mkdir(path.dirname(findingsPath), { recursive: true });
+  await appendFile(findingsPath, `${JSON.stringify(record)}\n`, "utf8");
+  return findingsPath;
+}
+
+async function appendTraceRecord(root: string, record: TraceRecord): Promise<string> {
+  const tracePath = path.join(root, ".distinction", "memory", "traces.jsonl");
+  await mkdir(path.dirname(tracePath), { recursive: true });
+  await appendFile(tracePath, `${JSON.stringify(TraceRecordSchema.parse(record))}\n`, "utf8");
+  return tracePath;
+}
+
+async function readAcceptedReviewArtifactIds(root: string): Promise<{
+  memorySuggestions: Map<string, string>;
+  findingStatusPatches: Map<string, string>;
+}> {
+  const memorySuggestions = new Map<string, string>();
+  const findingStatusPatches = new Map<string, string>();
+  const tracesPath = path.join(root, ".distinction", "memory", "traces.jsonl");
+  try {
+    const raw = await readFile(tracesPath, "utf8");
+    for (const line of raw.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      const value = safeJson(trimmed);
+      if (!isRecord(value)) continue;
+      const kind = typeof value.kind === "string" ? value.kind : "";
+      const timestamp = typeof value.timestamp === "string" ? value.timestamp : "";
+      const data = isRecord(value.data) ? value.data : {};
+      if (kind === "memory_suggestion.accepted" && typeof data.suggestionId === "string") {
+        memorySuggestions.set(data.suggestionId, timestamp);
+      }
+      if (kind === "finding.status_accepted" && typeof data.patchId === "string") {
+        findingStatusPatches.set(data.patchId, timestamp);
+      }
+    }
+  } catch (error) {
+    if (!isMissingFileError(error)) throw error;
+  }
+  return { memorySuggestions, findingStatusPatches };
+}
+
+async function buildFindingAudit(root: string, filterFindingId?: string) {
+  const findingsPath = path.join(root, ".distinction", "cache", "architecture-findings.json");
+  const report = await tryReadJsonWithSchema(findingsPath, ArchitectureFindingReportSchema);
+  const currentById = new Map((report?.findings ?? []).map((finding) => [finding.id, finding]));
+  const accepted = await readAcceptedReviewArtifactIds(root);
+  const patchEntries = await readFindingStatusPatchEntries(root);
+  const findingMemoryRecords = (await readMemoryRecordJsonl(path.join(root, ".distinction", "memory", "findings.jsonl"))).filter(
+    (record) => record.type === "finding_status"
+  );
+  const traces = (await readTraceRecordJsonl(root)).filter(
+    (trace) =>
+      trace.kind === "finding.status_accepted" ||
+      trace.target?.type === "finding" ||
+      (isRecord(trace.data) && typeof trace.data.findingId === "string")
+  );
+
+  const findingIds = new Set<string>();
+  for (const id of currentById.keys()) findingIds.add(id);
+  for (const entry of patchEntries) findingIds.add(entry.patch.findingId);
+  for (const record of findingMemoryRecords) findingIds.add(record.subject);
+  for (const trace of traces) {
+    if (trace.target?.type === "finding" && trace.target.id) findingIds.add(trace.target.id);
+    if (isRecord(trace.data) && typeof trace.data.findingId === "string") findingIds.add(trace.data.findingId);
+  }
+
+  const findings = Array.from(findingIds)
+    .filter((findingId) => !filterFindingId || findingId === filterFindingId)
+    .sort()
+    .map((findingId) => {
+      const current = currentById.get(findingId);
+      const patches = patchEntries
+        .filter((entry) => entry.patch.findingId === findingId)
+        .sort((left, right) => left.patch.createdAt.localeCompare(right.patch.createdAt));
+      const memoryRecords = findingMemoryRecords
+        .filter((record) => record.subject === findingId)
+        .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+      const findingTraces = traces
+        .filter((trace) => {
+          if (trace.target?.type === "finding" && trace.target.id === findingId) return true;
+          return isRecord(trace.data) && trace.data.findingId === findingId;
+        })
+        .sort((left, right) => left.timestamp.localeCompare(right.timestamp));
+      const latestMemory = memoryRecords.length ? memoryRecords[memoryRecords.length - 1] : undefined;
+      const latestPatch = patches.length ? patches[patches.length - 1].patch : undefined;
+      const latestAcceptedStatus =
+        typeof latestMemory?.object === "string" ? latestMemory.object : latestPatch?.status;
+      const latestAcceptedAt = latestMemory?.createdAt ?? (latestPatch ? accepted.findingStatusPatches.get(latestPatch.id) : undefined);
+      return {
+        findingId,
+        currentlyDetected: Boolean(current),
+        detectorState: findingDetectorState(current, latestAcceptedStatus),
+        currentStatus: current?.status,
+        currentTitle: current?.title,
+        currentSummary: current?.summary,
+        severity: current?.severity,
+        latestAcceptedStatus,
+        latestAcceptedAt,
+        history: patches.map(({ patch, path: patchPath }) => ({
+          patchId: patch.id,
+          patchPath,
+          status: patch.status,
+          summary: patch.summary,
+          rationale: patch.rationale,
+          sourceTaskId: patch.sourceTaskId,
+          sourceResultId: patch.sourceResultId,
+          createdAt: patch.createdAt,
+          acceptedAt: accepted.findingStatusPatches.get(patch.id),
+          evidenceCount: patch.evidence.length
+        })),
+        memoryRecords: memoryRecords.map((record) => ({
+          id: record.id,
+          status: typeof record.object === "string" ? record.object : undefined,
+          summary: record.summary,
+          createdAt: record.createdAt,
+          patchId: isRecord(record.value) && typeof record.value.patchId === "string" ? record.value.patchId : undefined,
+          sourceResultId: isRecord(record.value) && typeof record.value.sourceResultId === "string" ? record.value.sourceResultId : undefined,
+          sourceTaskId: isRecord(record.value) && typeof record.value.sourceTaskId === "string" ? record.value.sourceTaskId : undefined
+        })),
+        traces: findingTraces.map((trace) => ({
+          id: trace.id,
+          kind: trace.kind,
+          timestamp: trace.timestamp,
+          summary: trace.summary,
+          patchId: isRecord(trace.data) && typeof trace.data.patchId === "string" ? trace.data.patchId : undefined,
+          status: isRecord(trace.data) && typeof trace.data.status === "string" ? trace.data.status : undefined
+        }))
+      };
+    });
+
+  return {
+    ok: true,
+    root,
+    generatedAt: new Date().toISOString(),
+    findingsPath: projectRelativePath(root, findingsPath),
+    counts: {
+      findings: findings.length,
+      currentlyDetected: findings.filter((finding) => finding.currentlyDetected).length,
+      historicalOnly: findings.filter((finding) => !finding.currentlyDetected).length,
+      acceptedHistoryEvents: findings.reduce((total, finding) => total + finding.history.filter((entry) => entry.acceptedAt).length, 0)
+    },
+    findings
+  };
+}
+
+function findingDetectorState(current: ArchitectureFinding | undefined, latestAcceptedStatus: string | undefined): string {
+  if (!current && latestAcceptedStatus) return "disappeared_after_reconciliation";
+  if (!current) return "historical_only";
+  if (!latestAcceptedStatus) return "detected";
+  if (current.status === "open" && latestAcceptedStatus !== "open") return "reopened";
+  if (current.status === latestAcceptedStatus) return "still_detected_with_accepted_status";
+  return "detected_with_new_status";
+}
+
+async function readFindingStatusPatchEntries(root: string): Promise<Array<{ path: string; patch: FindingStatusPatch }>> {
+  const patchDir = path.join(root, ".distinction", "cache", "finding-status-patches");
+  const files = await listJsonFiles(patchDir);
+  const entries: Array<{ path: string; patch: FindingStatusPatch }> = [];
+  for (const file of files) {
+    entries.push({
+      path: projectRelativePath(root, file),
+      patch: await readJsonWithSchema(file, FindingStatusPatchSchema)
+    });
+  }
+  return entries;
+}
+
+async function readTraceRecordJsonl(root: string): Promise<TraceRecord[]> {
+  const tracesPath = path.join(root, ".distinction", "memory", "traces.jsonl");
+  try {
+    const raw = await readFile(tracesPath, "utf8");
+    const records: TraceRecord[] = [];
+    for (const line of raw.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try {
+        records.push(TraceRecordSchema.parse(JSON.parse(trimmed)));
+      } catch {
+        // Legacy trace records are intentionally ignored by the governed audit view.
+      }
+    }
+    return records;
+  } catch (error) {
+    if (isMissingFileError(error)) return [];
+    throw error;
+  }
+}
+
+async function listJsonFiles(dir: string): Promise<string[]> {
+  let entries;
+  try {
+    entries = await readdir(dir, { withFileTypes: true });
+  } catch (error) {
+    if (isMissingFileError(error)) return [];
+    throw error;
+  }
+  const files: string[] = [];
+  for (const entry of entries) {
+    const absolute = path.join(dir, entry.name);
+    if (entry.isDirectory()) files.push(...(await listJsonFiles(absolute)));
+    else if (entry.isFile() && entry.name.toLowerCase().endsWith(".json")) files.push(absolute);
+  }
+  return files;
+}
+
 async function commandProjectView(args: Args, rest: string[]): Promise<void> {
   const view = rest.find((item) => !item.startsWith("--")) ?? String(args.view ?? "");
-  if (view !== "architecture" && view !== "code-facts" && view !== "findings") {
+  if (
+    view !== "architecture" &&
+    view !== "code-facts" &&
+    view !== "findings" &&
+    view !== "memory" &&
+    view !== "trace" &&
+    view !== "tasks" &&
+    view !== "context"
+  ) {
     throw new Error(`Unsupported project:view target: ${view || "(missing)"}`);
   }
 
   const root = required(args, "root");
   const resolvedRoot = path.resolve(root);
+  if (view === "memory") {
+    const records = await readAllMemoryRecords(resolvedRoot);
+    const memoryView = ProjectedGraphViewSchema.parse(
+      projectMemoryGraphView({
+        root: resolvedRoot,
+        records,
+        sourceMemoryPaths: [
+          ".distinction/memory/facts.jsonl",
+          ".distinction/memory/inferences.jsonl",
+          ".distinction/memory/candidates.jsonl",
+          ".distinction/memory/confirmations.jsonl",
+          ".distinction/memory/decisions.jsonl",
+          ".distinction/memory/findings.jsonl"
+        ]
+      })
+    );
+    const memoryViewPath = path.join(resolvedRoot, ".distinction", "views", "memory", "memory-view.json");
+    await writeJson(memoryViewPath, memoryView, ProjectedGraphViewSchema);
+    const manifestPath = await writeProjectionManifest(
+      resolvedRoot,
+      buildProjectionManifest({
+        root: resolvedRoot,
+        projectedViews: [{ view: memoryView, path: ".distinction/views/memory/memory-view.json" }]
+      })
+    );
+    await maybeWriteJson(args, "out", memoryView);
+    outputProjectedViewSummary(resolvedRoot, view, memoryViewPath, manifestPath, memoryView);
+    return;
+  }
+
+  if (view === "trace") {
+    const traces = await readTraceRecords(resolvedRoot);
+    const traceView = ProjectedGraphViewSchema.parse(
+      projectTraceGraphView({
+        root: resolvedRoot,
+        traces,
+        sourceTracePaths: [".distinction/memory/traces.jsonl"]
+      })
+    );
+    const traceViewPath = path.join(resolvedRoot, ".distinction", "views", "trace", "trace-view.json");
+    await writeJson(traceViewPath, traceView, ProjectedGraphViewSchema);
+    const manifestPath = await writeProjectionManifest(
+      resolvedRoot,
+      buildProjectionManifest({
+        root: resolvedRoot,
+        projectedViews: [{ view: traceView, path: ".distinction/views/trace/trace-view.json" }]
+      })
+    );
+    await maybeWriteJson(args, "out", traceView);
+    outputProjectedViewSummary(resolvedRoot, view, traceViewPath, manifestPath, traceView);
+    return;
+  }
+
+  if (view === "tasks") {
+    const tasks = await readTaskProjectionRecords(resolvedRoot);
+    const taskView = ProjectedGraphViewSchema.parse(
+      projectTaskPlanGraphView({
+        root: resolvedRoot,
+        tasks,
+        sourceTaskPaths: tasks.map((task) => task.path ?? ".distinction/tasks")
+      })
+    );
+    const taskViewPath = path.join(resolvedRoot, ".distinction", "views", "project-plan", "task-view.json");
+    await writeJson(taskViewPath, taskView, ProjectedGraphViewSchema);
+    const manifestPath = await writeProjectionManifest(
+      resolvedRoot,
+      buildProjectionManifest({
+        root: resolvedRoot,
+        projectedViews: [{ view: taskView, path: ".distinction/views/project-plan/task-view.json" }]
+      })
+    );
+    await maybeWriteJson(args, "out", taskView);
+    outputProjectedViewSummary(resolvedRoot, view, taskViewPath, manifestPath, taskView);
+    return;
+  }
+
+  if (view === "context") {
+    const packetPath =
+      typeof args.packet === "string"
+        ? args.packet
+        : path.join(resolvedRoot, ".distinction", "cache", "context-packet.json");
+    const packet = await readJsonWithSchema(packetPath, ContextPacketSchema);
+    const contextView = ProjectedGraphViewSchema.parse(
+      projectContextGraphView({
+        packet,
+        sourceCachePaths: [projectRelativePath(resolvedRoot, packetPath)]
+      })
+    );
+    const contextViewPath = path.join(resolvedRoot, ".distinction", "views", "context", "context-view.json");
+    await writeJson(contextViewPath, contextView, ProjectedGraphViewSchema);
+    const manifestPath = await writeProjectionManifest(
+      resolvedRoot,
+      buildProjectionManifest({
+        root: resolvedRoot,
+        projectedViews: [{ view: contextView, path: ".distinction/views/context/context-view.json" }]
+      })
+    );
+    await maybeWriteJson(args, "out", contextView);
+    outputProjectedViewSummary(resolvedRoot, view, contextViewPath, manifestPath, contextView);
+    return;
+  }
+
   if (view === "code-facts") {
     const codeFacts = args["code-facts"]
       ? await readJsonWithSchema(String(args["code-facts"]), CodeFactGraphSnapshotSchema)
@@ -1848,13 +3069,23 @@ async function commandProjectView(args: Args, rest: string[]): Promise<void> {
   }
 
   const dependencyView = ArchitectureDependencyViewSchema.parse(projectArchitectureDependencyView({ model, findings }));
+  const architectureGraphView = ProjectedGraphViewSchema.parse(
+    projectArchitectureDependencyGraphView({
+      model,
+      findings,
+      sourceCachePaths: [projectRelativePath(resolvedRoot, modelPath), projectRelativePath(resolvedRoot, findingsPath)]
+    })
+  );
   const dependencyViewPath = path.join(resolvedRoot, ".distinction", "views", "architecture", "dependency-view.json");
+  const architectureGraphViewPath = path.join(resolvedRoot, ".distinction", "views", "architecture", "architecture-graph-view.json");
   await writeJson(dependencyViewPath, dependencyView, ArchitectureDependencyViewSchema);
+  await writeJson(architectureGraphViewPath, architectureGraphView, ProjectedGraphViewSchema);
 
   const manifest = buildProjectionManifest({
     root: resolvedRoot,
     dependencyView,
     dependencyViewPath: ".distinction/views/architecture/dependency-view.json",
+    projectedViews: [{ view: architectureGraphView, path: ".distinction/views/architecture/architecture-graph-view.json" }],
     authority: "review_cache",
     sourceCachePaths: [projectRelativePath(resolvedRoot, modelPath), projectRelativePath(resolvedRoot, findingsPath)]
   });
@@ -1867,11 +3098,26 @@ async function commandProjectView(args: Args, rest: string[]): Promise<void> {
     root: resolvedRoot,
     view: "architecture",
     dependencyViewPath,
+    architectureGraphViewPath,
     manifestPath,
     nodes: dependencyView.nodes.length,
     edges: dependencyView.edges.length,
     annotations: dependencyView.annotations.length,
     status: manifest.views[0]?.status ?? "fresh"
+  });
+}
+
+function outputProjectedViewSummary(root: string, view: string, viewPath: string, manifestPath: string, projectedView: { nodes: unknown[]; edges: unknown[]; annotations: unknown[]; status: string }): void {
+  outputJson({
+    ok: true,
+    root,
+    view,
+    viewPath,
+    manifestPath,
+    nodes: projectedView.nodes.length,
+    edges: projectedView.edges.length,
+    annotations: projectedView.annotations.length,
+    status: projectedView.status
   });
 }
 
@@ -1991,6 +3237,103 @@ function numberArg(args: Args, key: string): number | undefined {
   return parsed;
 }
 
+async function readAllMemoryRecords(root: string): Promise<MemoryRecord[]> {
+  const memoryDir = path.join(root, ".distinction", "memory");
+  const files = [
+    "facts.jsonl",
+    "inferences.jsonl",
+    "candidates.jsonl",
+    "confirmations.jsonl",
+    "decisions.jsonl",
+    "findings.jsonl"
+  ];
+  const records: MemoryRecord[] = [];
+  for (const file of files) {
+    records.push(...(await readMemoryRecordJsonl(path.join(memoryDir, file))));
+  }
+  return records;
+}
+
+async function readMemoryRecordJsonl(filePath: string): Promise<MemoryRecord[]> {
+  try {
+    const raw = await readFile(filePath, "utf8");
+    return raw
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => MemoryRecordSchema.parse(JSON.parse(line)));
+  } catch (error) {
+    if (isMissingFileError(error)) return [];
+    throw error;
+  }
+}
+
+async function readTraceRecords(root: string): Promise<TraceProjectionRecord[]> {
+  const tracesPath = path.join(root, ".distinction", "memory", "traces.jsonl");
+  try {
+    const raw = await readFile(tracesPath, "utf8");
+    return raw
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line, index) => normalizeTraceProjectionRecord(JSON.parse(line), index));
+  } catch (error) {
+    if (isMissingFileError(error)) return [];
+    throw error;
+  }
+}
+
+function normalizeTraceProjectionRecord(value: unknown, index: number): TraceProjectionRecord {
+  if (!isRecord(value)) return { id: `trace:${index + 1}`, summary: String(value) };
+  return {
+    id: stringOr(value.id, `trace:${index + 1}`),
+    traceId: typeof value.traceId === "string" ? value.traceId : undefined,
+    timestamp: typeof value.timestamp === "string" ? value.timestamp : undefined,
+    kind: typeof value.kind === "string" ? value.kind : undefined,
+    target: isRecord(value.target)
+      ? {
+          type: typeof value.target.type === "string" ? value.target.type : undefined,
+          id: typeof value.target.id === "string" ? value.target.id : undefined
+        }
+      : undefined,
+    summary: typeof value.summary === "string" ? value.summary : undefined,
+    data: isRecord(value.data) ? value.data : undefined
+  };
+}
+
+async function readTaskProjectionRecords(root: string): Promise<TaskProjectionRecord[]> {
+  const tasksDir = path.join(root, ".distinction", "tasks");
+  let entries;
+  try {
+    entries = await readdir(tasksDir, { withFileTypes: true });
+  } catch (error) {
+    if (isMissingFileError(error)) return [];
+    throw error;
+  }
+  const tasks: TaskProjectionRecord[] = [];
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.toLowerCase().endsWith(".md")) continue;
+    const absolute = path.join(tasksDir, entry.name);
+    const relativePath = projectRelativePath(root, absolute);
+    const raw = await readFile(absolute, "utf8");
+    const firstHeading = raw.split(/\r?\n/).find((line) => line.startsWith("# "))?.replace(/^#\s+/, "").trim();
+    const id = entry.name.replace(/\.md$/i, "");
+    tasks.push({
+      id,
+      title: firstHeading || id,
+      path: relativePath,
+      status: "open",
+      summary: raw.split(/\r?\n/).find((line) => line.trim() && !line.startsWith("#"))?.trim(),
+      sourceFindingIds: extractFindingIds(raw)
+    });
+  }
+  return tasks;
+}
+
+function extractFindingIds(value: string): string[] {
+  return Array.from(new Set(value.match(/finding:[A-Za-z0-9._:-]+/g) ?? []));
+}
+
 async function readJson(filePath: string): Promise<any> {
   return JSON.parse(await readFile(filePath, "utf8"));
 }
@@ -1999,8 +3342,36 @@ async function readJsonWithSchema<T>(filePath: string, schema: JsonSchema<T>): P
   return schema.parse(await readJson(filePath));
 }
 
+async function tryReadJsonWithSchema<T>(filePath: string, schema: JsonSchema<T>): Promise<T | undefined> {
+  try {
+    return await readJsonWithSchema(filePath, schema);
+  } catch (error) {
+    if (isMissingFileError(error)) return undefined;
+    throw error;
+  }
+}
+
+async function tryReadJsonFile(filePath: string): Promise<unknown | undefined> {
+  try {
+    return await readJson(filePath);
+  } catch (error) {
+    if (isMissingFileError(error)) return undefined;
+    throw error;
+  }
+}
+
 function isMissingFileError(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "ENOENT";
+}
+
+async function exists(filePath: string): Promise<boolean> {
+  try {
+    await stat(filePath);
+    return true;
+  } catch (error) {
+    if (isMissingFileError(error)) return false;
+    throw error;
+  }
 }
 
 function safeJson(content: string): unknown {

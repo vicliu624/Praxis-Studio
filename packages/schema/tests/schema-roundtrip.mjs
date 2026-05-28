@@ -6,15 +6,23 @@ import {
   ArchitectureDependencyViewSchema,
   ArchitectureFindingReportSchema,
   ArchitectureModelPatchSchema,
+  CodingAgentTaskSchema,
   CodeFactGraphSnapshotSchema,
   ContextPacketSchema,
+  ExternalAgentResultSchema,
+  FindingStatusPatchSchema,
+  MemorySuggestionPatchSchema,
+  PlanPatchSchema,
   PraxisMcpCodeFactsResultSchema,
+  PraxisMcpCodeRelationResultSchema,
+  PraxisMcpFindingAuditResultSchema,
   PraxisMcpFindingsResultSchema,
   PraxisMcpProjectionViewsResultSchema,
   PraxisMcpStatusResultSchema,
   ProjectionManifestSchema,
   ProjectedGraphViewSchema,
-  RepositoryUnderstandingPatchSchema
+  RepositoryUnderstandingPatchSchema,
+  TraceRecordSchema
 } from "../dist/index.js";
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -61,6 +69,36 @@ const fixtures = [
     schema: ContextPacketSchema
   },
   {
+    name: "CodingAgentTask",
+    path: "fixtures/coding-agent-task/minimal.json",
+    schema: CodingAgentTaskSchema
+  },
+  {
+    name: "PlanPatch",
+    path: "fixtures/plan-patch/minimal.json",
+    schema: PlanPatchSchema
+  },
+  {
+    name: "ExternalAgentResult",
+    path: "fixtures/external-agent-result/minimal.json",
+    schema: ExternalAgentResultSchema
+  },
+  {
+    name: "FindingStatusPatch",
+    path: "fixtures/finding-status-patch/minimal.json",
+    schema: FindingStatusPatchSchema
+  },
+  {
+    name: "MemorySuggestionPatch",
+    path: "fixtures/memory-suggestion-patch/minimal.json",
+    schema: MemorySuggestionPatchSchema
+  },
+  {
+    name: "TraceRecord",
+    path: "fixtures/trace-record/minimal.json",
+    schema: TraceRecordSchema
+  },
+  {
     name: "PraxisMcpStatusResult",
     path: "fixtures/mcp-status-result/minimal.json",
     schema: PraxisMcpStatusResultSchema
@@ -71,9 +109,19 @@ const fixtures = [
     schema: PraxisMcpCodeFactsResultSchema
   },
   {
+    name: "PraxisMcpCodeRelationResult",
+    path: "fixtures/mcp-code-relation-result/minimal.json",
+    schema: PraxisMcpCodeRelationResultSchema
+  },
+  {
     name: "PraxisMcpFindingsResult",
     path: "fixtures/mcp-findings-result/minimal.json",
     schema: PraxisMcpFindingsResultSchema
+  },
+  {
+    name: "PraxisMcpFindingAuditResult",
+    path: "fixtures/mcp-finding-audit-result/minimal.json",
+    schema: PraxisMcpFindingAuditResultSchema
   },
   {
     name: "PraxisMcpProjectionViewsResult",

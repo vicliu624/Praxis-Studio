@@ -169,6 +169,11 @@ fn read_app_model_settings() -> Result<String, String> {
 }
 
 #[tauri::command]
+fn read_app_model_settings_path() -> Result<String, String> {
+    Ok(app_model_settings_path()?.display().to_string())
+}
+
+#[tauri::command]
 fn write_app_model_settings(settings_json: String) -> Result<(), String> {
     let value: serde_json::Value = serde_json::from_str(&settings_json).map_err(|error| error.to_string())?;
     let path = app_model_settings_path()?;
@@ -266,15 +271,22 @@ fn ensure_distinction_path(project_root: &str, relative_path: &str) -> Result<Pa
     let resolved = if path.exists() {
         fs::canonicalize(&path).map_err(|error| error.to_string())?
     } else {
-        let parent = path
-            .parent()
-            .ok_or_else(|| "File path must have a parent directory.".to_string())?;
-        let file_name = path
-            .file_name()
-            .ok_or_else(|| "File path must include a file name.".to_string())?;
-        fs::canonicalize(parent)
-            .map_err(|error| error.to_string())?
-            .join(file_name)
+        let mut ancestor = path.as_path();
+        let mut missing_components = Vec::new();
+        while !ancestor.exists() {
+            let file_name = ancestor
+                .file_name()
+                .ok_or_else(|| "File path must include a file name.".to_string())?;
+            missing_components.push(file_name.to_os_string());
+            ancestor = ancestor
+                .parent()
+                .ok_or_else(|| "File path must have an existing ancestor.".to_string())?;
+        }
+        let mut resolved = fs::canonicalize(ancestor).map_err(|error| error.to_string())?;
+        for component in missing_components.iter().rev() {
+            resolved = resolved.join(component);
+        }
+        resolved
     };
     if resolved.starts_with(&distinction_root) {
         Ok(resolved)
@@ -453,6 +465,7 @@ fn main() {
             read_recent_projects,
             write_recent_project,
             read_app_model_settings,
+            read_app_model_settings_path,
             write_app_model_settings,
             cancel_agent_run,
             respond_to_permission,

@@ -48,7 +48,11 @@ export class PraxisAgentRuntime {
     const config = await loadModelConfig(request.projectRoot);
     const route = resolveModelRoute(config, request.taskType);
     const providerConfig = config.providers[route.provider];
-    const provider = createProvider(route.provider, { apiKeyEnv: providerConfig?.apiKeyEnv, baseUrl: providerConfig?.baseUrl });
+    const provider = createProvider(route.provider, {
+      apiKey: providerConfig?.apiKey,
+      apiKeyEnv: providerConfig?.apiKeyEnv,
+      baseUrl: providerConfig?.baseUrl
+    });
     const prompt = getPrompt(promptForTask(request.taskType));
     const modelResponse = await provider.call({
       route,
@@ -90,7 +94,11 @@ export class PraxisAgentRuntime {
     const planTaskType: ModelTaskType = request.target.type === "edge" ? "graph.edge.plan" : "graph.node.plan";
     const route = resolveModelRoute(config, planTaskType);
     const providerConfig = config.providers[route.provider];
-    const provider = createProvider(route.provider, { apiKeyEnv: providerConfig?.apiKeyEnv, baseUrl: providerConfig?.baseUrl });
+    const provider = createProvider(route.provider, {
+      apiKey: providerConfig?.apiKey,
+      apiKeyEnv: providerConfig?.apiKeyEnv,
+      baseUrl: providerConfig?.baseUrl
+    });
     const prompt = getPrompt(promptForTask(planTaskType));
     const modelResponse = await provider.call({
       route,
