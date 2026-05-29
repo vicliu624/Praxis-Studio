@@ -15,7 +15,19 @@ export type ReviewCategory =
   | "performance_resources"
   | "documentation_knowledge";
 
-export type ReviewFindingStatus = "candidate" | "confirmed" | "dismissed" | "needs_more_evidence";
+export type ReviewFindingStatus =
+  | "candidate"
+  | "confirmed"
+  | "dismissed"
+  | "needs_more_evidence"
+  | "open"
+  | "acknowledged"
+  | "planned"
+  | "in_progress"
+  | "mitigated"
+  | "resolved"
+  | "false_positive"
+  | "accepted_risk";
 
 export type ReviewFindingSource = "scan" | "codegraph" | "agent" | "hybrid";
 

@@ -197,8 +197,27 @@ async function commandProjectTree(args: Args): Promise<void> {
   const depth = Math.max(1, Math.min(numberArg(args, "depth") ?? 4, 8));
   const maxEntries = Math.max(50, Math.min(numberArg(args, "max-entries") ?? 900, 5000));
   const snapshotPath = path.join(root, ".distinction", "cache", "repository-snapshot.json");
-  const snapshot = await tryReadJsonFile(snapshotPath);
+  let snapshot = args.cached === true ? await tryReadJsonFile(snapshotPath) : undefined;
+  let source: "filesystem" | "cache" = "cache";
+  let warning: string | undefined;
+  if (!snapshot) {
+    try {
+      snapshot = await scanRepository({
+        root,
+        includeHidden: args["include-hidden"] !== false,
+        maxFiles: Math.max(12_000, maxEntries * 3),
+        maxFileSizeBytes: 256_000,
+        ignore: projectTreeIgnoreNames(args)
+      });
+      source = "filesystem";
+    } catch (err) {
+      snapshot = await tryReadJsonFile(snapshotPath);
+      warning = err instanceof Error ? err.message : String(err);
+      source = "cache";
+    }
+  }
   const fileEntries: ProjectTreeFileEntry[] = [];
+  const directoryEntries: ProjectTreeDirectoryEntry[] = [];
   if (isRecord(snapshot) && Array.isArray(snapshot.files)) {
     for (const rawFile of snapshot.files) {
       if (!isRecord(rawFile)) continue;
@@ -213,9 +232,27 @@ async function commandProjectTree(args: Args): Promise<void> {
       });
     }
   }
-  const tree = buildProjectTree(fileEntries, depth, maxEntries);
-  await maybeWriteJson(args, "out", tree);
-  outputJson(tree);
+  if (isRecord(snapshot) && Array.isArray(snapshot.directories)) {
+    for (const rawDirectory of snapshot.directories) {
+      if (!isRecord(rawDirectory)) continue;
+      const directoryPath = optionalString(rawDirectory.path);
+      if (!directoryPath) continue;
+      directoryEntries.push({
+        path: directoryPath,
+        roleHint: optionalString(rawDirectory.roleHint)
+      });
+    }
+  }
+  const tree = buildProjectTree(fileEntries, directoryEntries, depth, maxEntries);
+  const result = {
+    ...tree,
+    source,
+    scannedAt: isRecord(snapshot) ? optionalString(snapshot.scannedAt) : undefined,
+    totalDirectories: directoryEntries.length,
+    warning
+  };
+  await maybeWriteJson(args, "out", result);
+  outputJson(result);
 }
 
 async function commandCodeFacts(args: Args): Promise<void> {
@@ -958,6 +995,8 @@ interface PiReviewPromptRunInput {
   evaluator: ReviewEvaluatorRef;
   prompt: string;
   timeoutMs: number;
+  progressPath?: string;
+  progressBase?: ReviewProgressSnapshot;
 }
 
 interface ResolvedPiCli {
@@ -985,7 +1024,6 @@ async function runPiWorker(options: PiWorkerRunOptions): Promise<PiWorkerRunResu
     piCli.cliPath,
     "--mode",
     "json",
-    "--offline",
     "--provider",
     modelRoute.provider,
     "--model",
@@ -1346,9 +1384,10 @@ function reviewPiTimeoutMsArg(args: Args, fallbackMs: number): number {
 async function piWorkerEnv(projectRoot: string, provider: string): Promise<NodeJS.ProcessEnv> {
   const env: NodeJS.ProcessEnv = {
     ...process.env,
-    PI_OFFLINE: process.env.PI_OFFLINE ?? "1",
     PI_TELEMETRY: process.env.PI_TELEMETRY ?? "0"
   };
+  delete env.PI_OFFLINE;
+  delete env.PI_SKIP_VERSION_CHECK;
   const config = await loadModelConfig(projectRoot);
   const providerKey = provider.toUpperCase().replace(/[^A-Z0-9]+/g, "_");
   const providerEnv = `${providerKey}_API_KEY`;
@@ -3457,12 +3496,14 @@ async function commandReviewQueue(args: Args): Promise<void> {
   const latestProgress = await readQualityReviewProgress(root);
   const progressSupersedesMemory = Boolean(
     latestProgress
+    && !isStaleReviewProgress(latestProgress)
     && latestProgress.scope !== "category"
     && latestProgress.runId !== latestQualityReviewRun?.id
     && (!latestQualityReviewRun || timestampValue(latestProgress.startedAt) >= timestampValue(latestQualityReviewRun.generatedAt))
   );
   const activeReviewRunId = progressSupersedesMemory ? latestProgress?.runId : undefined;
-  const reviewFindings = await readQualityReviewFindingsFromMemory(root, activeReviewRunId);
+  const rawReviewFindings = await readQualityReviewFindingsFromMemory(root, activeReviewRunId);
+  const reviewFindings = await applyReviewFindingRefreshState(root, rawReviewFindings, includeAccepted);
   const qualityReview = buildQualityReviewQueueSummary(reviewFindings, activeReviewRunId ? undefined : latestQualityReviewRun, activeReviewRunId ? latestProgress : undefined);
   const foundation = await buildFoundationReviewStatus(root);
   const result = {
@@ -3651,8 +3692,77 @@ async function readQualityReviewFindingsFromMemory(root: string, runId?: string)
   return sortReviewFindings(Array.from(findings.values()));
 }
 
+async function applyReviewFindingRefreshState(root: string, findings: ReviewFinding[], includeAccepted: boolean): Promise<ReviewFinding[]> {
+  const patchEntries = await readFindingStatusPatchEntries(root);
+  if (!patchEntries.length) return findings;
+  const patchesByFinding = new Map<string, FindingStatusPatch[]>();
+  for (const entry of patchEntries) {
+    const list = patchesByFinding.get(entry.patch.findingId) ?? [];
+    list.push(entry.patch);
+    patchesByFinding.set(entry.patch.findingId, list);
+  }
+
+  const activeFindings: ReviewFinding[] = [];
+  for (const finding of findings) {
+    const latestPatch = latestFindingStatusPatch(patchesByFinding.get(finding.id));
+    if (!latestPatch) {
+      activeFindings.push(finding);
+      continue;
+    }
+
+    const updated = reviewFindingWithRefreshPatch(finding, latestPatch);
+    if (!includeAccepted && isResolvedReviewStatus(latestPatch.status)) continue;
+    activeFindings.push(updated);
+  }
+  return sortReviewFindings(activeFindings);
+}
+
+function latestFindingStatusPatch(patches: FindingStatusPatch[] | undefined): FindingStatusPatch | undefined {
+  if (!patches?.length) return undefined;
+  return patches
+    .slice()
+    .sort((left, right) => timestampValue(left.createdAt) - timestampValue(right.createdAt) || left.id.localeCompare(right.id))
+    .at(-1);
+}
+
+function reviewFindingWithRefreshPatch(finding: ReviewFinding, patch: FindingStatusPatch): ReviewFinding {
+  const evidence = patch.evidence.length
+    ? [
+      ...finding.evidence,
+      ...patch.evidence.slice(0, 3).map((item) => ({
+        source: "agent" as const,
+        path: item.filePath,
+        summary: patch.summary,
+        excerpt: item.excerpt
+      }))
+    ]
+    : finding.evidence;
+  const affectedAnchors = unique([
+    ...finding.affectedAnchors.map((anchor) => JSON.stringify(anchor)),
+    ...patch.evidence.slice(0, 3).map((item) => JSON.stringify(fileAnchor(item.filePath)))
+  ]).map((value) => JSON.parse(value) as GraphAnchor);
+  return ReviewFindingSchema.parse({
+    ...finding,
+    status: patch.status,
+    summary: patch.summary || finding.summary,
+    whyItMatters: patch.rationale || finding.whyItMatters,
+    evidence,
+    affectedAnchors,
+    traceIds: unique([...finding.traceIds, `trace:${patch.sourceResultId ?? patch.id}`]),
+    updatedAt: patch.createdAt
+  } satisfies ReviewFinding);
+}
+
+function isResolvedReviewStatus(status: FindingStatusPatch["status"]): boolean {
+  return status === "resolved" || status === "false_positive" || status === "mitigated" || status === "accepted_risk";
+}
+
 async function readQualityReviewProgress(root: string): Promise<ReviewProgressSnapshot | undefined> {
   const parsed = await tryReadJsonFile(qualityReviewProgressPath(root));
+  return parseReviewProgressSnapshot(parsed);
+}
+
+function parseReviewProgressSnapshot(parsed: unknown): ReviewProgressSnapshot | undefined {
   if (!isRecord(parsed)) return undefined;
   if (parsed.schemaVersion !== "praxis.reviewProgress.v1") return undefined;
   if (typeof parsed.runId !== "string" || typeof parsed.root !== "string") return undefined;
@@ -3676,8 +3786,53 @@ async function readQualityReviewProgress(root: string): Promise<ReviewProgressSn
     message: typeof parsed.message === "string" ? parsed.message : "",
     findings: typeof parsed.findings === "number" ? parsed.findings : 0,
     error: typeof parsed.error === "string" ? parsed.error : undefined,
-    evaluatorResults: reviewEvaluatorResultArray(parsed.evaluatorResults)
+    evaluatorResults: reviewEvaluatorResultArray(parsed.evaluatorResults),
+    pi: reviewProgressPiState(parsed.pi),
+    events: reviewProgressEventArray(parsed.events)
   };
+}
+
+function reviewProgressPiState(value: unknown): ReviewProgressPiState | undefined {
+  if (!isRecord(value)) return undefined;
+  const provider = typeof value.provider === "string" ? value.provider : undefined;
+  const model = typeof value.model === "string" ? value.model : undefined;
+  if (!provider || !model) return undefined;
+  return {
+    provider,
+    model,
+    tools: Array.isArray(value.tools) ? value.tools.filter((item): item is string => typeof item === "string") : [],
+    eventCount: typeof value.eventCount === "number" && Number.isFinite(value.eventCount) ? value.eventCount : 0,
+    lastEventAt: typeof value.lastEventAt === "string" ? value.lastEventAt : undefined,
+    lastEventType: typeof value.lastEventType === "string" ? value.lastEventType : undefined,
+    lastToolName: typeof value.lastToolName === "string" ? value.lastToolName : undefined,
+    lastToolStatus: typeof value.lastToolStatus === "string" ? value.lastToolStatus : undefined,
+    lastToolInput: typeof value.lastToolInput === "string" ? value.lastToolInput : undefined,
+    lastToolOutput: typeof value.lastToolOutput === "string" ? value.lastToolOutput : undefined,
+    lastAssistantText: typeof value.lastAssistantText === "string" ? value.lastAssistantText : undefined,
+    diagnostics: Array.isArray(value.diagnostics) ? value.diagnostics.filter((item): item is string => typeof item === "string") : undefined
+  };
+}
+
+function reviewProgressEventArray(value: unknown): ReviewProgressEvent[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const events = value.flatMap((item): ReviewProgressEvent[] => {
+    if (!isRecord(item) || typeof item.timestamp !== "string" || typeof item.type !== "string" || typeof item.summary !== "string") return [];
+    return [{
+      timestamp: item.timestamp,
+      type: item.type,
+      summary: item.summary,
+      toolName: typeof item.toolName === "string" ? item.toolName : undefined,
+      status: typeof item.status === "string" ? item.status : undefined
+    }];
+  });
+  return events.length ? events.slice(-12) : undefined;
+}
+
+function isStaleReviewProgress(progress: ReviewProgressSnapshot): boolean {
+  if (progress.status !== "running") return false;
+  const updatedAt = new Date(progress.pi?.lastEventAt ?? progress.updatedAt).getTime();
+  if (!Number.isFinite(updatedAt)) return false;
+  return Date.now() - updatedAt > staleReviewProgressMs;
 }
 
 function reviewCategoryValue(value: unknown): ReviewCategory | undefined {
@@ -3880,6 +4035,7 @@ function reviewEvaluatorFor(category: ReviewCategory): ReviewEvaluatorRef {
 }
 
 type ReviewProgressStatus = "running" | "completed" | "failed";
+const staleReviewProgressMs = 2 * 60 * 1000;
 
 interface ReviewProgressSnapshot {
   schemaVersion: "praxis.reviewProgress.v1";
@@ -3900,6 +4056,31 @@ interface ReviewProgressSnapshot {
   findings: number;
   error?: string;
   evaluatorResults?: NonNullable<ReviewRun["evaluatorResults"]>;
+  pi?: ReviewProgressPiState;
+  events?: ReviewProgressEvent[];
+}
+
+interface ReviewProgressPiState {
+  provider: string;
+  model: string;
+  tools: string[];
+  eventCount: number;
+  lastEventAt?: string;
+  lastEventType?: string;
+  lastToolName?: string;
+  lastToolStatus?: string;
+  lastToolInput?: string;
+  lastToolOutput?: string;
+  lastAssistantText?: string;
+  diagnostics?: string[];
+}
+
+interface ReviewProgressEvent {
+  timestamp: string;
+  type: string;
+  summary: string;
+  toolName?: string;
+  status?: string;
 }
 
 async function buildPiQualityReviewFindings(root: string, args: Args): Promise<{ run: ReviewRun; findings: ReviewFinding[] }> {
@@ -3928,7 +4109,7 @@ async function buildPiQualityReviewFindings(root: string, args: Args): Promise<{
     const heuristic = await buildQualityReviewFindings(root, runId, generatedAt);
     for (const category of reviewCategoryOrder) {
       const evaluator = reviewEvaluatorFor(category);
-      await writeReviewProgress(progressPath, {
+      const categoryProgressBase: ReviewProgressSnapshot = {
         schemaVersion: "praxis.reviewProgress.v1",
         runId,
         root,
@@ -3943,6 +4124,9 @@ async function buildPiQualityReviewFindings(root: string, args: Args): Promise<{
         message: `Pi 正在评估：${evaluator.name}`,
         findings: findingsOut.length,
         evaluatorResults
+      };
+      await writeReviewProgress(progressPath, {
+        ...categoryProgressBase
       });
 
       let categoryFindings: ReviewFinding[] = [];
@@ -3955,7 +4139,9 @@ async function buildPiQualityReviewFindings(root: string, args: Args): Promise<{
           generatedAt,
           category,
           evaluator,
-          heuristicFindings: heuristic.findings.filter((finding) => displayReviewCategory(finding.category) === category)
+          heuristicFindings: heuristic.findings.filter((finding) => displayReviewCategory(finding.category) === category),
+          progressPath,
+          progressBase: categoryProgressBase
         });
         findingsOut.push(...categoryFindings);
         evaluatorResults.push({
@@ -4108,7 +4294,9 @@ async function buildPiQualityReviewCategoryRetry(
       generatedAt,
       category,
       evaluator,
-      heuristicFindings: heuristic.findings.filter((finding) => displayReviewCategory(finding.category) === category)
+      heuristicFindings: heuristic.findings.filter((finding) => displayReviewCategory(finding.category) === category),
+      progressPath,
+      progressBase: runningProgress
     });
     await persistQualityReviewFindings(root, categoryFindings);
 
@@ -4206,6 +4394,8 @@ async function runPiQualityReviewCategory(input: {
   category: ReviewCategory;
   evaluator: ReviewEvaluatorRef;
   heuristicFindings: ReviewFinding[];
+  progressPath?: string;
+  progressBase?: ReviewProgressSnapshot;
 }): Promise<ReviewFinding[]> {
   const prompt = buildPiQualityReviewPrompt(input);
   const pi = await runPiReviewPrompt({
@@ -4215,7 +4405,9 @@ async function runPiQualityReviewCategory(input: {
     category: input.category,
     evaluator: input.evaluator,
     prompt,
-    timeoutMs: reviewPiTimeoutMsArg(input.args, 300_000)
+    timeoutMs: reviewPiTimeoutMsArg(input.args, 300_000),
+    progressPath: input.progressPath,
+    progressBase: input.progressBase
   });
   return parsePiReviewFindings(pi.stdout, input);
 }
@@ -4227,7 +4419,8 @@ async function runPiReviewPrompt(input: PiReviewPromptRunInput): Promise<PiWorke
   const codeGraphExtension = isPiCodeGraphEnabled(input.args) ? resolvePiCodeGraphExtensionPath() : undefined;
   const piArgs = [
     piCli.cliPath,
-    "--offline",
+    "--mode",
+    "json",
     "--provider",
     modelRoute.provider,
     "--model",
@@ -4248,19 +4441,45 @@ async function runPiReviewPrompt(input: PiReviewPromptRunInput): Promise<PiWorke
   env.PRAXIS_PI_PROJECT_ROOT = input.root;
   const diagnostics = piRuntimeDiagnostics(piCli, modelRoute, env);
   const startedAt = Date.now();
-  let spawned: { stdout: string; stderr: string; exitCode: number };
+  let finalAssistantText = "";
+  const progressEvents: ReviewProgressEvent[] = [];
+  const progressBase = input.progressBase;
+  let spawned: { stdout: string; stderr: string; exitCode: number; eventCount: number };
   try {
-    spawned = await spawnBuffered(process.execPath, piArgs, {
+    if (input.progressPath && progressBase) {
+      const startProgress = reviewProgressWithPiStart(progressBase, {
+        route: modelRoute,
+        tools,
+        diagnostics
+      });
+      await writeReviewProgress(input.progressPath, startProgress);
+    }
+    spawned = await spawnStreamingJson(process.execPath, piArgs, {
       cwd: input.root,
       env,
-      timeoutMs: input.timeoutMs
+      timeoutMs: input.timeoutMs,
+      onJson: async (event) => {
+        const assistantText = piAssistantTextFromEvent(event);
+        if (assistantText) finalAssistantText = assistantText;
+        if (input.progressPath && progressBase) {
+          await writeReviewProgress(input.progressPath, reviewProgressWithPiEvent(progressBase, {
+            event,
+            eventCount: progressEvents.length + 1,
+            events: progressEvents,
+            route: modelRoute,
+            tools,
+            diagnostics,
+            assistantText
+          }));
+        }
+      }
     });
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     throw new Error(formatPiFailureDetail(detail, diagnostics));
   }
 
-  const cleanStdout = sanitizePiOutput(spawned.stdout);
+  const cleanStdout = sanitizePiOutput(finalAssistantText || spawned.stdout);
   const cleanStderr = sanitizePiOutput(spawned.stderr);
   await appendPiReviewCategoryLog(input.root, input.runId, {
     schemaVersion: "praxis.piReviewCategoryLog.v1",
@@ -4290,6 +4509,85 @@ async function runPiReviewPrompt(input: PiReviewPromptRunInput): Promise<PiWorke
     modelRoute: `${modelRoute.provider}/${modelRoute.model}`,
     tools,
     diagnostics
+  };
+}
+
+function reviewProgressWithPiEvent(base: ReviewProgressSnapshot, input: {
+  event: PiJsonEvent;
+  eventCount: number;
+  events: ReviewProgressEvent[];
+  route: { provider: string; model: string };
+  tools: string[];
+  diagnostics: string[];
+  assistantText?: string;
+}): ReviewProgressSnapshot {
+  const now = new Date().toISOString();
+  const toolView = piToolViewFromEvent(input.event);
+  const eventType = String(input.event.type ?? "event");
+  const eventSummary = toolView
+    ? `${toolView.name} ${toolView.status}: ${toolView.outputSummary ?? toolView.inputSummary}`
+    : input.assistantText
+      ? `Pi message: ${summarizeForRun(input.assistantText, 260)}`
+      : `Pi event: ${eventType}`;
+  const eventRecord: ReviewProgressEvent = {
+    timestamp: now,
+    type: eventType,
+    summary: eventSummary,
+    toolName: toolView?.name,
+    status: toolView?.status
+  };
+  input.events.push(eventRecord);
+  const recentEvents = input.events.slice(-12);
+  return {
+    ...base,
+    updatedAt: now,
+    message: toolView
+      ? `Pi 正在执行工具：${toolView.name}`
+      : input.assistantText
+        ? "Pi 正在生成评估结果。"
+        : base.message,
+    pi: {
+      provider: input.route.provider,
+      model: input.route.model,
+      tools: input.tools,
+      eventCount: input.eventCount,
+      lastEventAt: now,
+      lastEventType: eventType,
+      lastToolName: toolView?.name,
+      lastToolStatus: toolView?.status,
+      lastToolInput: toolView?.inputSummary,
+      lastToolOutput: toolView?.outputSummary,
+      lastAssistantText: input.assistantText ? summarizeForRun(input.assistantText, 1200) : undefined,
+      diagnostics: input.diagnostics
+    },
+    events: recentEvents
+  };
+}
+
+function reviewProgressWithPiStart(base: ReviewProgressSnapshot, input: {
+  route: { provider: string; model: string };
+  tools: string[];
+  diagnostics: string[];
+}): ReviewProgressSnapshot {
+  const now = new Date().toISOString();
+  return {
+    ...base,
+    updatedAt: now,
+    pi: {
+      provider: input.route.provider,
+      model: input.route.model,
+      tools: input.tools,
+      eventCount: base.pi?.eventCount ?? 0,
+      lastEventAt: base.pi?.lastEventAt,
+      lastEventType: base.pi?.lastEventType,
+      lastToolName: base.pi?.lastToolName,
+      lastToolStatus: base.pi?.lastToolStatus,
+      lastToolInput: base.pi?.lastToolInput,
+      lastToolOutput: base.pi?.lastToolOutput,
+      lastAssistantText: base.pi?.lastAssistantText,
+      diagnostics: input.diagnostics
+    },
+    events: base.events
   };
 }
 
@@ -4559,6 +4857,11 @@ interface ProjectTreeFileEntry {
   sizeBytes?: number;
 }
 
+interface ProjectTreeDirectoryEntry {
+  path: string;
+  roleHint?: string;
+}
+
 interface ProjectTreeNode {
   id: string;
   name: string;
@@ -4574,7 +4877,7 @@ interface ProjectTreeNode {
   truncated?: boolean;
 }
 
-function buildProjectTree(files: ProjectTreeFileEntry[], maxDepth: number, maxEntries: number): {
+function buildProjectTree(files: ProjectTreeFileEntry[], directories: ProjectTreeDirectoryEntry[], maxDepth: number, maxEntries: number): {
   ok: boolean;
   generatedAt: string;
   maxDepth: number;
@@ -4594,6 +4897,34 @@ function buildProjectTree(files: ProjectTreeFileEntry[], maxDepth: number, maxEn
     directoryCount: 0
   };
   const byPath = new Map<string, ProjectTreeNode>([[".", root]]);
+  const ensureDirectory = (directoryPath: string, roleHint?: string): ProjectTreeNode => {
+    const parts = directoryPath.split(/[\\/]+/).filter(Boolean);
+    let parent = root;
+    let currentPath = "";
+    for (const part of parts) {
+      currentPath = currentPath ? `${currentPath}/${part}` : part;
+      let node = byPath.get(currentPath);
+      if (!node) {
+        node = {
+          id: currentPath,
+          name: part,
+          path: currentPath,
+          kind: "directory",
+          children: [],
+          fileCount: 0,
+          directoryCount: 0
+        };
+        byPath.set(currentPath, node);
+        parent.children.push(node);
+      }
+      if (roleHint && currentPath === directoryPath) node.roleHint = roleHint;
+      parent = node;
+    }
+    return parent;
+  };
+  for (const directory of directories.sort((left, right) => left.path.localeCompare(right.path))) {
+    ensureDirectory(directory.path, directory.roleHint);
+  }
   for (const file of files.sort((left, right) => left.path.localeCompare(right.path))) {
     const parts = file.path.split(/[\\/]+/).filter(Boolean);
     let parent = root;
@@ -4647,7 +4978,7 @@ function annotateProjectTree(node: ProjectTreeNode): { files: number; directorie
   }
   let files = 0;
   let directories = 0;
-  node.children.sort((left, right) => left.kind === right.kind ? left.name.localeCompare(right.name) : left.kind === "directory" ? -1 : 1);
+  node.children.sort((left, right) => left.kind === right.kind ? left.name.localeCompare(right.name) : left.kind === "file" ? -1 : 1);
   for (const child of node.children) {
     const counts = annotateProjectTree(child);
     files += counts.files;
@@ -4671,15 +5002,70 @@ function limitProjectTree(
     next.truncated = node.children.length > 0;
     return next;
   }
-  for (const child of node.children) {
+  const remaining = maxEntries - getRendered();
+  const selectedChildren = selectProjectTreeChildren(node.children, remaining);
+  if (selectedChildren.length < node.children.length) next.truncated = true;
+  for (const child of selectedChildren) {
     if (getRendered() >= maxEntries) {
       next.truncated = true;
       break;
     }
     setRendered(getRendered() + 1);
-    next.children.push(limitProjectTree(child, depth + 1, maxDepth, maxEntries, getRendered, setRendered));
+    next.children.push({ ...child, children: [] });
+  }
+  for (let index = 0; index < selectedChildren.length; index += 1) {
+    const child = selectedChildren[index];
+    if (!child || child.kind !== "directory") continue;
+    if (getRendered() >= maxEntries) {
+      const shallow = next.children[index];
+      if (shallow && child.children.length) shallow.truncated = true;
+      next.truncated = true;
+      continue;
+    }
+    next.children[index] = limitProjectTree(child, depth + 1, maxDepth, maxEntries, getRendered, setRendered);
   }
   return next;
+}
+
+function selectProjectTreeChildren(children: ProjectTreeNode[], limit: number): ProjectTreeNode[] {
+  if (limit <= 0) return [];
+  if (children.length <= limit) return children;
+  const directories = children.filter((child) => child.kind === "directory");
+  const files = children.filter((child) => child.kind === "file");
+  if (!directories.length || !files.length) return children.slice(0, limit);
+  const fileQuota = Math.min(files.length, Math.max(1, Math.floor(limit * 0.35)));
+  const directoryQuota = Math.min(directories.length, Math.max(0, limit - fileQuota));
+  const selected = new Set<ProjectTreeNode>([
+    ...directories.slice(0, directoryQuota),
+    ...files.slice(0, Math.max(0, limit - directoryQuota))
+  ]);
+  for (const child of children) {
+    if (selected.size >= limit) break;
+    selected.add(child);
+  }
+  return children.filter((child) => selected.has(child));
+}
+
+function projectTreeIgnoreNames(args: Args): string[] {
+  const ignored = [
+    ".git",
+    ".distinction",
+    ".codegraph",
+    ".vs",
+    ".vscode",
+    ".tmp",
+    "node_modules",
+    "bin",
+    "obj",
+    "target",
+    "dist",
+    "build",
+    "coverage"
+  ];
+  if (args["include-build-artifacts"] !== true) {
+    ignored.push("artifacts", "publish", "publish-docker", "artifacts_obj", "test-build", "logs");
+  }
+  return unique(ignored);
 }
 
 function treeHasTruncation(node: ProjectTreeNode): boolean {
@@ -4865,7 +5251,18 @@ function qualityReviewProgressPath(root: string): string {
 }
 
 async function writeReviewProgress(filePath: string, progress: ReviewProgressSnapshot): Promise<void> {
-  await writeJsonAtomic(filePath, progress);
+  const previous = parseReviewProgressSnapshot(await tryReadJsonFile(filePath).catch(() => undefined));
+  const merged = mergeReviewProgressVisibility(progress, previous);
+  await writeJsonAtomic(filePath, merged);
+}
+
+function mergeReviewProgressVisibility(progress: ReviewProgressSnapshot, previous?: ReviewProgressSnapshot): ReviewProgressSnapshot {
+  if (!previous || previous.runId !== progress.runId) return progress;
+  return {
+    ...progress,
+    pi: progress.pi ?? previous.pi,
+    events: progress.events ?? previous.events
+  };
 }
 
 async function appendPiReviewCategoryLog(root: string, runId: string, entry: unknown): Promise<void> {
@@ -7133,9 +7530,20 @@ async function writeJson<T>(filePath: string, value: T, schema?: JsonSchema<T>):
 async function writeJsonAtomic<T>(filePath: string, value: T, schema?: JsonSchema<T>): Promise<void> {
   const parsed = schema ? schema.parse(value) : value;
   await mkdir(path.dirname(filePath), { recursive: true });
-  const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
-  await writeFile(tempPath, `${JSON.stringify(parsed, null, 2)}\n`, "utf8");
-  await rename(tempPath, filePath);
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const tempPath = `${filePath}.${process.pid}.${Date.now()}.${attempt}.tmp`;
+    try {
+      await writeFile(tempPath, `${JSON.stringify(parsed, null, 2)}\n`, "utf8");
+      await rename(tempPath, filePath);
+      return;
+    } catch (error) {
+      lastError = error;
+      await rm(tempPath, { force: true }).catch(() => undefined);
+      await sleep(75 * (attempt + 1));
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 
 function outputJson(value: unknown): void {

@@ -442,12 +442,16 @@ export interface RuntimeProjectTreeNode {
 export interface RuntimeProjectTreeResult {
   ok: boolean;
   generatedAt: string;
+  source?: "filesystem" | "cache";
+  scannedAt?: string;
   maxDepth: number;
   maxEntries: number;
   root: RuntimeProjectTreeNode;
   totalFiles: number;
+  totalDirectories?: number;
   renderedEntries: number;
   truncated: boolean;
+  warning?: string;
 }
 
 export type RuntimeReviewSeverity = "P0" | "P1" | "P2" | "P3";
@@ -504,7 +508,19 @@ export interface RuntimeReviewFinding {
   runId: string;
   category: RuntimeReviewCategory;
   severity: RuntimeReviewSeverity;
-  status: "candidate" | "confirmed" | "dismissed" | "needs_more_evidence";
+  status:
+    | "candidate"
+    | "confirmed"
+    | "dismissed"
+    | "needs_more_evidence"
+    | "open"
+    | "acknowledged"
+    | "planned"
+    | "in_progress"
+    | "mitigated"
+    | "resolved"
+    | "false_positive"
+    | "accepted_risk";
   title: string;
   summary: string;
   whyItMatters: string;
@@ -575,6 +591,27 @@ export interface RuntimeReviewProgress {
     status: "completed" | "partial" | "failed";
     findingIds: string[];
     summary: string;
+  }[];
+  pi?: {
+    provider: string;
+    model: string;
+    tools: string[];
+    eventCount: number;
+    lastEventAt?: string;
+    lastEventType?: string;
+    lastToolName?: string;
+    lastToolStatus?: string;
+    lastToolInput?: string;
+    lastToolOutput?: string;
+    lastAssistantText?: string;
+    diagnostics?: string[];
+  };
+  events?: {
+    timestamp: string;
+    type: string;
+    summary: string;
+    toolName?: string;
+    status?: string;
   }[];
 }
 
@@ -1263,8 +1300,10 @@ export async function readFindingAudit(root: string): Promise<RuntimeFindingAudi
   return JSON.parse(stdout) as RuntimeFindingAuditResult;
 }
 
-export async function readProjectTree(root: string): Promise<RuntimeProjectTreeResult> {
-  const stdout = await runRuntimeCommand("project-tree", ["--root", root, "--depth", "6", "--max-entries", "1400"]);
+export async function readProjectTree(root: string, options?: { cached?: boolean }): Promise<RuntimeProjectTreeResult> {
+  const args = ["--root", root, "--depth", "6", "--max-entries", "2600"];
+  if (options?.cached) args.push("--cached");
+  const stdout = await runRuntimeCommand("project-tree", args);
   return JSON.parse(stdout) as RuntimeProjectTreeResult;
 }
 

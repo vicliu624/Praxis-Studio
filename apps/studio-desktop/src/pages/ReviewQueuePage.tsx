@@ -34,6 +34,7 @@ type ReviewItemKind = "memory" | "finding";
 type AuditFilter = "all" | "detected" | "reopened" | "disappeared" | "historical";
 type ReviewCategoryState = "completed" | "running" | "waiting" | "failed" | "empty";
 
+const staleReviewProgressMs = 2 * 60 * 1000;
 const severityOrder: RuntimeReviewSeverity[] = ["P0", "P1", "P2", "P3"];
 const reviewCategoryOrder: RuntimeReviewCategory[] = [
   "architecture_boundaries",
@@ -97,8 +98,9 @@ export function ReviewQueuePage({
       if (progress) {
         setReviewProgress(progress);
         if (progress.status === "running") {
-          setRunningReview(true);
-          setStatus(progress.message);
+          const stale = isStaleReviewProgress(progress);
+          setRunningReview(!stale);
+          setStatus(stale ? t("review.progressStaleStatus") : progress.message);
           setCheckingReviewProgress(false);
           await refreshQueueQuietly();
           return;
@@ -146,7 +148,14 @@ export function ReviewQueuePage({
       if (cancelled) return;
       if (progress) {
         setReviewProgress(progress);
-        setStatus(progress.message);
+        const stale = isStaleReviewProgress(progress);
+        setStatus(stale ? t("review.progressStaleStatus") : progress.message);
+        if (stale) {
+          setRunningReview(false);
+          setRetryingCategory(null);
+          await refreshQueueQuietly();
+          return;
+        }
         await refreshQueueQuietly();
         if (progress.status === "completed") {
           setRunningReview(false);
@@ -303,12 +312,16 @@ export function ReviewQueuePage({
   const auditItems = audit?.findings ?? [];
   const filteredAuditItems = auditItems.filter((item) => auditFilterMatches(item, auditFilter));
   const selectedAuditFinding = auditItems.find((item) => item.findingId === selectedAuditFindingId) ?? filteredAuditItems[0] ?? null;
-  const reviewIsInProgress = runningReview || reviewProgress?.status === "running";
+  const staleReviewProgress = isStaleReviewProgress(reviewProgress);
+  const effectiveRunningReview = runningReview && !staleReviewProgress;
+  const reviewIsInProgress = effectiveRunningReview || (reviewProgress?.status === "running" && !staleReviewProgress);
   const reviewMemoryPill = checkingReviewProgress
     ? t("review.checkingProgressPill")
     : reviewIsInProgress
       ? t("review.reviewRunningPill")
-      : reviewProgress?.status === "failed"
+      : staleReviewProgress
+        ? t("review.reviewStalePill")
+        : reviewProgress?.status === "failed"
         ? t("review.reviewFailedPill")
         : reviewFindings.length
           ? t("review.memoryBacked")
@@ -330,10 +343,10 @@ export function ReviewQueuePage({
           <button className="secondary-action" type="button" onClick={chooseProjectRoot}>
             {t("review.browse")}
           </button>
-          <button className="primary-action" type="button" disabled={!projectRoot || runningReview} onClick={() => void runReview()}>
-            {runningReview ? t("review.running") : t("review.runEngineeringReview")}
+          <button className="primary-action" type="button" disabled={!projectRoot || effectiveRunningReview} onClick={() => void runReview()}>
+            {effectiveRunningReview ? t("review.running") : t("review.runEngineeringReview")}
           </button>
-          <button className="secondary-action" type="button" disabled={!projectRoot || runningReview} onClick={() => void loadQueue()}>
+          <button className="secondary-action" type="button" disabled={!projectRoot || effectiveRunningReview} onClick={() => void loadQueue()}>
             {t("review.refresh")}
           </button>
         </div>
@@ -351,7 +364,7 @@ export function ReviewQueuePage({
             <span>{t("review.candidateBoundaryCopy")}</span>
           </div>
         </div>
-        {runningReview || reviewProgress ? <ReviewProgressStrip progress={reviewProgress} /> : null}
+        {effectiveRunningReview || reviewProgress ? <ReviewProgressStrip progress={reviewProgress} stale={staleReviewProgress} /> : null}
         {status ? <p className="status-text">{status}</p> : null}
         {error ? <p className="error-text">{error}</p> : null}
       </section>
@@ -367,7 +380,7 @@ export function ReviewQueuePage({
         </div>
         {!projectRoot ? (
           <EmptyQueue message={t("review.noProject")} />
-        ) : checkingReviewProgress ? (
+        ) : checkingReviewProgress || (reviewProgress?.status === "running" && !staleReviewProgress && !queue) ? (
           <ReviewLockedPanel progress={reviewProgress} checking={checkingReviewProgress} />
         ) : queue && !reviewFindings.length ? (
           <ReviewCategoryPanel
@@ -511,7 +524,7 @@ function ReviewLockedPanel({ progress, checking }: { progress: RuntimeReviewProg
         </h3>
         <p>{failed ? t("review.failedLockedCopy") : checking ? t("review.checkingProgressCopy") : t("review.inProgressLockedCopy")}</p>
       </div>
-      <ReviewProgressStrip progress={progress} />
+      <ReviewProgressStrip progress={progress} stale={isStaleReviewProgress(progress)} />
       {progress?.error ? <p className="error-text">{progress.error}</p> : null}
       <p className="muted-copy">{failed ? t("review.failedLockedMemory") : t("review.inProgressLockedMemory")}</p>
     </section>
@@ -558,13 +571,19 @@ function ReviewCategoryTabs({
   );
 }
 
-function ReviewProgressStrip({ progress }: { progress: RuntimeReviewProgress | null }) {
-  const { t } = useI18n();
+function ReviewProgressStrip({ progress, stale = false }: { progress: RuntimeReviewProgress | null; stale?: boolean }) {
+  const { locale, t } = useI18n();
   const total = progress?.totalCategories ?? reviewCategoryOrder.length;
   const completed = progress?.completedCategories ?? 0;
   const percent = total > 0 ? Math.round((completed / total) * 100) : 0;
+  const pi = progress?.pi;
+  const recentEvents = progress?.events ?? [];
+  const updatedLabel = progress?.updatedAt ? formatReviewTimeAgo(progress.updatedAt, locale) : "";
+  const startedLabel = progress?.startedAt ? formatReviewElapsed(progress.startedAt, locale) : "";
   const title =
-    progress?.status === "failed"
+    stale
+      ? t("review.piAgentStale")
+      : progress?.status === "failed"
       ? t("review.piAgentFailed")
       : progress?.status === "completed"
         ? t("review.piAgentCompleted")
@@ -577,14 +596,64 @@ function ReviewProgressStrip({ progress }: { progress: RuntimeReviewProgress | n
         <strong>{title}</strong>
         <span>{progress?.message ?? t("review.waitingForPiProgress")}</span>
       </div>
+      {stale ? <div className="review-progress-stale">{t("review.progressStaleCopy")}</div> : null}
       <div className="review-progress-meta">
         <span>{completed}/{total}</span>
         {progress?.currentEvaluator ? <span>{progress.currentEvaluator}</span> : null}
         {progress?.findings ? <span>{t("review.progressFindings", { count: progress.findings })}</span> : null}
+        {startedLabel ? <span>{t("review.progressElapsed", { time: startedLabel })}</span> : null}
+        {updatedLabel ? <span>{t("review.progressUpdated", { time: updatedLabel })}</span> : null}
       </div>
       <div className="review-progress-bar" aria-label={t("review.progress")}>
         <span style={{ width: `${percent}%` }} />
       </div>
+      {pi ? (
+        <div className="review-progress-agent">
+          <div className="review-progress-agent-head">
+            <div>
+              <strong>{t("review.piExecutionProcess")}</strong>
+              <span>{t("review.piRoute", { provider: pi.provider, model: pi.model })}</span>
+            </div>
+            <span>{t("review.piEventCount", { count: pi.eventCount })}</span>
+          </div>
+          {pi.tools.length ? (
+            <div className="review-progress-tools" aria-label={t("review.piEnabledTools")}>
+              {pi.tools.map((tool) => <span key={tool}>{tool}</span>)}
+            </div>
+          ) : null}
+          {pi.lastToolName || pi.lastAssistantText ? (
+            <div className="review-progress-current">
+              {pi.lastToolName ? (
+                <div>
+                  <span>{t("review.piCurrentTool")}</span>
+                  <strong>{pi.lastToolName}{pi.lastToolStatus ? ` · ${pi.lastToolStatus}` : ""}</strong>
+                </div>
+              ) : null}
+              {pi.lastToolInput ? <pre>{pi.lastToolInput}</pre> : null}
+              {pi.lastToolOutput ? <pre>{pi.lastToolOutput}</pre> : null}
+              {pi.lastAssistantText ? <p>{pi.lastAssistantText}</p> : null}
+            </div>
+          ) : (
+            <p className="review-progress-waiting">{t("review.piNoEventsYet")}</p>
+          )}
+          {recentEvents.length ? (
+            <div className="review-progress-events">
+              <span>{t("review.piRecentEvents")}</span>
+              <ol>
+                {recentEvents.map((event, index) => (
+                  <li key={`${event.timestamp}-${index}`}>
+                    <time>{formatReviewClock(event.timestamp)}</time>
+                    <div>
+                      <strong>{event.toolName ?? event.type}{event.status ? ` · ${event.status}` : ""}</strong>
+                      <span>{event.summary}</span>
+                    </div>
+                  </li>
+                ))}
+              </ol>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -1130,6 +1199,10 @@ function buildCategoryStates(
 ): Record<RuntimeReviewCategory, ReviewCategoryState> {
   const states = Object.fromEntries(reviewCategoryOrder.map((category) => [category, "empty"])) as Record<RuntimeReviewCategory, ReviewCategoryState>;
   for (const finding of findings) states[finding.category] = "completed";
+  if (isStaleReviewProgress(progress)) {
+    if (progress?.currentCategory) states[progress.currentCategory] = "failed";
+    return states;
+  }
   const evaluatorResults = progress?.evaluatorResults ?? queue?.qualityReview?.evaluatorResults ?? [];
   for (const result of evaluatorResults) {
     const category = normalizeReviewCategory(result.evaluator.category);
@@ -1153,6 +1226,13 @@ function buildCategoryStates(
 
 function normalizeReviewCategory(category: RuntimeReviewCategory): RuntimeReviewCategory {
   return category === "foundation_integrity" ? "documentation_knowledge" : category;
+}
+
+function isStaleReviewProgress(progress: RuntimeReviewProgress | null): boolean {
+  if (!progress || progress.status !== "running") return false;
+  const updatedAt = new Date(progress.pi?.lastEventAt ?? progress.updatedAt).getTime();
+  if (!Number.isFinite(updatedAt)) return false;
+  return Date.now() - updatedAt > staleReviewProgressMs;
 }
 
 function highestSeverityForFindings(findings: RuntimeReviewFinding[]): RuntimeReviewSeverity | undefined {
@@ -1192,6 +1272,38 @@ function auditFilterLabelKey(filter: AuditFilter): ReviewTranslationKey {
 }
 
 type ReviewTranslationKey = Parameters<ReturnType<typeof useI18n>["t"]>[0];
+
+function formatReviewTimeAgo(iso: string, locale: string): string {
+  const timestamp = new Date(iso).getTime();
+  if (!Number.isFinite(timestamp)) return iso;
+  const seconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
+  if (seconds < 60) return locale === "zh-CN" ? `${seconds} 秒前` : `${seconds}s ago`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return locale === "zh-CN" ? `${minutes} 分钟前` : `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return locale === "zh-CN" ? `${hours} 小时前` : `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return locale === "zh-CN" ? `${days} 天前` : `${days}d ago`;
+}
+
+function formatReviewElapsed(iso: string, locale: string): string {
+  const timestamp = new Date(iso).getTime();
+  if (!Number.isFinite(timestamp)) return iso;
+  const seconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 1) return locale === "zh-CN" ? `${seconds} 秒` : `${seconds}s`;
+  const remainingSeconds = seconds % 60;
+  if (minutes < 60) return locale === "zh-CN" ? `${minutes} 分 ${remainingSeconds} 秒` : `${minutes}m ${remainingSeconds}s`;
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  return locale === "zh-CN" ? `${hours} 小时 ${remainingMinutes} 分` : `${hours}h ${remainingMinutes}m`;
+}
+
+function formatReviewClock(iso: string): string {
+  const date = new Date(iso);
+  if (!Number.isFinite(date.getTime())) return iso;
+  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
 
 function severityTitleKey(severity: RuntimeReviewSeverity): ReviewTranslationKey {
   if (severity === "P0") return "review.severity.P0.title";

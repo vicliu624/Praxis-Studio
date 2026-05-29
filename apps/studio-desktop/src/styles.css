@@ -1532,6 +1532,145 @@ textarea {
   transition: width 220ms ease;
 }
 
+.review-progress-stale {
+  border: 1px solid rgba(231, 162, 60, 0.45);
+  border-radius: 8px;
+  background: rgba(231, 162, 60, 0.08);
+  color: #f2ca86;
+  padding: 9px 10px;
+  line-height: 1.45;
+}
+
+.review-progress-agent {
+  display: grid;
+  gap: 10px;
+  border: 1px solid #233343;
+  border-radius: 8px;
+  background: #0c131a;
+  padding: 10px;
+}
+
+.review-progress-agent-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: start;
+}
+
+.review-progress-agent-head div {
+  display: grid;
+  gap: 3px;
+}
+
+.review-progress-agent-head > span {
+  flex: 0 0 auto;
+  border: 1px solid rgba(141, 234, 221, 0.26);
+  border-radius: 999px;
+  color: #8deadd;
+  padding: 3px 8px;
+  font-size: 12px;
+}
+
+.review-progress-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.review-progress-tools span {
+  border: 1px solid #2a394a;
+  border-radius: 999px;
+  background: #111820;
+  color: #9eb0c4;
+  padding: 3px 7px;
+  font-size: 12px;
+}
+
+.review-progress-current {
+  display: grid;
+  gap: 8px;
+  border: 1px solid #24384a;
+  border-radius: 8px;
+  background: #0f1820;
+  padding: 10px;
+}
+
+.review-progress-current div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.review-progress-current div span,
+.review-progress-events > span,
+.review-progress-waiting {
+  color: #8ea0b5;
+}
+
+.review-progress-current pre {
+  max-height: 130px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  border: 1px solid #24384a;
+  border-radius: 8px;
+  background: #080d12;
+  color: #d6dee8;
+  padding: 8px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.review-progress-current p {
+  margin: 0;
+  color: #d6dee8;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.review-progress-events {
+  display: grid;
+  gap: 8px;
+}
+
+.review-progress-events ol {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.review-progress-events li {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  border-top: 1px solid #1e2d3c;
+  padding-top: 7px;
+}
+
+.review-progress-events time {
+  color: #6f8298;
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+}
+
+.review-progress-events li div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.review-progress-events li strong {
+  color: #d6dee8;
+}
+
+.review-progress-events li span {
+  overflow-wrap: anywhere;
+}
+
 .review-queue-summary {
   grid-column: 2 / -1;
   display: grid;
@@ -1918,6 +2057,17 @@ textarea {
   color: #f6c36e;
   padding: 3px 7px;
   font-size: 10px;
+}
+
+.assistant-panel-heading-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.assistant-panel-heading button:disabled {
+  cursor: progress;
+  opacity: 0.65;
 }
 
 .assistant-tree-root,

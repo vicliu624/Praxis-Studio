@@ -90,6 +90,7 @@ export function AgentWorkspacePage({ projectRoot, initialDraft, onDraftConsumed,
   const [rightView, setRightView] = useState<"context" | "plan" | "tools" | "memory" | "diff" | "logs">("context");
   const [selectedNode, setSelectedNode] = useState<string | null>(null);
   const [selectedEdge, setSelectedEdge] = useState<string | null>(null);
+  const [projectTreeRefreshToken, setProjectTreeRefreshToken] = useState(0);
   const [slashQuery, setSlashQuery] = useState("");
   const [showCommands, setShowCommands] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
@@ -272,6 +273,7 @@ export function AgentWorkspacePage({ projectRoot, initialDraft, onDraftConsumed,
               finalMessage: finalTerminal.content,
               finalStructured: finalTerminal.structured
             });
+            setProjectTreeRefreshToken((value) => value + 1);
             return;
           }
         } else {
@@ -401,7 +403,7 @@ export function AgentWorkspacePage({ projectRoot, initialDraft, onDraftConsumed,
 
         <div className="sidebar-content" style={{ flex: 1, overflow: "auto", padding: 8 }}>
           {leftView === "files" && (
-            <FileTreePanel root={projectRoot} onSelectNode={setSelectedNode} />
+            <FileTreePanel root={projectRoot} refreshToken={projectTreeRefreshToken} onSelectNode={setSelectedNode} />
           )}
           {leftView === "graph" && (
             <GraphShortcutsPanel
@@ -672,10 +674,11 @@ export function AgentWorkspacePage({ projectRoot, initialDraft, onDraftConsumed,
 
 // ─── FileTreePanel ──────────────────────────────────────────
 
-function FileTreePanel({ root, onSelectNode }: { root: string; onSelectNode: (id: string) => void }) {
+function FileTreePanel({ root, refreshToken, onSelectNode }: { root: string; refreshToken: number; onSelectNode: (id: string) => void }) {
   const [tree, setTree] = useState<RuntimeProjectTreeResult | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [manualRefreshToken, setManualRefreshToken] = useState(0);
 
   useEffect(() => {
     let active = true;
@@ -695,19 +698,24 @@ function FileTreePanel({ root, onSelectNode }: { root: string; onSelectNode: (id
         if (active) setLoading(false);
       });
     return () => { active = false; };
-  }, [root]);
-
-  if (loading) return <div style={{ color: "#96a3b5", fontSize: 12, padding: 8 }}>Loading...</div>;
+  }, [root, refreshToken, manualRefreshToken]);
 
   return (
     <div className="assistant-tree-panel">
       <div className="assistant-panel-heading">
-        <span>Project Tree</span>
-        {tree ? <small>{tree.totalFiles} files</small> : null}
+        <span>项目文件</span>
+        <div className="assistant-panel-heading-actions">
+          {tree ? <small>{tree.totalFiles} files</small> : null}
+          <button type="button" onClick={() => setManualRefreshToken((value) => value + 1)} disabled={loading}>
+            {loading ? "扫描中" : "刷新"}
+          </button>
+        </div>
       </div>
+      {loading ? <div className="assistant-side-note">正在读取当前工作区文件...</div> : null}
       {error ? <div className="assistant-side-error">{error}</div> : null}
       {tree ? <ProjectTreeNodeView node={tree.root} depth={0} onSelectNode={onSelectNode} /> : null}
-      {tree?.truncated ? <div className="assistant-side-note">Tree is truncated to keep navigation responsive. Run project intake to refresh the cached file facts.</div> : null}
+      {tree?.warning ? <div className="assistant-side-note">实时扫描失败，正在展示缓存文件树。{tree.warning}</div> : null}
+      {tree?.truncated ? <div className="assistant-side-note">文件树已为响应速度做了截断。修改文件后点刷新即可查看当前结构；只有需要重建 Praxis 记忆时才需要重新项目接入。</div> : null}
     </div>
   );
 }
@@ -745,7 +753,7 @@ function ProjectTreeNodeView({
         title={node.path}
       >
         <span className="assistant-tree-caret">{isDirectory ? (expanded ? "v" : ">") : ""}</span>
-        <span className="assistant-tree-icon">{isDirectory ? "▣" : "·"}</span>
+        <span className="assistant-tree-icon">{isDirectory ? "[]" : "-"}</span>
         <span className="assistant-tree-name">{node.name}</span>
         <small>{isDirectory ? `${node.fileCount}` : node.language ?? node.roleHint ?? ""}</small>
       </button>

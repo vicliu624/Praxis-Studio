@@ -18,7 +18,20 @@ export const ReviewCategorySchema = z.enum([
   "documentation_knowledge"
 ]);
 
-export const ReviewFindingStatusSchema = z.enum(["candidate", "confirmed", "dismissed", "needs_more_evidence"]);
+export const ReviewFindingStatusSchema = z.enum([
+  "candidate",
+  "confirmed",
+  "dismissed",
+  "needs_more_evidence",
+  "open",
+  "acknowledged",
+  "planned",
+  "in_progress",
+  "mitigated",
+  "resolved",
+  "false_positive",
+  "accepted_risk"
+]);
 
 const ReviewCategoryCountSchema = z.object({
   foundation_integrity: z.number().int().nonnegative(),
