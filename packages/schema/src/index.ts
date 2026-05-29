@@ -18,6 +18,8 @@ export * from "./context-packet.js";
 export * from "./context-packet.schema.js";
 export * from "./trace.js";
 export * from "./trace.schema.js";
+export * from "./quality-review.js";
+export * from "./quality-review.schema.js";
 export * from "./coding-task.js";
 export * from "./coding-task.schema.js";
 export * from "./mcp.js";

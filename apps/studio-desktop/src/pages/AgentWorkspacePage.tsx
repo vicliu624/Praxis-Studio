@@ -7,6 +7,8 @@ import {
   sendChatMessage,
   startAgentRun,
   readGraph,
+  readEngineeringSourceData,
+  readProjectTree,
   type RuntimeAgentRunResult,
   type RuntimeAgentLogPaths,
   type RuntimeAgentStep,
@@ -18,7 +20,10 @@ import {
   type RuntimeNode,
   type RuntimeEdge,
   type RuntimeGraphPlan,
+  type RuntimeMemoryRecord,
   type RuntimePlanAction,
+  type RuntimeProjectTreeNode,
+  type RuntimeProjectTreeResult,
   type RuntimeToolCallView
 } from "../runtimeClient";
 import { useI18n } from "../i18n";
@@ -29,6 +34,8 @@ import { ReasoningBlock } from "../chat/ReasoningBlock";
 
 interface AgentWorkspacePageProps {
   projectRoot: string;
+  initialDraft?: { text: string; mode: "explain" | "plan"; token: number } | null;
+  onDraftConsumed?: (token: number) => void;
   onNavigateToGraph: () => void;
   onNavigateToSettings: () => void;
   onNavigateHome: () => void;
@@ -36,7 +43,39 @@ interface AgentWorkspacePageProps {
 
 type WorkspaceView = "chat" | "graph" | "memory" | "files";
 
-export function AgentWorkspacePage({ projectRoot, onNavigateToGraph, onNavigateToSettings, onNavigateHome }: AgentWorkspacePageProps) {
+type ActiveAgentPoll = {
+  cancelled: boolean;
+  timeoutId: ReturnType<typeof setTimeout> | null;
+  sessionId: string;
+  baselineCount: number;
+  pollCount: number;
+  stableTerminalReads: number;
+  readErrorCount: number;
+};
+
+function isTerminalRunMessage(message: RuntimeChatMessage): boolean {
+  return message.role === "assistant"
+    || message.role === "error"
+    || message.status === "failed"
+    || message.status === "cancelled";
+}
+
+function findTerminalRunMessage(messages: RuntimeChatMessage[], baselineCount: number): RuntimeChatMessage | null {
+  const startIndex = Math.max(0, Math.min(baselineCount, messages.length));
+  for (let index = messages.length - 1; index >= startIndex; index--) {
+    const message = messages[index];
+    if (isTerminalRunMessage(message)) return message;
+  }
+  return null;
+}
+
+function runStatusFromTerminalMessage(message: RuntimeChatMessage): RuntimeAgentRunResult["runStatus"] {
+  if (message.role === "error" || message.status === "failed") return "failed";
+  if (message.status === "cancelled") return "cancelled";
+  return "completed";
+}
+
+export function AgentWorkspacePage({ projectRoot, initialDraft, onDraftConsumed, onNavigateToGraph, onNavigateToSettings, onNavigateHome }: AgentWorkspacePageProps) {
   const { t } = useI18n();
   const [graph, setGraph] = useState<RuntimeGraph | null>(null);
   const [session, setSession] = useState<RuntimeChatSession | null>(null);
@@ -57,7 +96,36 @@ export function AgentWorkspacePage({ projectRoot, onNavigateToGraph, onNavigateT
   const messagesScroller = useRef<HTMLDivElement>(null);
   const messagesEnd = useRef<HTMLDivElement>(null);
   const shouldStickToBottom = useRef(true);
+  const activePollRef = useRef<ActiveAgentPoll | null>(null);
+  const consumedDraftTokenRef = useRef<number | null>(null);
   const commands = useCommands();
+
+  useEffect(() => {
+    if (!initialDraft) return;
+    if (consumedDraftTokenRef.current === initialDraft.token) return;
+    consumedDraftTokenRef.current = initialDraft.token;
+    setInput(initialDraft.text);
+    setMode(initialDraft.mode);
+    setShowCommands(false);
+    shouldStickToBottom.current = false;
+    onDraftConsumed?.(initialDraft.token);
+  }, [initialDraft?.token]);
+
+  const stopActivePoll = useCallback(() => {
+    const poll = activePollRef.current;
+    if (poll?.timeoutId) clearTimeout(poll.timeoutId);
+    if (poll) poll.cancelled = true;
+    activePollRef.current = null;
+  }, []);
+
+  const finishActivePoll = useCallback((poll: ActiveAgentPoll, result?: RuntimeAgentRunResult) => {
+    if (activePollRef.current !== poll) return;
+    if (poll.timeoutId) clearTimeout(poll.timeoutId);
+    poll.cancelled = true;
+    activePollRef.current = null;
+    setIsRunning(false);
+    if (result) setRunResult(result);
+  }, []);
 
   // ── Load graph ───────────────────────────────────────────
   useEffect(() => {
@@ -71,6 +139,8 @@ export function AgentWorkspacePage({ projectRoot, onNavigateToGraph, onNavigateT
   // ── Create or load session ───────────────────────────────
   useEffect(() => {
     let active = true;
+    stopActivePoll();
+    setIsRunning(false);
     const target: RuntimeChatTarget = selectedNode
       ? { type: "node", id: selectedNode }
       : selectedEdge
@@ -85,7 +155,7 @@ export function AgentWorkspacePage({ projectRoot, onNavigateToGraph, onNavigateT
       })
       .catch((err) => { if (active) setError(err instanceof Error ? err.message : String(err)); });
     return () => { active = false; };
-  }, [projectRoot, selectedNode, selectedEdge]);
+  }, [projectRoot, selectedNode, selectedEdge, stopActivePoll]);
 
   // ── Auto-scroll ──────────────────────────────────────────
   useEffect(() => {
@@ -104,23 +174,21 @@ export function AgentWorkspacePage({ projectRoot, onNavigateToGraph, onNavigateT
     }
   }, []);
 
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const pollCountRef = useRef(0);
-
   useEffect(() => {
-    return () => {
-      pollRef.current = null;
-    };
-  }, []);
+    return () => stopActivePoll();
+  }, [stopActivePoll]);
 
   const handleSend = useCallback(async () => {
     const text = input.trim();
     if (!text || !session) return;
+    stopActivePoll();
+    const baselineCount = messages.length;
     setShowCommands(false);
     setInput("");
     setError("");
     setRunResult(null);
     setRunSteps([]);
+    setRightView("tools");
     shouldStickToBottom.current = true;
 
     // Show user message immediately
@@ -135,6 +203,16 @@ export function AgentWorkspacePage({ projectRoot, onNavigateToGraph, onNavigateT
     setIsRunning(true);
 
     const sid = session.id;
+    const poll: ActiveAgentPoll = {
+      cancelled: false,
+      timeoutId: null,
+      sessionId: sid,
+      baselineCount,
+      pollCount: 0,
+      stableTerminalReads: 0,
+      readErrorCount: 0
+    };
+    activePollRef.current = poll;
     const target: RuntimeChatTarget = selectedNode
       ? { type: "node", id: selectedNode }
       : selectedEdge
@@ -144,63 +222,91 @@ export function AgentWorkspacePage({ projectRoot, onNavigateToGraph, onNavigateT
     // Fire-and-forget: start agent via async spawn (returns immediately)
     startAgentRun(projectRoot, target, mode, text, sid)
       .then((result) => { if (result.runStatus !== "running") setRunResult(result); })
-      .catch((err) => { setError(err instanceof Error ? err.message : String(err)); });
+      .catch((err) => {
+        if (activePollRef.current !== poll || poll.cancelled) return;
+        const message = err instanceof Error ? err.message : String(err);
+        setError(message);
+        finishActivePoll(poll, {
+          ok: false,
+          sessionId: sid,
+          runId: "",
+          runPath: "",
+          runStatus: "failed",
+          stepCount: poll.pollCount,
+          finalMessage: message
+        });
+      });
     // Agent runs in background — polling below will detect completion
 
-    // Recursive polling: stops when agent is done
-    pollCountRef.current = 0;
-    let polling = true;
-    pollRef.current = 1 as any;
-    
     const doPoll = async () => {
-      if (!polling || pollRef.current === null) return;
-      pollCountRef.current++;
+      if (poll.cancelled || activePollRef.current !== poll) return;
+      poll.pollCount++;
       try {
         const transcript = await readChatSession(projectRoot, sid);
-        if (!polling || pollRef.current === null) return;
+        if (poll.cancelled || activePollRef.current !== poll) return;
+        poll.readErrorCount = 0;
         setMessages(transcript.messages);
         
-        // Detect completion: last message is assistant (not tool/permission), or an error
-        const msgs = transcript.messages;
-        if (msgs.length > 0) {
-          const last = msgs[msgs.length - 1];
-          const isDone = last.role === "assistant"
-                      || last.role === "error"
-                      || last.status === "failed"
-                      || last.status === "cancelled";
-          
-          if (isDone && pollCountRef.current > 2) {
-            // Agent is done — stop polling
-            polling = false;
-            pollRef.current = null;
-            setIsRunning(false);
-            // Try to get the run result
-            setRunResult({
-              ok: last.role !== "error",
+        const terminal = findTerminalRunMessage(transcript.messages, poll.baselineCount);
+        if (terminal) {
+          poll.stableTerminalReads++;
+          if (poll.stableTerminalReads >= 2) {
+            let finalMessages = transcript.messages;
+            try {
+              const finalTranscript = await readChatSession(projectRoot, sid);
+              finalMessages = finalTranscript.messages;
+              if (!poll.cancelled && activePollRef.current === poll) setMessages(finalMessages);
+            } catch {
+              finalMessages = transcript.messages;
+            }
+            if (poll.cancelled || activePollRef.current !== poll) return;
+            const finalTerminal = findTerminalRunMessage(finalMessages, poll.baselineCount) ?? terminal;
+            const runStatus = runStatusFromTerminalMessage(finalTerminal);
+            finishActivePoll(poll, {
+              ok: runStatus === "completed",
               sessionId: sid,
               runId: "",
               runPath: "",
-              runStatus: last.role === "error" || last.status === "failed" ? "failed" : last.status === "cancelled" ? "cancelled" : "completed",
-              stepCount: pollCountRef.current,
-              finalMessage: last.content
+              runStatus,
+              stepCount: poll.pollCount,
+              finalMessage: finalTerminal.content,
+              finalStructured: finalTerminal.structured
             });
             return;
           }
+        } else {
+          poll.stableTerminalReads = 0;
         }
         
         // Timeout after 60 minutes (7200 polls at 500ms). Permission waits can legitimately be long.
-        if (pollCountRef.current > 7200) {
-          polling = false;
-          pollRef.current = null;
-          setIsRunning(false);
-          setError("Agent run timed out after 60 minutes.");
+        if (poll.pollCount > 7200) {
+          const message = "Agent run timed out after 60 minutes.";
+          setError(message);
+          finishActivePoll(poll, {
+            ok: false,
+            sessionId: sid,
+            runId: "",
+            runPath: "",
+            runStatus: "failed",
+            stepCount: poll.pollCount,
+            finalMessage: message
+          });
           return;
         }
-      } catch {}
-      if (polling && pollRef.current !== null) setTimeout(doPoll, 500);
+      } catch (err) {
+        if (poll.cancelled || activePollRef.current !== poll) return;
+        poll.readErrorCount++;
+        if (poll.readErrorCount === 10) {
+          const message = err instanceof Error ? err.message : String(err);
+          setError(`Unable to refresh agent transcript: ${message}`);
+        }
+      }
+      if (!poll.cancelled && activePollRef.current === poll) {
+        poll.timeoutId = setTimeout(doPoll, 500);
+      }
     };
-    setTimeout(doPoll, 500);
-  }, [input, session, selectedNode, selectedEdge, mode, projectRoot]);
+    poll.timeoutId = setTimeout(doPoll, 150);
+  }, [input, session, messages.length, selectedNode, selectedEdge, mode, projectRoot, stopActivePoll, finishActivePoll]);
 
   // ── Permission response ──────────────────────────────────
   const handlePermission = useCallback(async (permissionId: string, approval: "approve" | "reject") => {
@@ -212,8 +318,13 @@ export function AgentWorkspacePage({ projectRoot, onNavigateToGraph, onNavigateT
   }, [session, selectedNode, selectedEdge, projectRoot]);
 
   const handleCancelRun = useCallback(async () => {
-    await cancelAgentRun(projectRoot);
-    setError("Agent cancellation requested.");
+    try {
+      await cancelAgentRun(projectRoot);
+      setError("Agent cancellation requested.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      if (!activePollRef.current) setIsRunning(false);
+    }
   }, [projectRoot]);
 
   const handleMessagesScroll = useCallback(() => {
@@ -340,7 +451,7 @@ export function AgentWorkspacePage({ projectRoot, onNavigateToGraph, onNavigateT
             {/* Permission mode pills */}
             {isRunning && (
               <span style={{ marginLeft: 8, fontSize: 10, padding: "2px 6px", borderRadius: 8, background: "#eba34122", color: "#eba341" }}>
-                ● Agent running
+                Agent running
               </span>
             )}
           </div>
@@ -499,7 +610,7 @@ export function AgentWorkspacePage({ projectRoot, onNavigateToGraph, onNavigateT
             {isRunning && (
               <button onClick={() => {
                 cancelAgentRun(projectRoot).catch(() => {});
-                pollRef.current = null;
+                stopActivePoll();
                 setIsRunning(false);
               }} style={{ fontSize: 10, background: "none", border: "none", color: "#f87171", cursor: "pointer" }}>
                 Cancel run
@@ -562,33 +673,90 @@ export function AgentWorkspacePage({ projectRoot, onNavigateToGraph, onNavigateT
 // ─── FileTreePanel ──────────────────────────────────────────
 
 function FileTreePanel({ root, onSelectNode }: { root: string; onSelectNode: (id: string) => void }) {
-  const [files, setFiles] = useState<string[]>([]);
+  const [tree, setTree] = useState<RuntimeProjectTreeResult | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
 
   useEffect(() => {
-    // Simple: we show directories only, actual file listing handled by agent tools
-    const dirs = ["apps", "packages", "docs", "scripts", ".distinction"];
-    setFiles(dirs);
-    setLoading(false);
+    let active = true;
+    setLoading(true);
+    setError("");
+    readProjectTree(root)
+      .then((result) => {
+        if (!active) return;
+        setTree(result);
+      })
+      .catch((err) => {
+        if (!active) return;
+        setError(err instanceof Error ? err.message : String(err));
+        setTree(null);
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => { active = false; };
   }, [root]);
 
   if (loading) return <div style={{ color: "#96a3b5", fontSize: 12, padding: 8 }}>Loading...</div>;
 
   return (
-    <div style={{ fontSize: 12 }}>
-      <div style={{ color: "#96a3b5", padding: "4px 8px", fontWeight: 600, fontSize: 11, textTransform: "uppercase" }}>Project Map</div>
-      {files.map((f) => (
-        <div key={f} style={{ padding: "3px 8px", color: "#e8edf2", cursor: "pointer", borderRadius: 3 }}
-          onMouseEnter={(e) => (e.currentTarget.style.background = "#161b22")}
-          onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
-        >
-          &#x1F4C1; {f}
-        </div>
-      ))}
-      <div style={{ color: "#96a3b5", padding: "8px 8px 4px", fontWeight: 600, fontSize: 11, textTransform: "uppercase", marginTop: 8 }}>Actions</div>
-      <div style={{ padding: "3px 8px", color: "#96a3b5", fontSize: 11, fontStyle: "italic" }}>
-        Type in chat to explore files. The agent can read and search automatically.
+    <div className="assistant-tree-panel">
+      <div className="assistant-panel-heading">
+        <span>Project Tree</span>
+        {tree ? <small>{tree.totalFiles} files</small> : null}
       </div>
+      {error ? <div className="assistant-side-error">{error}</div> : null}
+      {tree ? <ProjectTreeNodeView node={tree.root} depth={0} onSelectNode={onSelectNode} /> : null}
+      {tree?.truncated ? <div className="assistant-side-note">Tree is truncated to keep navigation responsive. Run project intake to refresh the cached file facts.</div> : null}
+    </div>
+  );
+}
+
+function ProjectTreeNodeView({
+  node,
+  depth,
+  onSelectNode
+}: {
+  node: RuntimeProjectTreeNode;
+  depth: number;
+  onSelectNode: (id: string) => void;
+}) {
+  const [expanded, setExpanded] = useState(depth < 2);
+  const isDirectory = node.kind === "directory";
+  if (node.path === ".") {
+    return (
+      <div className="assistant-tree-root">
+        {node.children.map((child) => (
+          <ProjectTreeNodeView key={child.id} node={child} depth={depth} onSelectNode={onSelectNode} />
+        ))}
+      </div>
+    );
+  }
+  return (
+    <div className="assistant-tree-node">
+      <button
+        type="button"
+        className={isDirectory ? "assistant-tree-row directory" : "assistant-tree-row file"}
+        style={{ paddingLeft: 6 + depth * 12 }}
+        onClick={() => {
+          if (isDirectory) setExpanded((value) => !value);
+          else onSelectNode(`file:${node.path}`);
+        }}
+        title={node.path}
+      >
+        <span className="assistant-tree-caret">{isDirectory ? (expanded ? "v" : ">") : ""}</span>
+        <span className="assistant-tree-icon">{isDirectory ? "▣" : "·"}</span>
+        <span className="assistant-tree-name">{node.name}</span>
+        <small>{isDirectory ? `${node.fileCount}` : node.language ?? node.roleHint ?? ""}</small>
+      </button>
+      {isDirectory && expanded ? (
+        <div className="assistant-tree-children">
+          {node.children.map((child) => (
+            <ProjectTreeNodeView key={child.id} node={child} depth={depth + 1} onSelectNode={onSelectNode} />
+          ))}
+          {node.truncated ? <div className="assistant-tree-truncated" style={{ paddingLeft: 18 + depth * 12 }}>More hidden at this depth</div> : null}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -607,62 +775,119 @@ function GraphShortcutsPanel({
   onSelectEdge: (id: string) => void;
   onOpenGraph: () => void;
 }) {
+  const nodesByKind = groupNodesByKind(nodes);
+  const riskyEdges = edges.filter((edge) => edge.riskLevel !== "none");
   return (
-    <div style={{ fontSize: 12 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "4px 8px" }}>
-        <span style={{ color: "#96a3b5", fontWeight: 600, fontSize: 11, textTransform: "uppercase" }}>Nodes ({nodes.length})</span>
-        <button onClick={onOpenGraph} style={{ fontSize: 10, background: "none", border: "1px solid #1a2332", color: "#eba341", borderRadius: 3, cursor: "pointer", padding: "2px 6px" }}>
-          Open Graph
+    <div className="assistant-graph-panel">
+      <div className="assistant-panel-heading">
+        <span>Graph Summary</span>
+        <button type="button" onClick={onOpenGraph}>
+          Open Plan
         </button>
       </div>
-      {nodes.slice(0, 30).map((n) => (
-        <div
-          key={n.id}
-          onClick={() => onSelectNode(n.id)}
-          style={{
-            padding: "4px 8px", cursor: "pointer", borderRadius: 3, display: "flex", justifyContent: "space-between", alignItems: "center",
-            background: selectedNode === n.id ? "#161b22" : "transparent",
-            borderLeft: selectedNode === n.id ? "2px solid #eba341" : "2px solid transparent"
-          }}
-          onMouseEnter={(e) => { if (selectedNode !== n.id) e.currentTarget.style.background = "#161b22"; }}
-          onMouseLeave={(e) => { if (selectedNode !== n.id) e.currentTarget.style.background = "transparent"; }}
-        >
-          <span style={{ color: "#e8edf2" }}>{n.title}</span>
-          <span style={{ color: "#96a3b5", fontSize: 10 }}>{Math.round(n.progress * 100)}%</span>
-        </div>
+      <div className="assistant-summary-grid">
+        <span><strong>{nodes.length}</strong> nodes</span>
+        <span><strong>{edges.length}</strong> relations</span>
+        <span><strong>{riskyEdges.length}</strong> risks</span>
+      </div>
+      {nodesByKind.map((group) => (
+        <section className="assistant-side-section" key={group.kind}>
+          <h3>{group.kind}</h3>
+          {group.nodes.slice(0, 12).map((node) => (
+            <button
+              key={node.id}
+              type="button"
+              className={selectedNode === node.id ? "assistant-side-item active" : "assistant-side-item"}
+              onClick={() => onSelectNode(node.id)}
+            >
+              <span>{node.title ?? node.id}</span>
+              <small>{Math.round(node.progress * 100)}%</small>
+            </button>
+          ))}
+        </section>
       ))}
-      {nodes.length > 30 && <div style={{ color: "#96a3b5", fontSize: 11, padding: 4, textAlign: "center" }}>+{nodes.length - 30} more</div>}
-
-      <div style={{ color: "#96a3b5", padding: "8px 8px 4px", fontWeight: 600, fontSize: 11, textTransform: "uppercase", marginTop: 8 }}>Edges</div>
-      {edges.slice(0, 20).map((e) => (
-        <div
-          key={e.id}
-          onClick={() => onSelectEdge(e.id)}
-          style={{
-            padding: "3px 8px", cursor: "pointer", borderRadius: 3, fontSize: 11,
-            background: selectedEdge === e.id ? "#161b22" : "transparent",
-            borderLeft: selectedEdge === e.id ? "2px solid #eba341" : "2px solid transparent"
-          }}
-          onMouseEnter={(ev) => { if (selectedEdge !== e.id) ev.currentTarget.style.background = "#161b22"; }}
-          onMouseLeave={(ev) => { if (selectedEdge !== e.id) ev.currentTarget.style.background = "transparent"; }}
-        >
-          <span style={{ color: "#e8edf2" }}>{e.kind}</span>
-          <span style={{ color: e.riskLevel !== "none" ? "#f87171" : "#96a3b5", marginLeft: 6 }}>{e.riskLevel !== "none" ? "!" : ""}</span>
-        </div>
-      ))}
+      {riskyEdges.length ? (
+        <section className="assistant-side-section">
+          <h3>Risky relations</h3>
+          {riskyEdges.slice(0, 10).map((edge) => (
+            <button
+              key={edge.id}
+              type="button"
+              className={selectedEdge === edge.id ? "assistant-side-item active danger" : "assistant-side-item danger"}
+              onClick={() => onSelectEdge(edge.id)}
+            >
+              <span>{edge.title ?? edge.kind}</span>
+              <small>{edge.riskLevel}</small>
+            </button>
+          ))}
+        </section>
+      ) : null}
     </div>
   );
 }
 
 // ─── MemoryQuickPanel ───────────────────────────────────────
 
-function MemoryQuickPanel({ projectRoot: _root }: { projectRoot: string }) {
+function MemoryQuickPanel({ projectRoot }: { projectRoot: string }) {
+  const [records, setRecords] = useState<RuntimeMemoryRecord[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    setError("");
+    readEngineeringSourceData(projectRoot)
+      .then((data) => {
+        if (!active) return;
+        const memory = data.memory;
+        setRecords([
+          ...memory.facts,
+          ...memory.confirmations,
+          ...memory.decisions,
+          ...memory.candidates,
+          ...memory.findings
+        ].slice(0, 80));
+      })
+      .catch((err) => {
+        if (!active) return;
+        setError(err instanceof Error ? err.message : String(err));
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => { active = false; };
+  }, [projectRoot]);
+
+  if (loading) return <div style={{ color: "#96a3b5", fontSize: 12, padding: 8 }}>Loading memory...</div>;
   return (
-    <div style={{ fontSize: 12, color: "#96a3b5" }}>
-      <div style={{ padding: "4px 8px", fontWeight: 600, fontSize: 11, textTransform: "uppercase" }}>Memory</div>
-      <div style={{ padding: 8 }}>Use chat to read and write project memory. The agent can access .distinction/memory/ files.</div>
+    <div className="assistant-memory-panel">
+      <div className="assistant-panel-heading">
+        <span>Project Memory</span>
+        <small>{records.length} shown</small>
+      </div>
+      {error ? <div className="assistant-side-error">{error}</div> : null}
+      {records.length ? records.map((record) => (
+        <article className={`assistant-memory-card ${record.kind.toLowerCase()}`} key={record.id}>
+          <strong>{record.summary || record.subject}</strong>
+          <span>{record.kind} / {record.type}</span>
+          <small>{record.subject} {record.predicate ? `-> ${record.predicate}` : ""}</small>
+        </article>
+      )) : <div className="assistant-side-note">No project memory has been accepted yet. Run project intake or engineering review first.</div>}
     </div>
   );
+}
+
+function groupNodesByKind(nodes: RuntimeNode[]): { kind: string; nodes: RuntimeNode[] }[] {
+  const groups = new Map<string, RuntimeNode[]>();
+  for (const node of nodes) {
+    const group = groups.get(node.kind) ?? [];
+    group.push(node);
+    groups.set(node.kind, group);
+  }
+  return [...groups.entries()]
+    .map(([kind, groupNodes]) => ({ kind, nodes: groupNodes.sort((left, right) => (left.title ?? left.id).localeCompare(right.title ?? right.id)) }))
+    .sort((left, right) => right.nodes.length - left.nodes.length);
 }
 
 // ─── AgentChatMessage (Claude Code style: user right, thinking collapsed) ──
@@ -775,7 +1000,7 @@ function AgentChatMessage({
 // ─── ThinkingBlock — collapsible group of tool calls ─────────
 
 function ThinkingBlock({ messages }: { messages: RuntimeChatMessage[] }) {
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(true);
   const toolMsgs = latestToolMessages(messages);
   const toolNames = [...new Set(toolMsgs.map(m => m.toolCall?.name).filter(Boolean))];
   const successes = toolMsgs.filter(m => m.toolCall?.status === "success").length;
@@ -799,7 +1024,7 @@ function ThinkingBlock({ messages }: { messages: RuntimeChatMessage[] }) {
           ▶
         </span>
         <span style={{ color: "#e8edf2" }}>
-          {toolMsgs.length} tool{toolMsgs.length > 1 ? "s" : ""}: {toolNames.join(", ")}
+          运行过程 / 工具调用：{toolNames.join(", ")}
         </span>
         {running > 0 && <span style={{ color: "#eba341", fontSize: 10 }}>▶ running</span>}
         {successes > 0 && <span style={{ color: "#7ee787", fontSize: 10 }}>✓ {successes}</span>}
@@ -938,11 +1163,11 @@ function ContextPanel({ target, graph }: { target: RuntimeNode | RuntimeEdge | n
 function ToolCallsPanel({ messages }: { messages: RuntimeChatMessage[] }) {
   const toolMsgs = latestToolMessages(messages);
   if (toolMsgs.length === 0) {
-    return <div style={{ fontSize: 12, color: "#96a3b5", padding: 8 }}>No tool calls yet. Start an agent run to see tools in action.</div>;
+    return <div style={{ fontSize: 12, color: "#96a3b5", padding: 8 }}>还没有工具调用。发送消息后，这里会显示 Pi 启动、工具运行和完成状态。</div>;
   }
   return (
     <div style={{ fontSize: 12 }}>
-      <div style={{ fontWeight: 600, marginBottom: 8, color: "#e8edf2", fontSize: 11, textTransform: "uppercase" }}>Tool Calls ({toolMsgs.length})</div>
+      <div style={{ fontWeight: 600, marginBottom: 8, color: "#e8edf2", fontSize: 11, textTransform: "uppercase" }}>运行过程 / 工具调用 ({toolMsgs.length})</div>
       {toolMsgs.map((m) => (
         m.toolCall && <ToolCallCard key={m.id} tool={m.toolCall} />
       ))}
@@ -1043,6 +1268,7 @@ function ToolCallCard({ tool }: { tool: RuntimeToolCallView }) {
       <span style={{ color: "#e8edf2", fontWeight: 600 }}>{tool.name}</span>
       <span style={{ color, marginLeft: 8 }}>{tool.status}</span>
       {tool.inputSummary && <div style={{ color: "#96a3b5", fontSize: 10 }}>{tool.inputSummary}</div>}
+      {tool.outputSummary && <div style={{ color: "#b7c4d4", fontSize: 10 }}>{tool.outputSummary}</div>}
     </div>
   );
 }

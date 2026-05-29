@@ -3,7 +3,6 @@ export type AppRoute =
   | "project-intake"
   | "create-project"
   | "agent-workspace"
-  | "coding-worker"
   | "review-queue"
   | "projection-inspector"
   | "graph-workspace"
@@ -18,7 +17,6 @@ export const routes: RouteDefinition[] = [
   { id: "project-intake" },
   { id: "create-project" },
   { id: "agent-workspace" },
-  { id: "coding-worker" },
   { id: "review-queue" },
   { id: "projection-inspector" },
   { id: "graph-workspace" },

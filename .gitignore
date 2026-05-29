@@ -1,14 +1,52 @@
+# Dependencies
 node_modules/
+
+# JavaScript/TypeScript build output
 dist/
+build/
+coverage/
 *.tsbuildinfo
+
+# Rust/Tauri build output
 target/
-.DS_Store
-.env
-.env.local
-apps/studio-desktop/src-tauri/target/
+target-*/
 apps/studio-desktop/src-tauri/gen/
+
+# Desktop packaging artifacts when copied outside the ignored target directory
+*.msi
+*.dmg
+*.AppImage
+*.deb
+*.rpm
+*-setup.exe
+*.pdb
+
+# Logs and local caches
+logs/
+*.log
+.cache/
+.codegraph/
+.vite/
+.turbo/
+.tmp/
+
+# Praxis local project memory and generated runtime state
 .distinction/
 .distinction.backup-*/
 .distinction.previous-*/
 !.distinction.example/
-.tmp/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+
+# OS/editor noise
+.DS_Store
+Thumbs.db

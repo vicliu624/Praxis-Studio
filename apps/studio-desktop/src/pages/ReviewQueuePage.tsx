@@ -4,14 +4,20 @@ import {
   acceptMemorySuggestion,
   openProjectDialog,
   readFindingAudit,
+  readQualityReviewProgress,
   readReviewQueue,
+  refreshReviewFinding,
+  startQualityReview,
   type RuntimeGraphAnchor,
-  type RuntimeFoundationReviewStatus,
   type RuntimeFindingAuditItem,
   type RuntimeFindingAuditResult,
   type RuntimeFindingStatusReviewItem,
   type RuntimeMemorySuggestionReviewItem,
-  type RuntimeReviewQueueResult
+  type RuntimeReviewCategory,
+  type RuntimeReviewFinding,
+  type RuntimeReviewProgress,
+  type RuntimeReviewQueueResult,
+  type RuntimeReviewSeverity
 } from "../runtimeClient";
 import { useI18n } from "../i18n";
 
@@ -21,35 +27,99 @@ interface ReviewQueuePageProps {
   focusFindingId?: string;
   focusToken?: number;
   onOpenProjectionAnchor?: (anchor: RuntimeGraphAnchor) => void;
+  onOpenAssistantDraft?: (draft: string, mode?: "explain" | "plan") => void;
 }
 
 type ReviewItemKind = "memory" | "finding";
 type AuditFilter = "all" | "detected" | "reopened" | "disappeared" | "historical";
+type ReviewCategoryState = "completed" | "running" | "waiting" | "failed" | "empty";
+
+const severityOrder: RuntimeReviewSeverity[] = ["P0", "P1", "P2", "P3"];
+const reviewCategoryOrder: RuntimeReviewCategory[] = [
+  "architecture_boundaries",
+  "dependencies_coupling",
+  "build_release",
+  "testing_verification",
+  "security_secrets",
+  "configuration_environment",
+  "code_quality_maintainability",
+  "api_contracts_data_flow",
+  "performance_resources",
+  "documentation_knowledge"
+];
 
 export function ReviewQueuePage({
   projectRoot,
   onProjectRootChange,
   focusFindingId,
   focusToken,
-  onOpenProjectionAnchor
+  onOpenProjectionAnchor,
+  onOpenAssistantDraft
 }: ReviewQueuePageProps) {
-  const { t } = useI18n();
+  const { locale, t } = useI18n();
   const [queue, setQueue] = useState<RuntimeReviewQueueResult | null>(null);
   const [audit, setAudit] = useState<RuntimeFindingAuditResult | null>(null);
   const [includeAccepted, setIncludeAccepted] = useState(false);
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
   const [accepting, setAccepting] = useState<{ kind: ReviewItemKind; id: string } | null>(null);
+  const [runningReview, setRunningReview] = useState(false);
+  const [checkingReviewProgress, setCheckingReviewProgress] = useState(false);
+  const [reviewProgress, setReviewProgress] = useState<RuntimeReviewProgress | null>(null);
+  const [retryingCategory, setRetryingCategory] = useState<RuntimeReviewCategory | null>(null);
+  const [refreshingFindingId, setRefreshingFindingId] = useState<string | null>(null);
   const [auditFilter, setAuditFilter] = useState<AuditFilter>("all");
   const [selectedAuditFindingId, setSelectedAuditFindingId] = useState<string | null>(null);
+  const [activeReviewCategory, setActiveReviewCategory] = useState<RuntimeReviewCategory>("architecture_boundaries");
 
   useEffect(() => {
+    let cancelled = false;
     if (!projectRoot) {
       setQueue(null);
       setAudit(null);
+      setReviewProgress(null);
+      setRunningReview(false);
+      setCheckingReviewProgress(false);
       return;
     }
-    void loadQueue();
+
+    setQueue(null);
+    setAudit(null);
+    setReviewProgress(null);
+    setRunningReview(false);
+    setCheckingReviewProgress(true);
+    setError("");
+    setStatus(t("review.loading"));
+
+    const loadCurrentProjectState = async () => {
+      const progress = await readQualityReviewProgress(projectRoot).catch(() => null);
+      if (cancelled) return;
+      if (progress) {
+        setReviewProgress(progress);
+        if (progress.status === "running") {
+          setRunningReview(true);
+          setStatus(progress.message);
+          setCheckingReviewProgress(false);
+          await refreshQueueQuietly();
+          return;
+        }
+        if (progress.status === "failed") {
+          setRunningReview(false);
+          setError(progress.error ?? progress.message);
+          setStatus("");
+          setCheckingReviewProgress(false);
+          await refreshQueueQuietly();
+          return;
+        }
+      }
+      setCheckingReviewProgress(false);
+      await loadQueue();
+    };
+
+    void loadCurrentProjectState();
+    return () => {
+      cancelled = true;
+    };
   }, [projectRoot, includeAccepted]);
 
   useEffect(() => {
@@ -67,6 +137,40 @@ export function ReviewQueuePage({
     setSelectedAuditFindingId(focusFindingId);
   }, [audit, focusFindingId, focusToken]);
 
+  useEffect(() => {
+    if (!runningReview || !projectRoot) return;
+    let cancelled = false;
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    const poll = async () => {
+      const progress = await readQualityReviewProgress(projectRoot).catch(() => null);
+      if (cancelled) return;
+      if (progress) {
+        setReviewProgress(progress);
+        setStatus(progress.message);
+        await refreshQueueQuietly();
+        if (progress.status === "completed") {
+          setRunningReview(false);
+          setRetryingCategory(null);
+          setStatus(t("review.engineeringReviewWritten"));
+          return;
+        }
+        if (progress.status === "failed") {
+          setRunningReview(false);
+          setRetryingCategory(null);
+          setError(progress.error ?? progress.message);
+          setStatus("");
+          return;
+        }
+      }
+      timeoutId = setTimeout(poll, 1000);
+    };
+    timeoutId = setTimeout(poll, 500);
+    return () => {
+      cancelled = true;
+      if (timeoutId) clearTimeout(timeoutId);
+    };
+  }, [runningReview, projectRoot]);
+
   async function chooseProjectRoot() {
     const selected = await openProjectDialog(t("review.openProject"));
     if (!selected) return;
@@ -75,18 +179,67 @@ export function ReviewQueuePage({
 
   async function loadQueue() {
     if (!projectRoot) return;
-    setError("");
-    setStatus(t("review.loading"));
+    await loadQueueData({ quiet: false });
+  }
+
+  async function refreshQueueQuietly() {
+    if (!projectRoot) return;
+    await loadQueueData({ quiet: true });
+  }
+
+  async function loadQueueData({ quiet }: { quiet: boolean }) {
+    if (!projectRoot) return;
+    if (!quiet) {
+      setError("");
+      setStatus(t("review.loading"));
+    }
     try {
       const [next, nextAudit] = await Promise.all([readReviewQueue(projectRoot, includeAccepted), readFindingAudit(projectRoot)]);
       setQueue(next);
       setAudit(nextAudit);
-      setStatus(next.counts.total === 0 && next.foundation ? t("review.loadedFoundation") : t("review.loaded", { count: next.counts.total }));
+      if (!quiet) setStatus(t("review.loadedProblems"));
     } catch (err) {
       setQueue(null);
       setAudit(null);
       setError(err instanceof Error ? err.message : String(err));
+      if (!quiet) setStatus("");
+    }
+  }
+
+  async function runReview() {
+    if (!projectRoot) return;
+    setRunningReview(true);
+    setQueue(null);
+    setAudit(null);
+    setReviewProgress(null);
+    setError("");
+    setStatus(t("review.runningEngineeringReview"));
+    try {
+      await startQualityReview(projectRoot, locale);
+      setStatus(t("review.piReviewStarted"));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
       setStatus("");
+      setRunningReview(false);
+      setRetryingCategory(null);
+    } finally {
+    }
+  }
+
+  async function retryReviewCategory(category: RuntimeReviewCategory) {
+    if (!projectRoot) return;
+    setRunningReview(true);
+    setRetryingCategory(category);
+    setError("");
+    setStatus(t("review.retryingCategory", { category: categoryLabel(t, category) }));
+    try {
+      await startQualityReview(projectRoot, locale, category);
+      setStatus(t("review.retryStarted", { category: categoryLabel(t, category) }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setStatus("");
+      setRunningReview(false);
+      setRetryingCategory(null);
     }
   }
 
@@ -118,11 +271,48 @@ export function ReviewQueuePage({
     }
   }
 
-  const hasItems = Boolean(queue && (queue.memorySuggestions.length || queue.findingStatusPatches.length));
-  const foundation = queue?.foundation;
+  function openFindingInAssistant(finding: RuntimeReviewFinding) {
+    onOpenAssistantDraft?.(buildFindingCodingDraft(finding, categoryLabel(t, finding.category)), "plan");
+    setStatus(t("review.codingDraftPrepared"));
+  }
+
+  async function refreshFinding(finding: RuntimeReviewFinding) {
+    if (!projectRoot || refreshingFindingId) return;
+    setRefreshingFindingId(finding.id);
+    setError("");
+    setStatus(t("review.findingRefreshThinking", { title: finding.title }));
+    try {
+      await refreshReviewFinding(projectRoot, finding.id, locale);
+      setStatus(t("review.findingRefreshCompleted"));
+      await loadQueue();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setStatus("");
+    } finally {
+      setRefreshingFindingId(null);
+    }
+  }
+
+  const reviewFindings = queue?.reviewFindings ?? [];
+  const displayReviewFindings = reviewFindings.map(normalizeReviewFindingDisplayCategory);
+  const activeCategoryFindings = sortFindingsForDisplay(displayReviewFindings.filter((finding) => finding.category === activeReviewCategory));
+  const activeEvaluator = evaluatorForCategory(queue, activeReviewCategory);
+  const categoryStates = buildCategoryStates(reviewProgress, queue, displayReviewFindings);
+  const activeCategoryState = categoryStates[activeReviewCategory];
+  const externalItems = (queue?.memorySuggestions.length ?? 0) + (queue?.findingStatusPatches.length ?? 0);
   const auditItems = audit?.findings ?? [];
   const filteredAuditItems = auditItems.filter((item) => auditFilterMatches(item, auditFilter));
   const selectedAuditFinding = auditItems.find((item) => item.findingId === selectedAuditFindingId) ?? filteredAuditItems[0] ?? null;
+  const reviewIsInProgress = runningReview || reviewProgress?.status === "running";
+  const reviewMemoryPill = checkingReviewProgress
+    ? t("review.checkingProgressPill")
+    : reviewIsInProgress
+      ? t("review.reviewRunningPill")
+      : reviewProgress?.status === "failed"
+        ? t("review.reviewFailedPill")
+        : reviewFindings.length
+          ? t("review.memoryBacked")
+          : t("review.noMemoryBacked");
 
   return (
     <section className="review-queue-layout" aria-labelledby="review-queue-title">
@@ -140,7 +330,10 @@ export function ReviewQueuePage({
           <button className="secondary-action" type="button" onClick={chooseProjectRoot}>
             {t("review.browse")}
           </button>
-          <button className="primary-action" type="button" disabled={!projectRoot} onClick={loadQueue}>
+          <button className="primary-action" type="button" disabled={!projectRoot || runningReview} onClick={() => void runReview()}>
+            {runningReview ? t("review.running") : t("review.runEngineeringReview")}
+          </button>
+          <button className="secondary-action" type="button" disabled={!projectRoot || runningReview} onClick={() => void loadQueue()}>
             {t("review.refresh")}
           </button>
         </div>
@@ -150,90 +343,133 @@ export function ReviewQueuePage({
         </label>
         <div className="review-boundary-note">
           <div>
-            <strong>{t("review.internalModelConfig")}</strong>
-            <span>{t("review.internalModelConfigCopy")}</span>
+            <strong>{t("review.memoryFirst")}</strong>
+            <span>{t("review.memoryFirstCopy")}</span>
           </div>
           <div>
-            <strong>{t("review.externalResultQueue")}</strong>
-            <span>{t("review.externalResultQueueCopy")}</span>
+            <strong>{t("review.candidateBoundary")}</strong>
+            <span>{t("review.candidateBoundaryCopy")}</span>
           </div>
         </div>
+        {runningReview || reviewProgress ? <ReviewProgressStrip progress={reviewProgress} /> : null}
         {status ? <p className="status-text">{status}</p> : null}
         {error ? <p className="error-text">{error}</p> : null}
       </section>
 
-      <section className="panel review-queue-summary" aria-label={t("review.summary")}>
-        <MetricCard label={t("review.total")} value={queue?.counts.total ?? 0} />
-        <MetricCard label={t("review.memorySuggestions")} value={queue?.counts.memorySuggestions ?? 0} />
-        <MetricCard label={t("review.findingStatusPatches")} value={queue?.counts.findingStatusPatches ?? 0} />
-      </section>
-
-      {foundation ? <FoundationReviewPanel foundation={foundation} /> : null}
-
-      <section className="panel review-queue-column" aria-labelledby="review-memory-title">
+      <section className="panel review-problem-board" aria-labelledby="review-problem-title">
         <div className="panel-heading">
           <div>
-            <h2 id="review-memory-title">{t("review.memorySuggestions")}</h2>
-            <p className="muted-copy">{t("review.memoryCopy")}</p>
+            <p className="eyebrow">{t("review.problemEyebrow")}</p>
+            <h2 id="review-problem-title">{t("review.problemTitle")}</h2>
+            <p className="muted-copy">{t("review.problemCopy")}</p>
           </div>
-          <span className="pill">{queue?.memorySuggestions.length ?? 0}</span>
+          <span className="pill">{reviewMemoryPill}</span>
         </div>
-        <div className="review-card-list">
-          {queue?.memorySuggestions.map((item) => (
-            <MemorySuggestionCard
-              key={item.id}
-              item={item}
-              accepting={accepting?.kind === "memory" && accepting.id === item.id}
-              onAccept={() => void acceptMemory(item)}
-            />
-          ))}
-          {queue && !queue.memorySuggestions.length ? <EmptyQueue message={t("review.noMemorySuggestions")} /> : null}
-        </div>
-      </section>
-
-      <section className="panel review-queue-column" aria-labelledby="review-finding-title">
-        <div className="panel-heading">
-          <div>
-            <h2 id="review-finding-title">{t("review.findingStatusPatches")}</h2>
-            <p className="muted-copy">{t("review.findingCopy")}</p>
-          </div>
-          <span className="pill">{queue?.findingStatusPatches.length ?? 0}</span>
-        </div>
-        <div className="review-card-list">
-          {queue?.findingStatusPatches.map((item) => (
-            <FindingStatusCard
-              key={item.id}
-              item={item}
-              accepting={accepting?.kind === "finding" && accepting.id === item.id}
-              onAccept={() => void acceptFinding(item)}
-            />
-          ))}
-          {queue && !queue.findingStatusPatches.length ? <EmptyQueue message={t("review.noFindingPatches")} /> : null}
-        </div>
-      </section>
-
-      {!projectRoot ? (
-        <section className="panel review-queue-empty">
+        {!projectRoot ? (
           <EmptyQueue message={t("review.noProject")} />
-        </section>
-      ) : !hasItems && queue ? (
-        <section className="panel review-queue-empty">
-          <EmptyQueue message={includeAccepted ? t("review.noItemsWithAccepted") : t("review.noExternalItemsButFoundationReady")} />
-        </section>
-      ) : null}
+        ) : checkingReviewProgress ? (
+          <ReviewLockedPanel progress={reviewProgress} checking={checkingReviewProgress} />
+        ) : queue && !reviewFindings.length ? (
+          <ReviewCategoryPanel
+            category={activeReviewCategory}
+            evaluatorName={activeEvaluator?.evaluator.name}
+            evaluatorSummary={activeEvaluator?.summary}
+            categoryState={activeCategoryState}
+            findings={activeCategoryFindings}
+            allFindings={displayReviewFindings}
+            categoryStates={categoryStates}
+            onSelectCategory={setActiveReviewCategory}
+            onRetryCategory={(category) => void retryReviewCategory(category)}
+            retryingCategory={retryingCategory}
+            reviewIsInProgress={reviewIsInProgress}
+            onOpenProjectionAnchor={onOpenProjectionAnchor}
+            onOpenAssistantDraft={openFindingInAssistant}
+            onRefreshFinding={(finding) => void refreshFinding(finding)}
+            refreshingFindingId={refreshingFindingId}
+          />
+        ) : (
+          <ReviewCategoryPanel
+            category={activeReviewCategory}
+            evaluatorName={activeEvaluator?.evaluator.name}
+            evaluatorSummary={activeEvaluator?.summary}
+            categoryState={activeCategoryState}
+            findings={activeCategoryFindings}
+            allFindings={displayReviewFindings}
+            categoryStates={categoryStates}
+            onSelectCategory={setActiveReviewCategory}
+            onRetryCategory={(category) => void retryReviewCategory(category)}
+            retryingCategory={retryingCategory}
+            reviewIsInProgress={reviewIsInProgress}
+            onOpenProjectionAnchor={onOpenProjectionAnchor}
+            onOpenAssistantDraft={openFindingInAssistant}
+            onRefreshFinding={(finding) => void refreshFinding(finding)}
+            refreshingFindingId={refreshingFindingId}
+          />
+        )}
+      </section>
 
-      <section className="panel review-audit-panel" aria-labelledby="review-audit-title">
+      {externalItems ? <section className="panel review-governance-panel" aria-labelledby="review-governance-title">
+        <div className="panel-heading">
+          <div>
+            <h2 id="review-governance-title">{t("review.governanceTitle")}</h2>
+            <p className="muted-copy">{t("review.governanceCopy")}</p>
+          </div>
+          <span className="pill">{externalItems ? t("review.pendingGovernance") : t("review.noPendingGovernance")}</span>
+        </div>
+        <div className="review-governance-grid">
+          <section className="review-queue-column" aria-labelledby="review-memory-title">
+            <div className="panel-heading tight">
+              <div>
+                <h3 id="review-memory-title">{t("review.memorySuggestions")}</h3>
+                <p className="muted-copy">{t("review.memoryCopy")}</p>
+              </div>
+            </div>
+            <div className="review-card-list">
+              {queue?.memorySuggestions.map((item) => (
+                <MemorySuggestionCard
+                  key={item.id}
+                  item={item}
+                  accepting={accepting?.kind === "memory" && accepting.id === item.id}
+                  onAccept={() => void acceptMemory(item)}
+                />
+              ))}
+              {queue && !queue.memorySuggestions.length ? <EmptyQueue message={t("review.noMemorySuggestions")} /> : null}
+            </div>
+          </section>
+
+          <section className="review-queue-column" aria-labelledby="review-finding-title">
+            <div className="panel-heading tight">
+              <div>
+                <h3 id="review-finding-title">{t("review.findingStatusPatches")}</h3>
+                <p className="muted-copy">{t("review.findingCopy")}</p>
+              </div>
+            </div>
+            <div className="review-card-list">
+              {queue?.findingStatusPatches.map((item) => (
+                <FindingStatusCard
+                  key={item.id}
+                  item={item}
+                  accepting={accepting?.kind === "finding" && accepting.id === item.id}
+                  onAccept={() => void acceptFinding(item)}
+                />
+              ))}
+              {queue && !queue.findingStatusPatches.length ? <EmptyQueue message={t("review.noFindingPatches")} /> : null}
+            </div>
+          </section>
+        </div>
+      </section> : null}
+
+      {queue?.foundation && (queue.foundation.status !== "foundation_ready" || queue.foundation.nextActions.length)
+        ? <FoundationStatusStrip status={queue.foundation.status} nextActions={queue.foundation.nextActions} />
+        : null}
+
+      {audit?.counts.findings ? <section className="panel review-audit-panel" aria-labelledby="review-audit-title">
         <div className="panel-heading">
           <div>
             <h2 id="review-audit-title">{t("review.auditTitle")}</h2>
             <p className="muted-copy">{t("review.auditCopy")}</p>
           </div>
-          <span className="pill">{audit?.counts.findings ?? 0}</span>
-        </div>
-        <div className="review-audit-summary">
-          <MetricCard label={t("review.auditDetected")} value={audit?.counts.currentlyDetected ?? 0} />
-          <MetricCard label={t("review.auditHistorical")} value={audit?.counts.historicalOnly ?? 0} />
-          <MetricCard label={t("review.auditAcceptedEvents")} value={audit?.counts.acceptedHistoryEvents ?? 0} />
+          <span className="pill">{audit?.counts.findings ? t("review.auditHasHistory") : t("review.auditNoHistory")}</span>
         </div>
         <div className="review-filter-row" aria-label={t("review.auditFilter")}>
           {(["all", "detected", "reopened", "disappeared", "historical"] as AuditFilter[]).map((filter) => (
@@ -259,164 +495,327 @@ export function ReviewQueuePage({
           {audit && !filteredAuditItems.length ? <EmptyQueue message={t("review.noAudit")} /> : null}
         </div>
         {selectedAuditFinding ? <FindingAuditDetail item={selectedAuditFinding} onOpenProjectionAnchor={onOpenProjectionAnchor} /> : null}
-      </section>
+      </section> : null}
     </section>
   );
 }
 
-function MetricCard({ label, value }: { label: string; value: number }) {
+function ReviewLockedPanel({ progress, checking }: { progress: RuntimeReviewProgress | null; checking: boolean }) {
+  const { t } = useI18n();
+  const failed = progress?.status === "failed";
   return (
-    <div className="review-metric">
-      <span>{label}</span>
-      <strong>{value}</strong>
+    <section className="review-locked-panel" aria-labelledby="review-locked-title">
+      <div className="review-locked-copy">
+        <h3 id="review-locked-title">
+          {failed ? t("review.failedLockedTitle") : checking ? t("review.checkingProgressTitle") : t("review.inProgressLockedTitle")}
+        </h3>
+        <p>{failed ? t("review.failedLockedCopy") : checking ? t("review.checkingProgressCopy") : t("review.inProgressLockedCopy")}</p>
+      </div>
+      <ReviewProgressStrip progress={progress} />
+      {progress?.error ? <p className="error-text">{progress.error}</p> : null}
+      <p className="muted-copy">{failed ? t("review.failedLockedMemory") : t("review.inProgressLockedMemory")}</p>
+    </section>
+  );
+}
+
+function ReviewCategoryTabs({
+  activeCategory,
+  findings,
+  categoryStates,
+  onSelect
+}: {
+  activeCategory: RuntimeReviewCategory;
+  findings: RuntimeReviewFinding[];
+  categoryStates: Record<RuntimeReviewCategory, ReviewCategoryState>;
+  onSelect: (category: RuntimeReviewCategory) => void;
+}) {
+  const { t } = useI18n();
+  return (
+    <div className="review-category-tabs" role="tablist" aria-label={t("review.categoryTabs")}>
+      {reviewCategoryOrder.map((category) => {
+        const categoryFindings = findings.filter((finding) => finding.category === category);
+        const highestSeverity = highestSeverityForFindings(categoryFindings);
+        const state = categoryStates[category];
+        return (
+          <button
+            key={category}
+            className={activeCategory === category ? "review-category-tab active" : "review-category-tab"}
+            type="button"
+            role="tab"
+            aria-selected={activeCategory === category}
+            onClick={() => onSelect(category)}
+          >
+            <span>{categoryLabel(t, category)}</span>
+            <small>
+              {highestSeverity
+                ? t("review.categoryHasFindings", { severity: highestSeverity })
+                : t(categoryStateLabelKey(state))}
+            </small>
+          </button>
+        );
+      })}
     </div>
   );
 }
 
-function FoundationReviewPanel({ foundation }: { foundation: RuntimeFoundationReviewStatus }) {
+function ReviewProgressStrip({ progress }: { progress: RuntimeReviewProgress | null }) {
   const { t } = useI18n();
-  const artifacts = foundation.artifacts;
-  const statusLabel =
-    foundation.status === "foundation_ready"
-      ? t("review.foundationReady")
-      : foundation.status === "understanding_pending"
-        ? t("review.foundationUnderstandingPending")
-        : foundation.status === "needs_intake"
-          ? t("review.foundationNeedsIntake")
-          : foundation.status === "not_initialized"
-            ? t("review.foundationNotInitialized")
-            : foundation.status;
+  const total = progress?.totalCategories ?? reviewCategoryOrder.length;
+  const completed = progress?.completedCategories ?? 0;
+  const percent = total > 0 ? Math.round((completed / total) * 100) : 0;
+  const title =
+    progress?.status === "failed"
+      ? t("review.piAgentFailed")
+      : progress?.status === "completed"
+        ? t("review.piAgentCompleted")
+        : progress?.source === "pi-agent"
+          ? t("review.piAgentRunning")
+          : t("review.runningEngineeringReview");
   return (
-    <section className="panel review-foundation-panel" aria-labelledby="review-foundation-title">
-      <div className="panel-heading">
+    <div className="review-progress-strip">
+      <div>
+        <strong>{title}</strong>
+        <span>{progress?.message ?? t("review.waitingForPiProgress")}</span>
+      </div>
+      <div className="review-progress-meta">
+        <span>{completed}/{total}</span>
+        {progress?.currentEvaluator ? <span>{progress.currentEvaluator}</span> : null}
+        {progress?.findings ? <span>{t("review.progressFindings", { count: progress.findings })}</span> : null}
+      </div>
+      <div className="review-progress-bar" aria-label={t("review.progress")}>
+        <span style={{ width: `${percent}%` }} />
+      </div>
+    </div>
+  );
+}
+
+function ReviewCategoryPanel({
+  category,
+  evaluatorName,
+  evaluatorSummary,
+  categoryState,
+  findings,
+  allFindings,
+  categoryStates,
+  onSelectCategory,
+  onRetryCategory,
+  retryingCategory,
+  reviewIsInProgress,
+  onOpenProjectionAnchor,
+  onOpenAssistantDraft,
+  onRefreshFinding,
+  refreshingFindingId
+}: {
+  category: RuntimeReviewCategory;
+  evaluatorName?: string;
+  evaluatorSummary?: string;
+  categoryState: ReviewCategoryState;
+  findings: RuntimeReviewFinding[];
+  allFindings: RuntimeReviewFinding[];
+  categoryStates: Record<RuntimeReviewCategory, ReviewCategoryState>;
+  onSelectCategory: (category: RuntimeReviewCategory) => void;
+  onRetryCategory: (category: RuntimeReviewCategory) => void;
+  retryingCategory: RuntimeReviewCategory | null;
+  reviewIsInProgress: boolean;
+  onOpenProjectionAnchor?: (anchor: RuntimeGraphAnchor) => void;
+  onOpenAssistantDraft?: (finding: RuntimeReviewFinding) => void;
+  onRefreshFinding?: (finding: RuntimeReviewFinding) => void;
+  refreshingFindingId: string | null;
+}) {
+  const { t } = useI18n();
+  const retryingThisCategory = retryingCategory === category;
+  return (
+    <div className="review-category-workspace">
+      <ReviewCategoryTabs activeCategory={category} findings={allFindings} categoryStates={categoryStates} onSelect={onSelectCategory} />
+      <section className="review-category-panel" role="tabpanel" aria-labelledby={`review-category-${category}`}>
+        <div className="review-category-heading">
+          <div>
+            <h3 id={`review-category-${category}`}>{categoryLabel(t, category)}</h3>
+            <p className="muted-copy">{categoryCopy(t, category)}</p>
+          </div>
+          <div className="review-evaluator-chip">
+            <strong>{evaluatorName ?? t("review.evaluatorUnknown")}</strong>
+            <span>{evaluatorSummary ?? t("review.evaluatorFallbackSummary")}</span>
+            {categoryState === "failed" || retryingThisCategory ? (
+              <button
+                className="review-category-retry"
+                type="button"
+                disabled={reviewIsInProgress && !retryingThisCategory}
+                onClick={() => onRetryCategory(category)}
+              >
+                {retryingThisCategory ? t("review.retrying") : t("review.retryCategory")}
+              </button>
+            ) : null}
+          </div>
+        </div>
+        {findings.length ? (
+          <div className="review-severity-stack compact">
+            {severityOrder.map((severity) => {
+              const severityFindings = findings.filter((finding) => finding.severity === severity);
+              if (!severityFindings.length) return null;
+              return (
+                <ReviewSeveritySection
+                  key={severity}
+                  severity={severity}
+                  findings={severityFindings}
+                  onOpenProjectionAnchor={onOpenProjectionAnchor}
+                  onOpenAssistantDraft={onOpenAssistantDraft}
+                  onRefreshFinding={onRefreshFinding}
+                  refreshingFindingId={refreshingFindingId}
+                />
+              );
+            })}
+          </div>
+        ) : (
+          <EmptyQueue message={t(categoryEmptyMessageKey(categoryState))} />
+        )}
+      </section>
+    </div>
+  );
+}
+
+function ReviewSeveritySection({
+  severity,
+  findings,
+  onOpenProjectionAnchor,
+  onOpenAssistantDraft,
+  onRefreshFinding,
+  refreshingFindingId
+}: {
+  severity: RuntimeReviewSeverity;
+  findings: RuntimeReviewFinding[];
+  onOpenProjectionAnchor?: (anchor: RuntimeGraphAnchor) => void;
+  onOpenAssistantDraft?: (finding: RuntimeReviewFinding) => void;
+  onRefreshFinding?: (finding: RuntimeReviewFinding) => void;
+  refreshingFindingId: string | null;
+}) {
+  const { t } = useI18n();
+  return (
+    <section className={`review-severity-section severity-${severity.toLowerCase()}`} aria-labelledby={`review-${severity}`}>
+      <div className="review-severity-heading">
         <div>
-          <p className="eyebrow">{t("review.foundationEyebrow")}</p>
-          <h2 id="review-foundation-title">{t("review.foundationTitle")}</h2>
-          <p className="muted-copy">{t("review.foundationCopy")}</p>
+          <h3 id={`review-${severity}`}>{t(severityTitleKey(severity))}</h3>
+          <p className="muted-copy">{t(severityCopyKey(severity))}</p>
         </div>
-        <span className={foundation.status === "foundation_ready" ? "pill success" : "pill"}>{statusLabel}</span>
       </div>
-      <div className="review-foundation-grid">
-        <FoundationArtifactCard
-          title={t("review.repositorySnapshot")}
-          exists={artifacts.repositorySnapshot.exists}
-          path={artifacts.repositorySnapshot.path}
-          metrics={[{ label: t("review.files"), value: numberOrDash(artifacts.repositorySnapshot.files) }]}
-        />
-        <FoundationArtifactCard
-          title={t("review.codeFacts")}
-          exists={artifacts.codeFacts.exists}
-          path={artifacts.codeFacts.path}
-          subtitle={[
-            artifacts.codeFacts.provider?.source,
-            artifacts.codeFacts.provider?.capabilities?.length ? `${artifacts.codeFacts.provider.capabilities.length} ${t("review.capabilities")}` : undefined
-          ].filter(Boolean).join(" / ")}
-          metrics={[
-            { label: t("review.files"), value: numberOrDash(artifacts.codeFacts.files) },
-            { label: t("review.nodes"), value: numberOrDash(artifacts.codeFacts.nodes) },
-            { label: t("review.edges"), value: numberOrDash(artifacts.codeFacts.edges) },
-            { label: t("review.warnings"), value: numberOrDash(artifacts.codeFacts.warnings) }
-          ]}
-        />
-        <FoundationArtifactCard
-          title={t("review.projectProfile")}
-          exists={artifacts.projectProfile.exists}
-          path={artifacts.projectProfile.path}
-          subtitle={joinPreview([...artifacts.projectProfile.projectKinds, ...artifacts.projectProfile.languages, ...artifacts.projectProfile.frameworks])}
-          metrics={[
-            { label: t("review.languages"), value: artifacts.projectProfile.languages.length },
-            { label: t("review.frameworks"), value: artifacts.projectProfile.frameworks.length }
-          ]}
-        />
-        <FoundationArtifactCard
-          title={t("review.repositoryUnderstanding")}
-          exists={artifacts.repositoryUnderstanding.exists}
-          path={artifacts.repositoryUnderstanding.path}
-          subtitle={artifacts.repositoryUnderstanding.pendingAcceptance ? t("review.pendingAcceptance") : t("review.acceptedOrNoPending")}
-          metrics={[
-            { label: t("review.memoryPatches"), value: numberOrDash(artifacts.repositoryUnderstanding.memoryPatches) },
-            { label: t("review.questions"), value: numberOrDash(artifacts.repositoryUnderstanding.reviewQuestions) },
-            { label: t("review.warnings"), value: numberOrDash(artifacts.repositoryUnderstanding.warnings) }
-          ]}
-        />
-        <FoundationArtifactCard
-          title={t("review.factMemory")}
-          exists={artifacts.factMemory.exists}
-          path={artifacts.factMemory.path}
-          metrics={[{ label: t("review.records"), value: numberOrDash(artifacts.factMemory.records) }]}
-        />
-        <FoundationArtifactCard
-          title={t("review.architectureModel")}
-          exists={artifacts.architectureModel.exists}
-          path={artifacts.architectureModel.path}
-          metrics={[
-            { label: t("review.modules"), value: numberOrDash(artifacts.architectureModel.modules) },
-            { label: t("review.dependencies"), value: numberOrDash(artifacts.architectureModel.dependencies) },
-            { label: t("review.warnings"), value: numberOrDash(artifacts.architectureModel.warnings) }
-          ]}
-        />
-        <FoundationArtifactCard
-          title={t("review.findings")}
-          exists={artifacts.findings.exists}
-          path={artifacts.findings.path}
-          subtitle={joinPreview(artifacts.findings.detectorIds)}
-          metrics={[{ label: t("review.findingsDetected"), value: numberOrDash(artifacts.findings.detected) }]}
-        />
-        <FoundationArtifactCard
-          title={t("review.projections")}
-          exists={artifacts.projections.exists}
-          path={artifacts.projections.path}
-          subtitle={joinPreview(artifacts.projections.kinds)}
-          metrics={[
-            { label: t("review.views"), value: numberOrDash(artifacts.projections.schemaValidViews) },
-            { label: t("review.freshViews"), value: numberOrDash(artifacts.projections.freshViews) },
-            { label: t("review.failedViews"), value: numberOrDash(artifacts.projections.failedViews) }
-          ]}
-        />
-      </div>
-      <div className="review-foundation-next">
-        <h3>{t("review.nextActions")}</h3>
-        <div className="review-next-action-list">
-          {foundation.nextActions.map((action) => (
-            <span key={action}>{action}</span>
-          ))}
-        </div>
+      <div className="review-card-list">
+        {findings.map((finding) => (
+          <ReviewFindingCard
+            key={finding.id}
+            finding={finding}
+            onOpenProjectionAnchor={onOpenProjectionAnchor}
+            onOpenAssistantDraft={onOpenAssistantDraft}
+            onRefreshFinding={onRefreshFinding}
+            refreshing={refreshingFindingId === finding.id}
+          />
+        ))}
+        {!findings.length ? <EmptyQueue message={t("review.noSeverityFindings")} /> : null}
       </div>
     </section>
   );
 }
 
-function FoundationArtifactCard({
-  title,
-  exists,
-  path,
-  subtitle,
-  metrics
+function ReviewFindingCard({
+  finding,
+  onOpenProjectionAnchor,
+  onOpenAssistantDraft,
+  onRefreshFinding,
+  refreshing
 }: {
-  title: string;
-  exists: boolean;
-  path?: string;
-  subtitle?: string;
-  metrics: Array<{ label: string; value: string | number }>;
+  finding: RuntimeReviewFinding;
+  onOpenProjectionAnchor?: (anchor: RuntimeGraphAnchor) => void;
+  onOpenAssistantDraft?: (finding: RuntimeReviewFinding) => void;
+  onRefreshFinding?: (finding: RuntimeReviewFinding) => void;
+  refreshing: boolean;
 }) {
   const { t } = useI18n();
+  const primaryAnchor = finding.affectedAnchors[0];
   return (
-    <article className={exists ? "review-foundation-card ready" : "review-foundation-card missing"}>
-      <div className="review-card-header">
-        <strong>{title}</strong>
-        <span className={exists ? "pill success" : "pill"}>{exists ? t("review.exists") : t("review.missing")}</span>
+    <article className={refreshing ? `review-finding-card severity-${finding.severity.toLowerCase()} is-refreshing` : `review-finding-card severity-${finding.severity.toLowerCase()}`} aria-busy={refreshing}>
+      <div className="review-finding-head">
+        <div className="review-finding-badges">
+          <span className="pill">{finding.severity}</span>
+          <span className="pill">{categoryLabel(t, finding.category)}</span>
+          {finding.evaluator ? <span className="pill">{finding.evaluator.name}</span> : null}
+          <span className="pill">{t(confidenceLabelKey(finding.confidence))}</span>
+          <span className="pill">{finding.status}</span>
+        </div>
+        <div className="review-finding-actions">
+          <button className="text-button" type="button" disabled={refreshing || !onOpenAssistantDraft} onClick={() => onOpenAssistantDraft?.(finding)}>
+            {t("review.coding")}
+          </button>
+          <button className="text-button" type="button" disabled={refreshing || !onRefreshFinding} onClick={() => onRefreshFinding?.(finding)}>
+            {refreshing ? t("review.findingThinkingShort") : t("review.refreshFinding")}
+          </button>
+          <button className="text-button" type="button" disabled={refreshing || !primaryAnchor || !onOpenProjectionAnchor} onClick={() => primaryAnchor ? onOpenProjectionAnchor?.(primaryAnchor) : undefined}>
+            {t("review.openAnchor")}
+          </button>
+        </div>
       </div>
-      {subtitle ? <p>{subtitle}</p> : null}
-      {path ? <small>{path}</small> : null}
-      <dl className="review-foundation-metrics">
-        {metrics.map((metric) => (
-          <div key={metric.label}>
-            <dt>{metric.label}</dt>
-            <dd>{metric.value}</dd>
+      {refreshing ? (
+        <div className="review-finding-thinking">
+          <span className="spinner" />
+          <span>{t("review.findingThinking")}</span>
+        </div>
+      ) : null}
+      <h4>{finding.title}</h4>
+      <p>{finding.summary}</p>
+      <div className="review-explanation-grid">
+        <div>
+          <strong>{t("review.whyItMatters")}</strong>
+          <span>{finding.whyItMatters}</span>
+        </div>
+        <div>
+          <strong>{t("review.suggestedAction")}</strong>
+          <span>{finding.suggestedAction}</span>
+        </div>
+      </div>
+      <details className="review-evidence-list">
+        <summary>{t("review.evidenceCount", { count: finding.evidence.length + finding.affectedAnchors.length })}</summary>
+        {finding.evidence.slice(0, 4).map((evidence, index) => (
+          <div className="review-evidence" key={`${finding.id}:evidence:${index}`}>
+            <span>{evidence.source}</span>
+            <p>{evidence.summary}</p>
+            {evidence.path ? <small>{evidence.path}</small> : null}
           </div>
         ))}
-      </dl>
+        {finding.affectedAnchors.length ? (
+          <div className="review-anchor-list">
+            {finding.affectedAnchors.slice(0, 6).map((anchor) => (
+              <button
+                key={`${anchor.kind}:${anchor.id}`}
+                className="review-anchor-chip"
+                type="button"
+                disabled={!onOpenProjectionAnchor || refreshing}
+                onClick={() => onOpenProjectionAnchor?.(anchor)}
+              >
+                {anchor.path ?? anchor.id}
+              </button>
+            ))}
+          </div>
+        ) : null}
+      </details>
     </article>
+  );
+}
+
+function FoundationStatusStrip({ status, nextActions }: { status: string; nextActions: string[] }) {
+  const { t } = useI18n();
+  return (
+    <section className="panel review-foundation-strip" aria-labelledby="review-foundation-title">
+      <div className="panel-heading tight">
+        <div>
+          <h2 id="review-foundation-title">{t("review.foundationTitle")}</h2>
+          <p className="muted-copy">{t("review.foundationCopy")}</p>
+        </div>
+        <span className={status === "foundation_ready" ? "pill success" : "pill"}>{foundationStatusLabel(t, status)}</span>
+      </div>
+      <div className="review-next-action-list">
+        {nextActions.map((action) => (
+          <span key={action}>{action}</span>
+        ))}
+      </div>
+    </section>
   );
 }
 
@@ -436,15 +835,11 @@ function MemorySuggestionCard({
         <span className="pill">MemorySuggestionPatch</span>
         <small>{item.acceptedAt ? t("review.acceptedAt", { time: formatDate(item.acceptedAt) }) : t("review.pending")}</small>
       </div>
-      <h3>{item.summary}</h3>
+      <h4>{item.summary}</h4>
       <dl className="review-meta-grid">
         <div>
           <dt>{t("review.sourceTask")}</dt>
           <dd>{item.sourceTaskId ?? "-"}</dd>
-        </div>
-        <div>
-          <dt>{t("review.records")}</dt>
-          <dd>{item.memoryPatchCount}</dd>
         </div>
         <div>
           <dt>{t("review.path")}</dt>
@@ -483,7 +878,7 @@ function FindingStatusCard({
         <span className="pill">FindingStatusPatch</span>
         <small>{item.acceptedAt ? t("review.acceptedAt", { time: formatDate(item.acceptedAt) }) : t("review.pending")}</small>
       </div>
-      <h3>{item.summary}</h3>
+      <h4>{item.summary}</h4>
       <dl className="review-meta-grid">
         <div>
           <dt>{t("review.finding")}</dt>
@@ -529,7 +924,7 @@ function FindingAuditCard({
         <span className="pill">{stateLabel(item.detectorState)}</span>
         <small>{item.currentlyDetected ? t("review.auditCurrentlyDetected") : t("review.auditHistoricalOnly")}</small>
       </div>
-      <h3>{item.currentTitle ?? item.findingId}</h3>
+      <h4>{item.currentTitle ?? item.findingId}</h4>
       {item.currentSummary ? <p className="review-rationale">{item.currentSummary}</p> : null}
       <dl className="review-meta-grid">
         <div>
@@ -552,15 +947,6 @@ function FindingAuditCard({
           <small>{latest.summary}</small>
         </div>
       ) : null}
-      <div className="review-audit-timeline">
-        {item.traces.slice(-3).map((trace) => (
-          <div key={trace.id}>
-            <span>{formatDate(trace.timestamp)}</span>
-            <strong>{trace.kind}</strong>
-            <small>{trace.summary}</small>
-          </div>
-        ))}
-      </div>
       <button className="text-button" type="button" onClick={onSelect}>
         {selected ? t("review.auditSelected") : t("review.auditViewDetails")}
       </button>
@@ -662,8 +1048,131 @@ function EmptyQueue({ message }: { message: string }) {
   );
 }
 
+function categoryLabel(t: (key: ReviewTranslationKey) => string, category: RuntimeReviewCategory): string {
+  return t(categoryLabelKey(category));
+}
+
+function categoryCopy(t: (key: ReviewTranslationKey) => string, category: RuntimeReviewCategory): string {
+  return t(categoryCopyKey(category));
+}
+
+function foundationStatusLabel(t: (key: ReviewTranslationKey) => string, status: string): string {
+  if (status === "foundation_ready") return t("review.foundationReady");
+  if (status === "understanding_pending") return t("review.foundationUnderstandingPending");
+  if (status === "needs_intake") return t("review.foundationNeedsIntake");
+  if (status === "not_initialized") return t("review.foundationNotInitialized");
+  return status;
+}
+
 function stateLabel(value: string): string {
   return value.replaceAll("_", " ");
+}
+
+function normalizeReviewFindingDisplayCategory(finding: RuntimeReviewFinding): RuntimeReviewFinding {
+  if (finding.category !== "foundation_integrity") return finding;
+  return {
+    ...finding,
+    category: "documentation_knowledge",
+    evaluator: finding.evaluator
+      ? { ...finding.evaluator, category: "documentation_knowledge" }
+      : finding.evaluator
+  };
+}
+
+function buildFindingCodingDraft(finding: RuntimeReviewFinding, category: string): string {
+  const evidence = finding.evidence.slice(0, 5).map((item, index) => {
+    const path = item.path ? ` (${item.path})` : "";
+    return `${index + 1}. ${item.summary}${path}`;
+  });
+  const anchors = finding.affectedAnchors.slice(0, 8).map((anchor, index) => `${index + 1}. ${anchor.path ?? anchor.id}`);
+  return [
+    "请基于下面这条工程评审问题做整改。不要直接开始大范围重构，先确认问题是否仍存在，再给出最小修改计划。",
+    "",
+    `问题：${finding.title}`,
+    `分类：${category}`,
+    `严重程度：${finding.severity}`,
+    `当前状态：${finding.status}`,
+    "",
+    `问题描述：${finding.summary}`,
+    "",
+    `为什么重要：${finding.whyItMatters}`,
+    "",
+    `建议整改：${finding.suggestedAction}`,
+    evidence.length ? ["", "证据：", ...evidence].join("\n") : "",
+    anchors.length ? ["", "相关锚点：", ...anchors].join("\n") : "",
+    "",
+    "执行要求：",
+    "1. 先复查该问题是否仍存在，并说明证据。",
+    "2. 如果仍存在，给出最小可行整改计划。",
+    "3. 需要改代码时，说明将修改哪些文件、为什么改、如何验证。",
+    "4. 遵守 Praxis v0.1：Explain before Plan, Plan before Apply；不要自动提交。"
+  ].filter(Boolean).join("\n");
+}
+
+function sortFindingsForDisplay(findings: RuntimeReviewFinding[]): RuntimeReviewFinding[] {
+  const severityRank: Record<RuntimeReviewSeverity, number> = { P0: 0, P1: 1, P2: 2, P3: 3 };
+  const confidenceRank: Record<RuntimeReviewFinding["confidence"], number> = { high: 0, medium: 1, low: 2 };
+  return [...findings].sort((left, right) =>
+    severityRank[left.severity] - severityRank[right.severity]
+    || confidenceRank[left.confidence] - confidenceRank[right.confidence]
+    || left.title.localeCompare(right.title)
+  );
+}
+
+function evaluatorForCategory(queue: RuntimeReviewQueueResult | null, category: RuntimeReviewCategory) {
+  return queue?.qualityReview?.evaluatorResults?.find((result) => normalizeReviewCategory(result.evaluator.category) === category);
+}
+
+function buildCategoryStates(
+  progress: RuntimeReviewProgress | null,
+  queue: RuntimeReviewQueueResult | null,
+  findings: RuntimeReviewFinding[]
+): Record<RuntimeReviewCategory, ReviewCategoryState> {
+  const states = Object.fromEntries(reviewCategoryOrder.map((category) => [category, "empty"])) as Record<RuntimeReviewCategory, ReviewCategoryState>;
+  for (const finding of findings) states[finding.category] = "completed";
+  const evaluatorResults = progress?.evaluatorResults ?? queue?.qualityReview?.evaluatorResults ?? [];
+  for (const result of evaluatorResults) {
+    const category = normalizeReviewCategory(result.evaluator.category);
+    if (result.status === "failed") states[category] = "failed";
+    else if (result.status === "completed") states[category] = "completed";
+    else if (progress?.status === "running" && category === progress.currentCategory) states[category] = "running";
+    else if (progress?.status === "running") states[category] = "waiting";
+  }
+  if (progress?.status === "running") {
+    const completed = new Set((progress.evaluatorResults ?? [])
+      .filter((result) => result.status === "completed" || result.status === "failed")
+      .map((result) => normalizeReviewCategory(result.evaluator.category)));
+    for (const category of reviewCategoryOrder) {
+      if (category === progress.currentCategory) states[category] = "running";
+      else if (!completed.has(category) && states[category] === "empty") states[category] = "waiting";
+    }
+  }
+  if (progress?.status === "failed" && progress.currentCategory) states[progress.currentCategory] = "failed";
+  return states;
+}
+
+function normalizeReviewCategory(category: RuntimeReviewCategory): RuntimeReviewCategory {
+  return category === "foundation_integrity" ? "documentation_knowledge" : category;
+}
+
+function highestSeverityForFindings(findings: RuntimeReviewFinding[]): RuntimeReviewSeverity | undefined {
+  return severityOrder.find((severity) => findings.some((finding) => finding.severity === severity));
+}
+
+function categoryStateLabelKey(state: ReviewCategoryState): ReviewTranslationKey {
+  if (state === "completed") return "review.categoryCompleted";
+  if (state === "running") return "review.categoryRunning";
+  if (state === "waiting") return "review.categoryWaiting";
+  if (state === "failed") return "review.categoryFailed";
+  return "review.categoryClear";
+}
+
+function categoryEmptyMessageKey(state: ReviewCategoryState): ReviewTranslationKey {
+  if (state === "running") return "review.categoryRunningEmpty";
+  if (state === "waiting") return "review.categoryWaitingEmpty";
+  if (state === "failed") return "review.categoryFailedEmpty";
+  if (state === "completed") return "review.noCategoryFindings";
+  return "review.noReviewFindings";
 }
 
 function auditFilterMatches(item: RuntimeFindingAuditItem, filter: AuditFilter): boolean {
@@ -674,7 +1183,7 @@ function auditFilterMatches(item: RuntimeFindingAuditItem, filter: AuditFilter):
   return !item.currentlyDetected;
 }
 
-function auditFilterLabelKey(filter: AuditFilter) {
+function auditFilterLabelKey(filter: AuditFilter): ReviewTranslationKey {
   if (filter === "all") return "review.auditFilterAll";
   if (filter === "detected") return "review.auditFilterDetected";
   if (filter === "reopened") return "review.auditFilterReopened";
@@ -682,18 +1191,57 @@ function auditFilterLabelKey(filter: AuditFilter) {
   return "review.auditFilterHistorical";
 }
 
+type ReviewTranslationKey = Parameters<ReturnType<typeof useI18n>["t"]>[0];
+
+function severityTitleKey(severity: RuntimeReviewSeverity): ReviewTranslationKey {
+  if (severity === "P0") return "review.severity.P0.title";
+  if (severity === "P1") return "review.severity.P1.title";
+  if (severity === "P2") return "review.severity.P2.title";
+  return "review.severity.P3.title";
+}
+
+function severityCopyKey(severity: RuntimeReviewSeverity): ReviewTranslationKey {
+  if (severity === "P0") return "review.severity.P0.copy";
+  if (severity === "P1") return "review.severity.P1.copy";
+  if (severity === "P2") return "review.severity.P2.copy";
+  return "review.severity.P3.copy";
+}
+
+function confidenceLabelKey(confidence: RuntimeReviewFinding["confidence"]): ReviewTranslationKey {
+  if (confidence === "high") return "review.confidence.high";
+  if (confidence === "medium") return "review.confidence.medium";
+  return "review.confidence.low";
+}
+
+function categoryLabelKey(category: RuntimeReviewCategory): ReviewTranslationKey {
+  if (category === "foundation_integrity") return "review.category.foundation_integrity";
+  if (category === "architecture_boundaries") return "review.category.architecture_boundaries";
+  if (category === "dependencies_coupling") return "review.category.dependencies_coupling";
+  if (category === "build_release") return "review.category.build_release";
+  if (category === "testing_verification") return "review.category.testing_verification";
+  if (category === "security_secrets") return "review.category.security_secrets";
+  if (category === "configuration_environment") return "review.category.configuration_environment";
+  if (category === "code_quality_maintainability") return "review.category.code_quality_maintainability";
+  if (category === "api_contracts_data_flow") return "review.category.api_contracts_data_flow";
+  if (category === "performance_resources") return "review.category.performance_resources";
+  return "review.category.documentation_knowledge";
+}
+
+function categoryCopyKey(category: RuntimeReviewCategory): ReviewTranslationKey {
+  if (category === "foundation_integrity") return "review.categoryCopy.documentation_knowledge";
+  if (category === "architecture_boundaries") return "review.categoryCopy.architecture_boundaries";
+  if (category === "dependencies_coupling") return "review.categoryCopy.dependencies_coupling";
+  if (category === "build_release") return "review.categoryCopy.build_release";
+  if (category === "testing_verification") return "review.categoryCopy.testing_verification";
+  if (category === "security_secrets") return "review.categoryCopy.security_secrets";
+  if (category === "configuration_environment") return "review.categoryCopy.configuration_environment";
+  if (category === "code_quality_maintainability") return "review.categoryCopy.code_quality_maintainability";
+  if (category === "api_contracts_data_flow") return "review.categoryCopy.api_contracts_data_flow";
+  if (category === "performance_resources") return "review.categoryCopy.performance_resources";
+  return "review.categoryCopy.documentation_knowledge";
+}
+
 function formatDate(value: string): string {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
-}
-
-function numberOrDash(value: number | undefined): string | number {
-  return typeof value === "number" ? value.toLocaleString() : "-";
-}
-
-function joinPreview(values: string[]): string {
-  const filtered = values.filter(Boolean);
-  if (!filtered.length) return "";
-  const visible = filtered.slice(0, 5).join(" / ");
-  return filtered.length > 5 ? `${visible} +${filtered.length - 5}` : visible;
 }

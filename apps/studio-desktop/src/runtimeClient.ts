@@ -75,6 +75,95 @@ export interface RuntimeGraph {
   metadata?: Record<string, unknown>;
 }
 
+export interface RuntimeProjectProfile {
+  name: string;
+  root: string;
+  projectKinds: string[];
+  languages: string[];
+  frameworks: string[];
+  buildSystems: string[];
+  packageManagers: string[];
+  entrypoints: string[];
+  testFiles: string[];
+  testCommands: string[];
+  runCommands: string[];
+  buildCommands: string[];
+  moduleCandidates: {
+    id: string;
+    title: string;
+    path: string;
+    kind: string;
+    confidence: string;
+    evidence?: string[];
+  }[];
+  confidence: string;
+  evidence?: { id: string; summary: string; references: string[] }[];
+}
+
+export interface RuntimeArchitectureModel {
+  schemaVersion: "praxis.architectureModelPatch.v1";
+  root: string;
+  generatedAt: string;
+  modules: {
+    id: string;
+    name: string;
+    path: string;
+    role: string;
+    responsibilities?: string[];
+    sourceMemoryIds?: string[];
+    evidence?: unknown[];
+    confidence?: string;
+    knowledgeKind?: string;
+  }[];
+  dependencies: {
+    id: string;
+    sourceModuleId: string;
+    targetModuleId: string;
+    kind: string;
+    sourceMemoryIds?: string[];
+    evidence?: unknown[];
+    confidence?: string;
+    knowledgeKind?: string;
+  }[];
+  warnings?: { id: string; severity: string; summary: string }[];
+  confidence?: string;
+}
+
+export interface RuntimeMemoryRecord {
+  id: string;
+  kind: string;
+  type: string;
+  subject: string;
+  predicate: string;
+  object?: string;
+  value?: unknown;
+  summary: string;
+  evidence?: { source?: string; filePath: string; startLine?: number; endLine?: number; excerpt?: string }[];
+  source: string;
+  confidence: string;
+  status: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface RuntimeMemoryRecordSet {
+  facts: RuntimeMemoryRecord[];
+  inferences: RuntimeMemoryRecord[];
+  candidates: RuntimeMemoryRecord[];
+  confirmations: RuntimeMemoryRecord[];
+  decisions: RuntimeMemoryRecord[];
+  findings: RuntimeMemoryRecord[];
+}
+
+export interface RuntimeEngineeringSourceData {
+  profile?: RuntimeProjectProfile;
+  architecture?: RuntimeArchitectureModel;
+  codeFacts?: RuntimeCodeFactGraphSnapshot;
+  legacyGraph?: RuntimeGraph | null;
+  memory: RuntimeMemoryRecordSet;
+  readErrors: Record<string, string>;
+}
+
 export interface RuntimeNode {
   id: string;
   kind: string;
@@ -325,11 +414,168 @@ export interface RuntimeReviewQueueResult {
   counts: {
     memorySuggestions: number;
     findingStatusPatches: number;
+    qualityFindings: number;
     total: number;
   };
+  qualityReview?: RuntimeQualityReviewSummary;
+  reviewFindings: RuntimeReviewFinding[];
   foundation?: RuntimeFoundationReviewStatus;
   memorySuggestions: RuntimeMemorySuggestionReviewItem[];
   findingStatusPatches: RuntimeFindingStatusReviewItem[];
+}
+
+export interface RuntimeProjectTreeNode {
+  id: string;
+  name: string;
+  path: string;
+  kind: "directory" | "file";
+  children: RuntimeProjectTreeNode[];
+  fileCount: number;
+  directoryCount: number;
+  language?: string;
+  roleHint?: string;
+  lineCount?: number;
+  sizeBytes?: number;
+  truncated?: boolean;
+}
+
+export interface RuntimeProjectTreeResult {
+  ok: boolean;
+  generatedAt: string;
+  maxDepth: number;
+  maxEntries: number;
+  root: RuntimeProjectTreeNode;
+  totalFiles: number;
+  renderedEntries: number;
+  truncated: boolean;
+}
+
+export type RuntimeReviewSeverity = "P0" | "P1" | "P2" | "P3";
+
+export type RuntimeReviewCategory =
+  | "foundation_integrity"
+  | "architecture_boundaries"
+  | "dependencies_coupling"
+  | "build_release"
+  | "testing_verification"
+  | "security_secrets"
+  | "configuration_environment"
+  | "code_quality_maintainability"
+  | "api_contracts_data_flow"
+  | "performance_resources"
+  | "documentation_knowledge";
+
+export interface RuntimeQualityReviewSummary {
+  counts: {
+    total: number;
+    bySeverity: Record<RuntimeReviewSeverity, number>;
+    byCategory: Partial<Record<RuntimeReviewCategory, number>>;
+  };
+  generatedAt: string;
+  severityOrder: RuntimeReviewSeverity[];
+  categoryOrder: RuntimeReviewCategory[];
+  evaluatorResults?: {
+    evaluator: RuntimeReviewEvaluatorRef;
+    status: "completed" | "partial" | "failed";
+    findingIds: string[];
+    summary: string;
+  }[];
+}
+
+export interface RuntimeReviewEvidenceRef {
+  source: "repository_snapshot" | "code_fact_graph" | "memory" | "projection" | "trace" | "file" | "agent";
+  path?: string;
+  anchor?: RuntimeGraphAnchor;
+  summary: string;
+  excerpt?: string;
+}
+
+export interface RuntimeReviewEvaluatorRef {
+  id: string;
+  name: string;
+  category: RuntimeReviewCategory;
+  prompt: string;
+  source: "praxis-heuristic" | "pi-agent" | "hybrid";
+}
+
+export interface RuntimeReviewFinding {
+  schemaVersion: "praxis.reviewFinding.v1";
+  id: string;
+  runId: string;
+  category: RuntimeReviewCategory;
+  severity: RuntimeReviewSeverity;
+  status: "candidate" | "confirmed" | "dismissed" | "needs_more_evidence";
+  title: string;
+  summary: string;
+  whyItMatters: string;
+  suggestedAction: string;
+  confidence: "high" | "medium" | "low";
+  source: "scan" | "codegraph" | "agent" | "hybrid";
+  evaluator?: RuntimeReviewEvaluatorRef;
+  knowledgeKind: "CANDIDATE" | "INFERENCE";
+  evidence: RuntimeReviewEvidenceRef[];
+  affectedAnchors: RuntimeGraphAnchor[];
+  traceIds: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface RuntimeReviewRun {
+  schemaVersion: "praxis.reviewRun.v1";
+  id: string;
+  root: string;
+  generatedAt: string;
+  source: "praxis-heuristic" | "pi-agent" | "hybrid";
+  status: "completed" | "partial" | "failed";
+  categories: RuntimeReviewCategory[];
+  findingIds: string[];
+  evaluatorResults?: {
+    evaluator: RuntimeReviewEvaluatorRef;
+    status: "completed" | "partial" | "failed";
+    findingIds: string[];
+    summary: string;
+  }[];
+  summary: RuntimeQualityReviewSummary["counts"];
+  traceIds: string[];
+}
+
+export interface RuntimeReviewRunResult {
+  ok: boolean;
+  root: string;
+  run: RuntimeReviewRun;
+  findings: RuntimeReviewFinding[];
+  candidateMemoryRecords: number;
+  paths: {
+    run: string;
+    findings: string;
+    candidateMemory: string;
+  };
+}
+
+export interface RuntimeReviewProgress {
+  schemaVersion: "praxis.reviewProgress.v1";
+  runId: string;
+  root: string;
+  source: "pi-agent" | "praxis-heuristic";
+  scope?: "full" | "category";
+  retryCategory?: RuntimeReviewCategory;
+  retryOfRunId?: string;
+  status: "running" | "completed" | "failed";
+  startedAt: string;
+  updatedAt: string;
+  totalCategories: number;
+  completedCategories: number;
+  currentCategory?: RuntimeReviewCategory;
+  currentEvaluator?: string;
+  message: string;
+  findings: number;
+  error?: string;
+  evaluatorResults?: {
+    evaluator: RuntimeReviewEvaluatorRef;
+    status: "completed" | "partial" | "failed";
+    findingIds: string[];
+    summary: string;
+  }[];
 }
 
 export interface RuntimeFoundationReviewStatus {
@@ -673,6 +919,17 @@ export interface ModelSettings {
   edgeExplainModel: string;
   edgePlanModel: string;
   codingTaskModel: string;
+  piProvider: string;
+  piModel: string;
+  piThinking: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+  piTools: string;
+  piCodeGraph: boolean;
+  piAllowRead: boolean;
+  piAllowShell: boolean;
+  piAllowWrite: boolean;
+  piTimeoutMs: number;
+  reviewPiThinking: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+  reviewPiTimeoutMs: number;
 }
 
 export const defaultModelSettings: ModelSettings = {
@@ -683,7 +940,18 @@ export const defaultModelSettings: ModelSettings = {
   nodeExplainModel: "deepseek-v4-flash",
   edgeExplainModel: "deepseek-v4-pro",
   edgePlanModel: "deepseek-v4-pro",
-  codingTaskModel: "deepseek-v4-pro"
+  codingTaskModel: "deepseek-v4-pro",
+  piProvider: "deepseek",
+  piModel: "deepseek-v4-pro",
+  piThinking: "high",
+  piTools: "read,grep,find,ls,codegraph_query,codegraph_context,codegraph_relations,bash,edit,write",
+  piCodeGraph: true,
+  piAllowRead: true,
+  piAllowShell: true,
+  piAllowWrite: true,
+  piTimeoutMs: 300000,
+  reviewPiThinking: "high",
+  reviewPiTimeoutMs: 300000
 };
 
 const modelSettingsStorageKey = "praxis-studio:model-settings";
@@ -951,9 +1219,53 @@ export async function readReviewQueue(root: string, includeAccepted = false): Pr
   return JSON.parse(stdout) as RuntimeReviewQueueResult;
 }
 
+export async function runQualityReview(root: string, locale?: string, category?: RuntimeReviewCategory): Promise<RuntimeReviewRunResult> {
+  const args = ["--root", root];
+  if (category) args.push("--category", category);
+  if (locale) args.push("--locale", locale, "--response-language", locale === "zh-CN" ? "Simplified Chinese" : "English");
+  const stdout = await runRuntimeCommand("review-run", args);
+  return JSON.parse(stdout) as RuntimeReviewRunResult;
+}
+
+export async function refreshReviewFinding(
+  root: string,
+  findingId: string,
+  locale?: string
+): Promise<unknown> {
+  const args = ["--root", root, "--finding", findingId];
+  if (locale) args.push("--locale", locale, "--response-language", locale === "zh-CN" ? "Simplified Chinese" : "English");
+  const stdout = await runRuntimeCommand("review-finding-refresh", args);
+  return JSON.parse(stdout) as unknown;
+}
+
+export async function startQualityReview(root: string, locale?: string, category?: RuntimeReviewCategory): Promise<{ ok: boolean; pid: number }> {
+  const args = ["--root", root];
+  if (category) args.push("--category", category);
+  if (locale) args.push("--locale", locale, "--response-language", locale === "zh-CN" ? "Simplified Chinese" : "English");
+  const stdout = await runRuntimeCommandAsync("review-run", args);
+  return JSON.parse(stdout) as { ok: boolean; pid: number };
+}
+
+export async function readQualityReviewProgress(root: string): Promise<RuntimeReviewProgress | null> {
+  try {
+    const content = await invoke<string>("read_project_distinction_file", {
+      projectRoot: root,
+      relativePath: ".distinction/reviews/progress/latest.json"
+    });
+    return JSON.parse(content) as RuntimeReviewProgress;
+  } catch {
+    return null;
+  }
+}
+
 export async function readFindingAudit(root: string): Promise<RuntimeFindingAuditResult> {
   const stdout = await runRuntimeCommand("finding-audit", ["--root", root]);
   return JSON.parse(stdout) as RuntimeFindingAuditResult;
+}
+
+export async function readProjectTree(root: string): Promise<RuntimeProjectTreeResult> {
+  const stdout = await runRuntimeCommand("project-tree", ["--root", root, "--depth", "6", "--max-entries", "1400"]);
+  return JSON.parse(stdout) as RuntimeProjectTreeResult;
 }
 
 async function readDistinctionJson<T>(root: string, relativePath: string): Promise<T> {
@@ -999,8 +1311,99 @@ export async function readProjectedGraphViews(root: string): Promise<RuntimeProj
   return { manifest, records, skippedPaths };
 }
 
+export async function readEngineeringSourceData(root: string): Promise<RuntimeEngineeringSourceData> {
+  const readErrors: Record<string, string> = {};
+  const [profile, architecture, codeFacts, memory, legacyGraph] = await Promise.all([
+    readOptionalDistinctionJson<RuntimeProjectProfile>(root, ".distinction/cache/project-profile.json", readErrors, "projectProfile"),
+    readOptionalDistinctionJson<RuntimeArchitectureModel>(root, ".distinction/cache/architecture-model-patch.json", readErrors, "architectureModel"),
+    readOptionalDistinctionJson<RuntimeCodeFactGraphSnapshot>(root, ".distinction/cache/code-fact-graph.json", readErrors, "codeFacts"),
+    readMemoryRecordSet(root, readErrors),
+    readLegacyGraphFiles(root, readErrors)
+  ]);
+  return { profile, architecture, codeFacts, memory, legacyGraph, readErrors };
+}
+
+async function readOptionalDistinctionJson<T>(
+  root: string,
+  relativePath: string,
+  readErrors: Record<string, string>,
+  key: string
+): Promise<T | undefined> {
+  try {
+    return await readDistinctionJson<T>(root, relativePath);
+  } catch (error) {
+    readErrors[key] = error instanceof Error ? error.message : String(error);
+    return undefined;
+  }
+}
+
+async function readMemoryRecordSet(root: string, readErrors: Record<string, string>): Promise<RuntimeMemoryRecordSet> {
+  const entries = await Promise.all([
+    readMemoryRecordJsonl(root, "facts.jsonl", readErrors),
+    readMemoryRecordJsonl(root, "inferences.jsonl", readErrors),
+    readMemoryRecordJsonl(root, "candidates.jsonl", readErrors),
+    readMemoryRecordJsonl(root, "confirmations.jsonl", readErrors),
+    readMemoryRecordJsonl(root, "decisions.jsonl", readErrors),
+    readMemoryRecordJsonl(root, "findings.jsonl", readErrors)
+  ]);
+  return {
+    facts: entries[0],
+    inferences: entries[1],
+    candidates: entries[2],
+    confirmations: entries[3],
+    decisions: entries[4],
+    findings: entries[5]
+  };
+}
+
+async function readMemoryRecordJsonl(
+  root: string,
+  fileName: string,
+  readErrors: Record<string, string>
+): Promise<RuntimeMemoryRecord[]> {
+  const relativePath = `.distinction/memory/${fileName}`;
+  try {
+    const content = await invoke<string>("read_project_distinction_file", { projectRoot: root, relativePath });
+    return content
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .flatMap((line, index) => {
+        try {
+          return [JSON.parse(line) as RuntimeMemoryRecord];
+        } catch (error) {
+          readErrors[`memory:${fileName}:${index + 1}`] = error instanceof Error ? error.message : String(error);
+          return [];
+        }
+      });
+  } catch (error) {
+    readErrors[`memory:${fileName}`] = error instanceof Error ? error.message : String(error);
+    return [];
+  }
+}
+
+async function readLegacyGraphFiles(root: string, readErrors: Record<string, string>): Promise<RuntimeGraph | null> {
+  try {
+    const [nodes, edges] = await Promise.all([
+      invoke<string>("read_project_distinction_file", { projectRoot: root, relativePath: ".distinction/graph/nodes.json" }),
+      invoke<string>("read_project_distinction_file", { projectRoot: root, relativePath: ".distinction/graph/edges.json" })
+    ]);
+    return {
+      id: "graph:local",
+      title: "Development Graph",
+      rootPath: root,
+      nodes: JSON.parse(nodes) as RuntimeNode[],
+      edges: JSON.parse(edges) as RuntimeEdge[]
+    };
+  } catch (error) {
+    readErrors.legacyGraph = error instanceof Error ? error.message : String(error);
+    return null;
+  }
+}
+
 export async function refreshProjectedGraphViews(root: string): Promise<RuntimeProjectionViewsResult> {
-  const targets = ["architecture", "code-facts", "findings", "memory", "trace", "tasks"];
+  await runRuntimeCommand("intake", ["--root", root, "--provider", "codegraph"]);
+  const targets = ["code-facts", "architecture", "findings", "memory", "trace", "tasks"];
   for (const target of targets) {
     await runRuntimeCommand("project:view", [target, "--root", root]);
   }
@@ -1087,8 +1490,19 @@ export async function readGraph(root: string): Promise<RuntimeGraph> {
   }
 }
 
-interface RuntimeCodeFactGraphSnapshot {
+export interface RuntimeCodeFactGraphSnapshot {
   provider?: unknown;
+  files?: {
+    id: string;
+    path: string;
+    language: string;
+    extension?: string;
+    sizeBytes?: number;
+    lineCount?: number;
+    roleHint?: string;
+    nodeIds?: string[];
+    evidence?: unknown[];
+  }[];
   nodes?: {
     id: string;
     kind: string;
@@ -1097,6 +1511,9 @@ interface RuntimeCodeFactGraphSnapshot {
     filePath?: string;
     language?: string;
     range?: unknown;
+    signature?: string;
+    visibility?: "public" | "private" | "protected" | "internal";
+    docSummary?: string;
   }[];
   edges?: {
     id: string;
@@ -1106,7 +1523,17 @@ interface RuntimeCodeFactGraphSnapshot {
     confidence?: number;
     filePath?: string;
     range?: unknown;
+    evidence?: unknown[];
   }[];
+  statistics?: {
+    fileCount?: number;
+    nodeCount?: number;
+    edgeCount?: number;
+    filesByLanguage?: Record<string, number>;
+    nodesByKind?: Record<string, number>;
+    edgesByKind?: Record<string, number>;
+  };
+  warnings?: { id: string; severity: string; summary: string }[];
 }
 
 function minimalRuntimeFoundationGraph(root: string, description?: string): RuntimeGraph {
@@ -1447,6 +1874,20 @@ export function renderRuntimeRoutePreview(settings: ModelSettings): string {
     `    model: ${settings.codingTaskModel}`,
     "    reasoning: true",
     "    reasoning_effort: high",
+    "",
+    "pi_agent_engine:",
+    `  provider: ${settings.piProvider}`,
+    `  model: ${settings.piModel}`,
+    `  thinking: ${settings.piThinking}`,
+    `  codegraph: ${settings.piCodeGraph ? "enabled" : "disabled"}`,
+    `  tools: ${settings.piTools}`,
+    "  permissions:",
+    `    read: ${settings.piAllowRead ? "enabled" : "disabled"}`,
+    `    shell: ${settings.piAllowShell ? "enabled" : "disabled"}`,
+    `    write: ${settings.piAllowWrite ? "enabled" : "disabled"}`,
+    `  timeout_ms: ${settings.piTimeoutMs}`,
+    `  review_thinking: ${settings.reviewPiThinking}`,
+    `  review_timeout_ms: ${settings.reviewPiTimeoutMs}`,
     ""
   ].join("\n");
 }
@@ -1454,17 +1895,27 @@ export function renderRuntimeRoutePreview(settings: ModelSettings): string {
 export async function readAppModelSettings(): Promise<Partial<ModelSettings> | null> {
   if (hasTauriRuntime()) {
     const content = await invoke<string>("read_app_model_settings");
-    const settings = JSON.parse(content) as Partial<ModelSettings>;
-    if (Object.keys(settings).length) return settings;
+    const settings = JSON.parse(stripJsonBom(content)) as Partial<ModelSettings>;
+    if (Object.keys(settings).length) {
+      const normalized = normalizeModelSettings(settings);
+      if (!modelSettingsEqual(settings, normalized)) {
+        await invoke<void>("write_app_model_settings", { settingsJson: JSON.stringify(normalized) });
+      }
+      return normalized;
+    }
     const legacySettings = readLocalModelSettings();
     if (legacySettings) {
-      await invoke<void>("write_app_model_settings", { settingsJson: JSON.stringify(legacySettings) });
+      const normalizedLegacySettings = normalizeModelSettings(legacySettings);
+      await invoke<void>("write_app_model_settings", { settingsJson: JSON.stringify(normalizedLegacySettings) });
       window.localStorage.removeItem(modelSettingsStorageKey);
-      return legacySettings;
+      return normalizedLegacySettings;
     }
-    return settings;
+    const normalizedDefaultSettings = normalizeModelSettings(settings);
+    await invoke<void>("write_app_model_settings", { settingsJson: JSON.stringify(normalizedDefaultSettings) });
+    return normalizedDefaultSettings;
   }
-  return readLocalModelSettings();
+  const localSettings = readLocalModelSettings();
+  return localSettings ? normalizeModelSettings(localSettings) : null;
 }
 
 export async function readAppModelSettingsPath(): Promise<string | null> {
@@ -1488,5 +1939,29 @@ function hasTauriRuntime(): boolean {
 
 function readLocalModelSettings(): Partial<ModelSettings> | null {
   const content = window.localStorage.getItem(modelSettingsStorageKey);
-  return content ? (JSON.parse(content) as Partial<ModelSettings>) : null;
+  return content ? (JSON.parse(stripJsonBom(content)) as Partial<ModelSettings>) : null;
+}
+
+type StoredModelSettings = Partial<ModelSettings> & { apiKeyEnv?: string };
+
+function normalizeModelSettings(saved: StoredModelSettings): ModelSettings {
+  const { apiKeyEnv: legacyApiKeyEnv, ...savedSettings } = saved;
+  const apiKey = saved.apiKey || (legacyApiKeyEnv && looksLikeApiKey(legacyApiKeyEnv) ? legacyApiKeyEnv : "");
+  return {
+    ...defaultModelSettings,
+    ...savedSettings,
+    apiKey
+  };
+}
+
+function modelSettingsEqual(saved: Partial<ModelSettings>, normalized: ModelSettings): boolean {
+  return JSON.stringify(saved) === JSON.stringify(normalized);
+}
+
+function looksLikeApiKey(value: string): boolean {
+  return value.startsWith("sk-") || value.startsWith("sk_");
+}
+
+function stripJsonBom(content: string): string {
+  return content.charCodeAt(0) === 0xfeff ? content.slice(1) : content;
 }

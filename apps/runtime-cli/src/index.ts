@@ -1,6 +1,11 @@
 #!/usr/bin/env node
-import { appendFile, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { appendFile, mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { buildArchitectureModelPatch, type ArchitectureModelPatch } from "@praxis/architecture-modeler";
 import { buildCodeFactGraphSnapshot, type CodeFactProviderSource } from "@praxis/code-fact-graph";
 import { detectArchitectureFindings, type ArchitectureFindingReport } from "@praxis/finding-detector";
@@ -39,15 +44,26 @@ import {
   ProjectedGraphViewSchema,
   ProjectionManifestSchema,
   RepositoryUnderstandingPatchSchema,
+  ReviewFindingSchema,
+  ReviewCategorySchema,
+  ReviewRunSchema,
   TraceRecordSchema,
   type ArchitectureFinding,
+  type CodeFactEvidenceRef,
   type CodeFactGraphSnapshot,
   type ExternalAgentResult,
   type FindingStatusPatch,
+  type GraphAnchor,
   type MemoryRecord,
   type MemoryPatch,
   type MemorySuggestionPatch,
   type ProjectedGraphView,
+  type ReviewCategory,
+  type ReviewEvaluatorRef,
+  type ReviewEvidenceRef,
+  type ReviewFinding,
+  type ReviewRun,
+  type ReviewSeverity,
   type TraceRecord
 } from "@praxis/schema";
 import { generateDevelopmentGraphCandidate } from "@praxis/graph-generator";
@@ -93,12 +109,15 @@ import { isGraphPlan, type GraphPlan, type PlanAction } from "@praxis/plan-model
 import { loadModelConfig, resolveModelRoute } from "@praxis/model-router";
 import { createProvider } from "@praxis/provider-deepseek";
 import { getPrompt } from "@praxis/prompt-registry";
-import { AgentLoop, persistRun, type AgentConversationMessage, type AgentRun, type AgentStep } from "@praxis/agent-loop";
+import { AgentLoop, persistRun, type AgentConversationMessage, type AgentRun, type AgentStep, type AgentTerminalReason } from "@praxis/agent-loop";
 import { ToolRegistry } from "@praxis/tool-registry";
 import { registerAgentTools } from "@praxis/agent-loop/tools";
 import { startMcpServer } from "@praxis/mcp-server";
 
 type Args = Record<string, string | boolean>;
+type AgentEngineKind = "pi" | "legacy";
+type PiBuiltinToolName = "read" | "grep" | "find" | "ls" | "bash" | "edit" | "write";
+type PiThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
 
 interface JsonSchema<T> {
   parse(value: unknown): T;
@@ -131,6 +150,9 @@ async function main(argv: string[]): Promise<void> {
     if (command === "model-architecture") return await commandModelArchitecture(args);
     if (command === "detect-findings") return await commandDetectFindings(args);
     if (command === "review-queue") return await commandReviewQueue(args);
+    if (command === "review-run") return await commandReviewRun(args);
+    if (command === "review-finding-refresh") return await commandReviewFindingRefresh(args);
+    if (command === "project-tree") return await commandProjectTree(args);
     if (command === "finding-audit") return await commandFindingAudit(args);
     if (command === "accept-external-result") return await commandAcceptExternalResult(args);
     if (command === "accept-memory-suggestion") return await commandAcceptMemorySuggestion(args);
@@ -168,6 +190,32 @@ async function commandScan(args: Args): Promise<void> {
   const snapshot = await scanRepository({ root });
   await maybeWriteJson(args, "out", snapshot);
   outputJson({ ok: true, fileCount: snapshot.files.length, root: snapshot.root });
+}
+
+async function commandProjectTree(args: Args): Promise<void> {
+  const root = path.resolve(required(args, "root"));
+  const depth = Math.max(1, Math.min(numberArg(args, "depth") ?? 4, 8));
+  const maxEntries = Math.max(50, Math.min(numberArg(args, "max-entries") ?? 900, 5000));
+  const snapshotPath = path.join(root, ".distinction", "cache", "repository-snapshot.json");
+  const snapshot = await tryReadJsonFile(snapshotPath);
+  const fileEntries: ProjectTreeFileEntry[] = [];
+  if (isRecord(snapshot) && Array.isArray(snapshot.files)) {
+    for (const rawFile of snapshot.files) {
+      if (!isRecord(rawFile)) continue;
+      const filePath = optionalString(rawFile.path);
+      if (!filePath) continue;
+      fileEntries.push({
+        path: filePath,
+        language: optionalString(rawFile.language),
+        roleHint: optionalString(rawFile.roleHint),
+        lineCount: typeof rawFile.lineCount === "number" ? rawFile.lineCount : undefined,
+        sizeBytes: typeof rawFile.sizeBytes === "number" ? rawFile.sizeBytes : undefined
+      });
+    }
+  }
+  const tree = buildProjectTree(fileEntries, depth, maxEntries);
+  await maybeWriteJson(args, "out", tree);
+  outputJson(tree);
 }
 
 async function commandCodeFacts(args: Args): Promise<void> {
@@ -313,6 +361,12 @@ async function commandChat(args: Args): Promise<void> {
 }
 
 async function commandAgentRun(args: Args): Promise<void> {
+  const engine = resolveAgentEngineKind(args);
+  if (engine === "legacy") return await commandAgentRunLegacy(args);
+  return await commandAgentRunPi(args);
+}
+
+async function commandAgentRunLegacy(args: Args): Promise<void> {
   console.error("[agent-run] Starting agent run...");
   const projectRoot = required(args, "project-root");
   const graph = await readRuntimeDevelopmentGraph(projectRoot);
@@ -483,6 +537,295 @@ async function commandAgentRun(args: Args): Promise<void> {
   });
 }
 
+async function commandAgentRunPi(args: Args): Promise<void> {
+  console.error("[agent-run] Starting Pi agent run...");
+  const projectRoot = path.resolve(required(args, "project-root"));
+  const graph = await readRuntimeDevelopmentGraph(projectRoot);
+  const target = chatTargetFromArgs(args);
+  const instruction = String(args.instruction ?? args.message ?? "Explain the selected target.");
+  const mode = (args.mode === "plan" ? "plan" : "explain") as "explain" | "plan";
+  const requestedTools = resolvePiToolAllowlist(args);
+  const requestedSessionId = typeof args.session === "string" ? args.session : undefined;
+  const existingSession = requestedSessionId ? await readSession(projectRoot, requestedSessionId) : undefined;
+  const session = existingSession ?? await createSessionForTarget(projectRoot, target, {
+    title: sessionTitleForTarget(graph, target),
+    mode: chatModeFromArgs(args)
+  });
+  const priorMessages = await readMessages(projectRoot, session.id);
+
+  await appendMessage(projectRoot, {
+    sessionId: session.id,
+    role: "user",
+    content: instruction
+  });
+
+  const run = createExternalAgentRun({
+    projectRoot,
+    sessionId: session.id,
+    target: selectionTargetFromChatTarget(graph, target),
+    mode,
+    instruction,
+    engine: "pi"
+  });
+  const traceId = `trace:${run.id}`;
+
+  await appendAgentTrace(projectRoot, {
+    traceId,
+    kind: "agent.pi.started",
+    target: run.target,
+    summary: `Pi worker started for ${mode}.`,
+    data: {
+      sessionId: session.id,
+      target,
+      tools: requestedTools
+    }
+  });
+
+  const startStep = createExternalAgentStep(run, "command_result", {
+    toolName: "pi",
+    toolRiskLevel: "read",
+    toolStatus: "running",
+    toolInputSummary: `Pi worker starting in ${mode} mode. Tools: ${requestedTools.join(", ")}`,
+    toolOutputSummary: "Waiting for Pi to inspect the project and return a response."
+  });
+  run.steps.push(startStep);
+  await appendMessage(projectRoot, {
+    sessionId: session.id,
+    role: "tool",
+    content: `[running] pi: ${startStep.toolInputSummary}`,
+    toolCall: {
+      id: startStep.id,
+      name: "pi",
+      status: "running",
+      inputSummary: startStep.toolInputSummary ?? "Pi worker starting.",
+      outputSummary: startStep.toolOutputSummary,
+      riskLevel: "read"
+    },
+    structured: {
+      engine: "pi",
+      agentStep: startStep,
+      note: "This is the visible Pi worker process. Private model chain-of-thought is not exposed."
+    },
+    traceIds: [traceId, startStep.id]
+  });
+
+  try {
+    const seenPiToolIds = new Set<string>();
+    const piToolInputSummaries = new Map<string, string>();
+    const appendPiEvent = async (event: PiJsonEvent) => {
+      const toolView = piToolViewFromEvent(event);
+      if (!toolView) return;
+      const previousInputSummary = piToolInputSummaries.get(toolView.id);
+      if (previousInputSummary && toolView.inputSummary.trim() === `${toolView.name}:`) {
+        toolView.inputSummary = previousInputSummary;
+      }
+      if (toolView.inputSummary.trim() !== `${toolView.name}:`) {
+        piToolInputSummaries.set(toolView.id, toolView.inputSummary);
+      }
+      seenPiToolIds.add(toolView.id);
+      const eventStep = createExternalAgentStep(run, toolView.status === "success" || toolView.status === "failed" ? "tool_result" : "tool_call", {
+        toolName: toolView.name,
+        toolInput: piEventValue(event, "args"),
+        toolOutput: piEventValue(event, "result") ?? piEventValue(event, "partialResult"),
+        toolRiskLevel: toolView.riskLevel,
+        toolStatus: toolView.status,
+        toolInputSummary: toolView.inputSummary,
+        toolOutputSummary: toolView.outputSummary,
+        toolCallId: toolView.id
+      });
+      run.steps.push(eventStep);
+      await appendMessage(projectRoot, {
+        sessionId: session.id,
+        role: "tool",
+        content: `[${toolView.status}] ${toolView.name}: ${toolView.outputSummary ?? toolView.inputSummary}`,
+        toolCall: toolView,
+        structured: {
+          engine: "pi",
+          piEventType: event.type,
+          agentStep: eventStep,
+          visibleProcess: true,
+          note: "Observable Pi tool event. Private model chain-of-thought is not exposed."
+        },
+        traceIds: [traceId, toolView.id, eventStep.id]
+      });
+    };
+
+    const pi = await runPiWorker({
+      projectRoot,
+      graph,
+      target,
+      mode,
+      instruction,
+      priorMessages,
+      args,
+      traceId,
+      onEvent: appendPiEvent
+    });
+
+    const finalMessage = normalizePiFinalMessage(pi.stdout);
+    const commandStep = createExternalAgentStep(run, "command_result", {
+      commandLine: pi.commandLine,
+      commandStdout: summarizeForRun(pi.stdout, 6000),
+      commandStderr: summarizeForRun(pi.stderr, 3000),
+      commandExitCode: pi.exitCode,
+      toolName: "pi",
+      toolRiskLevel: "read",
+      toolStatus: "success",
+      toolOutputSummary: `Pi completed in ${Math.round(pi.durationMs / 1000)}s.`
+    });
+    run.steps.push(commandStep);
+
+    await appendMessage(projectRoot, {
+      sessionId: session.id,
+      role: "tool",
+      content: `[success] pi: ${commandStep.toolOutputSummary}`,
+      toolCall: {
+        id: startStep.id,
+        name: "pi",
+        status: "success",
+        inputSummary: summarizeForRun(pi.commandLine, 900),
+        outputSummary: `${commandStep.toolOutputSummary} Response: ${finalMessage.length} chars.`,
+        riskLevel: "read"
+      },
+      structured: {
+        engine: "pi",
+        agentStep: commandStep,
+        modelRoute: pi.modelRoute,
+        tools: pi.tools,
+        piEventCount: pi.eventCount,
+        piToolCalls: seenPiToolIds.size,
+        diagnostics: pi.diagnostics,
+        durationMs: pi.durationMs
+      },
+      traceIds: [traceId, startStep.id, commandStep.id]
+    });
+
+    const responseStep = createExternalAgentStep(run, "model_response", {
+      modelContent: finalMessage,
+      modelStructured: safeJson(finalMessage)
+    });
+    run.steps.push(responseStep);
+    finishExternalAgentRun(run, "completed", "completed");
+
+    await appendMessage(projectRoot, {
+      sessionId: session.id,
+      role: "assistant",
+      content: finalMessage,
+      structured: {
+        engine: "pi",
+        modelRoute: pi.modelRoute,
+        tools: pi.tools,
+        codegraphTools: isPiCodeGraphEnabled(args),
+        piEventCount: pi.eventCount,
+        piToolCalls: seenPiToolIds.size,
+        diagnostics: pi.diagnostics,
+        durationMs: pi.durationMs,
+        note: "Pi output is treated as CANDIDATE/INFERENCE until accepted by Praxis/user."
+      },
+      traceIds: [traceId, responseStep.id]
+    });
+
+    await appendAgentTrace(projectRoot, {
+      traceId,
+      kind: "agent.pi.completed",
+      target: run.target,
+      summary: `Pi worker completed with ${finalMessage.length} chars.`,
+      data: {
+        sessionId: session.id,
+        provider: pi.provider,
+        model: pi.model,
+        tools: pi.tools,
+        codegraphTools: isPiCodeGraphEnabled(args),
+        piEventCount: pi.eventCount,
+        piToolCalls: seenPiToolIds.size,
+        diagnostics: pi.diagnostics,
+        durationMs: pi.durationMs
+      }
+    });
+
+    console.error(`[agent-run] Pi run completed: status=${run.status}, steps=${run.steps.length}`);
+    const runPath = await persistRun(projectRoot, run);
+    outputJson({
+      ok: true,
+      engine: "pi",
+      sessionId: session.id,
+      runId: run.id,
+      runPath,
+      logPaths: agentLogPaths(projectRoot, session.id, runPath),
+      runStatus: run.status,
+      terminalReason: run.terminalReason,
+      transitions: run.transitions,
+      stepCount: run.steps.length,
+      finalMessage,
+      finalStructured: responseStep.modelStructured
+    });
+  } catch (error) {
+    const errorMessage = sanitizePiOutput(error instanceof Error ? error.message : String(error));
+    const errorStep = createExternalAgentStep(run, "error", { errorMessage });
+    run.steps.push(errorStep);
+    finishExternalAgentRun(run, "failed", isPromptTooLongMessage(errorMessage) ? "prompt_too_long" : "model_error", errorMessage);
+
+    await appendMessage(projectRoot, {
+      sessionId: session.id,
+      role: "tool",
+      content: `[failed] pi: ${errorMessage.slice(0, 600)}`,
+      toolCall: {
+        id: startStep.id,
+        name: "pi",
+        status: "failed",
+        inputSummary: startStep.toolInputSummary ?? "Pi worker failed.",
+        outputSummary: errorMessage.slice(0, 1200),
+        riskLevel: "read"
+      },
+      structured: {
+        engine: "pi",
+        agentStep: errorStep,
+        diagnostics: piFailureDiagnostics(errorMessage)
+      },
+      traceIds: [traceId, startStep.id, errorStep.id]
+    });
+
+    await appendMessage(projectRoot, {
+      sessionId: session.id,
+      role: "error",
+      content: piFailureMessage(errorMessage),
+      status: "failed",
+      structured: {
+        engine: "pi",
+        diagnostics: piFailureDiagnostics(errorMessage)
+      }
+    });
+
+    await appendAgentTrace(projectRoot, {
+      traceId,
+      kind: "agent.pi.failed",
+      target: run.target,
+      summary: `Pi worker failed: ${errorMessage.slice(0, 200)}`,
+      data: {
+        sessionId: session.id,
+        error: errorMessage
+      }
+    });
+
+    console.error(`[agent-run] Pi run failed: ${errorMessage}`);
+    const runPath = await persistRun(projectRoot, run);
+    outputJson({
+      ok: false,
+      engine: "pi",
+      sessionId: session.id,
+      runId: run.id,
+      runPath,
+      logPaths: agentLogPaths(projectRoot, session.id, runPath),
+      runStatus: run.status,
+      terminalReason: run.terminalReason,
+      transitions: run.transitions,
+      stepCount: run.steps.length,
+      finalMessage: piFailureMessage(errorMessage)
+    });
+    process.exitCode = 1;
+  }
+}
+
 async function commandChatSessionCreate(args: Args): Promise<void> {
   const projectRoot = required(args, "project-root");
   const graph = await readRuntimeDevelopmentGraph(projectRoot);
@@ -546,6 +889,919 @@ function chatHistoryContent(message: ChatMessage): string {
     sections.push(`Coding task ${message.task.id}: ${message.task.title}`);
   }
   return sections.filter(Boolean).join("\n\n");
+}
+
+interface PiWorkerRunOptions {
+  projectRoot: string;
+  graph: DevelopmentGraph;
+  target: ChatTarget;
+  mode: "explain" | "plan";
+  instruction: string;
+  priorMessages: ChatMessage[];
+  args: Args;
+  traceId: string;
+  onEvent?: (event: PiJsonEvent) => Promise<void> | void;
+}
+
+interface PiWorkerRunResult {
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+  durationMs: number;
+  commandLine: string;
+  provider: string;
+  model: string;
+  modelRoute: string;
+  tools: string[];
+  diagnostics: string[];
+  rawStdout?: string;
+  eventCount?: number;
+}
+
+type PiJsonEvent = Record<string, unknown> & { type?: string };
+
+interface PiRuntimeSettings {
+  provider?: string;
+  model?: string;
+  thinking?: PiThinkingLevel;
+  tools?: string;
+  codeGraph?: boolean;
+  allowRead?: boolean;
+  allowShell?: boolean;
+  allowWrite?: boolean;
+  timeoutMs?: number;
+  reviewThinking?: PiThinkingLevel;
+  reviewTimeoutMs?: number;
+}
+
+const defaultPiRuntimeSettings = {
+  provider: "deepseek",
+  model: "deepseek-v4-pro",
+  thinking: "high",
+  tools: "read,grep,find,ls,codegraph_query,codegraph_context,codegraph_relations,bash,edit,write",
+  codeGraph: true,
+  allowRead: true,
+  allowShell: true,
+  allowWrite: true,
+  timeoutMs: 300_000,
+  reviewThinking: "high",
+  reviewTimeoutMs: 300_000
+} satisfies Required<PiRuntimeSettings>;
+
+const piCodeGraphTools = new Set(["codegraph_query", "codegraph_context", "codegraph_relations"]);
+
+interface PiReviewPromptRunInput {
+  root: string;
+  args: Args;
+  runId: string;
+  category: ReviewCategory;
+  evaluator: ReviewEvaluatorRef;
+  prompt: string;
+  timeoutMs: number;
+}
+
+interface ResolvedPiCli {
+  cliPath: string;
+  source: string;
+  diagnostics: string[];
+}
+
+function resolveAgentEngineKind(args: Args): AgentEngineKind {
+  const raw = String(args.engine ?? process.env.PRAXIS_AGENT_ENGINE ?? "pi").trim().toLowerCase();
+  if (raw === "legacy" || raw === "praxis") return "legacy";
+  if (raw === "pi" || raw === "default") return "pi";
+  throw new Error(`Unsupported agent engine: ${raw}. Use "pi" or "legacy".`);
+}
+
+async function runPiWorker(options: PiWorkerRunOptions): Promise<PiWorkerRunResult> {
+  const piCli = await resolvePiCliPath(options.args);
+  const modelRoute = await resolvePiModelRoute(options.projectRoot, options.mode, options.target, options.args);
+  const tools = resolvePiToolAllowlist(options.args);
+  const prompt = buildPiWorkerPrompt(options);
+  const startedAt = Date.now();
+  const codeGraphExtension = isPiCodeGraphEnabled(options.args) ? resolvePiCodeGraphExtensionPath() : undefined;
+  let finalAssistantText = "";
+  const piArgs = [
+    piCli.cliPath,
+    "--mode",
+    "json",
+    "--offline",
+    "--provider",
+    modelRoute.provider,
+    "--model",
+    modelRoute.model,
+    "--thinking",
+    modelRoute.thinking,
+    "--system-prompt",
+    piSystemPrompt(),
+    "--no-session",
+    "--no-extensions",
+    ...(codeGraphExtension ? ["--extension", codeGraphExtension] : []),
+    "--tools",
+    tools.join(","),
+    "-p",
+    prompt
+  ];
+
+  const env = await piWorkerEnv(options.projectRoot, modelRoute.provider);
+  env.PRAXIS_PI_PROJECT_ROOT = options.projectRoot;
+  const diagnostics = piRuntimeDiagnostics(piCli, modelRoute, env);
+  let spawned: { stdout: string; stderr: string; exitCode: number; eventCount: number };
+  try {
+    spawned = await spawnStreamingJson(process.execPath, piArgs, {
+      cwd: options.projectRoot,
+      env,
+      timeoutMs: piTimeoutMsArg(options.args, ["pi-timeout-ms"], 180_000),
+      onJson: async (event) => {
+        const eventAssistantText = piAssistantTextFromEvent(event);
+        if (eventAssistantText) finalAssistantText = eventAssistantText;
+        await options.onEvent?.(event);
+      }
+    });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(formatPiFailureDetail(detail, diagnostics));
+  }
+
+  const cleanStdout = sanitizePiOutput(finalAssistantText);
+  const cleanStderr = sanitizePiOutput(spawned.stderr);
+  if (spawned.exitCode !== 0) {
+    const detail = [cleanStderr, cleanStdout, summarizeForRun(spawned.stdout, 3000)].filter(Boolean).join("\n\n").trim();
+    throw new Error(formatPiFailureDetail(detail || `Pi exited with code ${spawned.exitCode}.`, diagnostics));
+  }
+  if (!cleanStdout.trim()) {
+    throw new Error(formatPiFailureDetail("Pi completed without producing an assistant response. The JSON event stream did not contain a final assistant message.", diagnostics));
+  }
+
+  return {
+    stdout: cleanStdout,
+    stderr: cleanStderr,
+    exitCode: spawned.exitCode,
+    durationMs: Date.now() - startedAt,
+    commandLine: renderCommandLine(process.execPath, piArgs),
+    provider: modelRoute.provider,
+    model: modelRoute.model,
+    modelRoute: `${modelRoute.provider}/${modelRoute.model}`,
+    tools,
+    diagnostics,
+    rawStdout: spawned.stdout,
+    eventCount: spawned.eventCount
+  };
+}
+
+async function resolvePiCliPath(args: Args): Promise<ResolvedPiCli> {
+  const explicit = stringArg(args, "pi-cli") ?? process.env.PRAXIS_PI_CLI_PATH;
+  if (explicit) {
+    const cliPath = path.resolve(explicit);
+    if (await exists(cliPath)) {
+      return {
+        cliPath,
+        source: "explicit",
+        diagnostics: [`Pi CLI resolved from ${stringArg(args, "pi-cli") ? "--pi-cli" : "PRAXIS_PI_CLI_PATH"}: ${cliPath}`]
+      };
+    }
+    throw new Error(formatPiCliResolutionFailure([`Explicit Pi CLI path does not exist: ${cliPath}`]));
+  }
+
+  const attempts: string[] = [];
+  try {
+    const entry = fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"));
+    const cliPath = path.join(path.dirname(entry), "cli.js");
+    attempts.push(`ESM package export resolved to ${entry}; checking ${cliPath}`);
+    if (await exists(cliPath)) {
+      return {
+        cliPath,
+        source: "package-export",
+        diagnostics: [`Pi CLI resolved from ESM package export: ${cliPath}`]
+      };
+    }
+  } catch (error) {
+    attempts.push(`ESM package export failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  for (const cliPath of piCliCandidatePaths()) {
+    attempts.push(`Checking ${cliPath}`);
+    if (await exists(cliPath)) {
+      return {
+        cliPath,
+        source: "node-modules-candidate",
+        diagnostics: [`Pi CLI resolved from local node_modules: ${cliPath}`]
+      };
+    }
+  }
+
+  throw new Error(formatPiCliResolutionFailure(attempts));
+}
+
+async function resolvePiModelRoute(projectRoot: string, mode: "explain" | "plan", target: ChatTarget, args: Args) {
+  const settings = await loadPiRuntimeSettings();
+  const provider = stringArg(args, "pi-provider") ?? process.env.PRAXIS_PI_PROVIDER ?? settings.provider ?? "deepseek";
+  const explicitModel = stringArg(args, "pi-model") ?? process.env.PRAXIS_PI_MODEL ?? settings.model;
+  const config = await loadModelConfig(projectRoot);
+  const taskType = target.type === "edge"
+    ? (mode === "plan" ? "graph.edge.plan" : "graph.edge.explain")
+    : (mode === "plan" ? "graph.node.plan" : "graph.node.explain");
+  const route = resolveModelRoute(config, taskType);
+  const model = explicitModel ?? (route.provider === provider ? route.model : provider === "deepseek" ? route.model : undefined) ?? "deepseek-v4-pro";
+  return {
+    provider,
+    model,
+    thinking: piThinkingLevelArg(args, route.reasoningEffort, settings)
+  };
+}
+
+function resolvePiToolAllowlist(args: Args): string[] {
+  const settings = loadPiRuntimeSettingsSync();
+  const raw = stringArg(args, "pi-tools") ?? process.env.PRAXIS_PI_TOOLS ?? settings.tools;
+  const tools = normalizePiToolList(raw, isPiCodeGraphEnabled(args));
+  const denied = deniedPiTools(tools, settings);
+  if (denied.length) throw new Error(`Pi tool allowlist includes disabled tool(s): ${denied.join(", ")}. Enable the matching Pi permission in Model Settings first.`);
+  return tools.length ? tools : normalizePiToolList(defaultPiRuntimeSettings.tools, false);
+}
+
+function isPiCodeGraphEnabled(args: Args): boolean {
+  const settings = loadPiRuntimeSettingsSync();
+  const raw = stringArg(args, "pi-codegraph") ?? process.env.PRAXIS_PI_CODEGRAPH;
+  if (raw !== undefined) return raw !== "0" && raw !== "false" && raw !== "off";
+  return settings.codeGraph !== false;
+}
+
+function resolvePiCodeGraphExtensionPath(): string {
+  return path.join(path.dirname(fileURLToPath(import.meta.url)), "pi-codegraph-extension.js");
+}
+
+function piCliCandidatePaths(): string[] {
+  const runtimeDir = path.dirname(fileURLToPath(import.meta.url));
+  const cwd = process.cwd();
+  const candidates = [
+    path.resolve(runtimeDir, "..", "..", "..", "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js"),
+    path.resolve(runtimeDir, "..", "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js"),
+    path.resolve(cwd, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js")
+  ];
+  return Array.from(new Set(candidates));
+}
+
+function piRuntimeDiagnostics(piCli: ResolvedPiCli, route: { provider: string; model: string }, env: NodeJS.ProcessEnv): string[] {
+  const provider = route.provider;
+  const providerKey = provider.toUpperCase().replace(/[^A-Z0-9]+/g, "_");
+  const providerEnv = `${providerKey}_API_KEY`;
+  return [
+    ...piCli.diagnostics,
+    `Pi CLI source: ${piCli.source}`,
+    `Pi provider: ${provider}`,
+    `Pi model: ${route.model}`,
+    `Node executable: ${process.execPath}`,
+    `Node version: ${process.version}`,
+    `${providerEnv}: ${env[providerEnv] ? "present" : "missing"}`,
+    `PI_OFFLINE: ${env.PI_OFFLINE ?? "unset"}`,
+    `PI_TELEMETRY: ${env.PI_TELEMETRY ?? "unset"}`
+  ];
+}
+
+function formatPiCliResolutionFailure(attempts: string[]): string {
+  return [
+    "Pi engine is unavailable because the Pi CLI entrypoint could not be resolved.",
+    "",
+    "Praxis looked for @earendil-works/pi-coding-agent as the selected Agent Engine dependency, but did not find a runnable dist/cli.js.",
+    "This is a Praxis/Pi environment problem and is intentionally not hidden by falling back to the legacy AgentLoop.",
+    "",
+    "Diagnostics:",
+    ...attempts.map((attempt) => `- ${attempt}`),
+    "",
+    "Expected dependency: @earendil-works/pi-coding-agent",
+    "Recovery: run npm install from the Praxis Studio repository root, then rebuild runtime-cli and desktop."
+  ].join("\n");
+}
+
+function formatPiFailureDetail(detail: string, diagnostics: string[]): string {
+  return [
+    detail,
+    "",
+    "Pi runtime diagnostics:",
+    ...diagnostics.map((line) => `- ${line}`),
+    "",
+    "Praxis did not fall back to the legacy AgentLoop; Pi is the selected Agent Engine for this run."
+  ].join("\n");
+}
+
+function piSystemPrompt(): string {
+  return [
+    "You are Pi running as Praxis Studio's Agent Engine / Coding Worker.",
+    "",
+    "Praxis owns project graph, project memory, trace, progress, and permissions.",
+    "Use the enabled tools to inspect the repository as needed. Do not pretend a tool was used.",
+    "Do not expose private chain-of-thought. User-visible progress should be observable actions, tool calls, and concise status.",
+    "Answer in the user's language unless they explicitly request another language.",
+    "Treat repository observations as FACT. Treat conclusions as CANDIDATE/INFERENCE until Praxis/user confirms them.",
+    "When code changes are requested and write tools are enabled, make precise changes and summarize changed files and verification."
+  ].join("\n");
+}
+
+function piFailureDiagnostics(errorMessage: string): string[] {
+  const lines = errorMessage
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith("- "))
+    .map((line) => line.slice(2));
+  return lines.length ? lines : [errorMessage.slice(0, 1000)];
+}
+
+function loadPiRuntimeSettingsSync(): PiRuntimeSettings {
+  const settings = loadRuntimeSettingsRecordSync();
+  if (!settings) return { ...defaultPiRuntimeSettings };
+  return normalizePiRuntimeSettings(settings);
+}
+
+async function loadPiRuntimeSettings(): Promise<PiRuntimeSettings> {
+  const settings = await loadRuntimeSettingsRecord();
+  if (!settings) return { ...defaultPiRuntimeSettings };
+  return normalizePiRuntimeSettings(settings);
+}
+
+let cachedRuntimeSettings: Record<string, unknown> | null | undefined;
+
+function loadRuntimeSettingsRecordSync(): Record<string, unknown> | null {
+  if (cachedRuntimeSettings !== undefined) return cachedRuntimeSettings;
+  const inline = process.env.PRAXIS_MODEL_SETTINGS_JSON?.trim();
+  if (inline) {
+    cachedRuntimeSettings = safeJsonRecord(inline);
+    return cachedRuntimeSettings;
+  }
+  const configuredPath = process.env.PRAXIS_MODEL_SETTINGS_PATH?.trim();
+  for (const candidate of [configuredPath, path.join(os.homedir(), ".praxis-studio", "model-settings.json")].filter((item): item is string => Boolean(item))) {
+    try {
+      cachedRuntimeSettings = safeJsonRecord(requireNodeFsReadFileSync(candidate));
+      return cachedRuntimeSettings;
+    } catch (error) {
+      if (isMissingFileError(error)) continue;
+      throw error;
+    }
+  }
+  cachedRuntimeSettings = null;
+  return null;
+}
+
+async function loadRuntimeSettingsRecord(): Promise<Record<string, unknown> | null> {
+  return loadRuntimeSettingsRecordSync();
+}
+
+function requireNodeFsReadFileSync(filePath: string): string {
+  return readFileSync(filePath, "utf8");
+}
+
+function normalizePiRuntimeSettings(settings: Record<string, unknown>): PiRuntimeSettings {
+  const thinking = piThinkingSetting(settings.piThinking);
+  const reviewThinking = piThinkingSetting(settings.reviewPiThinking);
+  return {
+    provider: stringValue(settings.piProvider) ?? defaultPiRuntimeSettings.provider,
+    model: stringValue(settings.piModel) ?? defaultPiRuntimeSettings.model,
+    thinking: thinking ?? defaultPiRuntimeSettings.thinking,
+    tools: stringValue(settings.piTools) ?? defaultPiRuntimeSettings.tools,
+    codeGraph: booleanValue(settings.piCodeGraph) ?? defaultPiRuntimeSettings.codeGraph,
+    allowRead: booleanValue(settings.piAllowRead) ?? defaultPiRuntimeSettings.allowRead,
+    allowShell: booleanValue(settings.piAllowShell) ?? defaultPiRuntimeSettings.allowShell,
+    allowWrite: booleanValue(settings.piAllowWrite) ?? defaultPiRuntimeSettings.allowWrite,
+    timeoutMs: positiveNumberValue(settings.piTimeoutMs) ?? defaultPiRuntimeSettings.timeoutMs,
+    reviewThinking: reviewThinking ?? defaultPiRuntimeSettings.reviewThinking,
+    reviewTimeoutMs: positiveNumberValue(settings.reviewPiTimeoutMs) ?? defaultPiRuntimeSettings.reviewTimeoutMs
+  };
+}
+
+function normalizePiToolList(raw: string | undefined, includeCodeGraph: boolean): string[] {
+  const tools = (raw || defaultPiRuntimeSettings.tools)
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+  for (const tool of tools) {
+    if (!includeCodeGraph && piCodeGraphTools.has(tool)) continue;
+    if (seen.has(tool)) continue;
+    seen.add(tool);
+    normalized.push(tool);
+  }
+  return normalized;
+}
+
+function deniedPiTools(tools: string[], settings: PiRuntimeSettings): string[] {
+  const allowRead = settings.allowRead !== false;
+  const allowShell = settings.allowShell === true;
+  const allowWrite = settings.allowWrite === true;
+  const readTools = new Set(["read", "grep", "find", "ls", "codegraph_query", "codegraph_context", "codegraph_relations"]);
+  return tools.filter((tool) => {
+    if (readTools.has(tool)) return !allowRead;
+    if (tool === "bash") return !allowShell;
+    if (tool === "edit" || tool === "write") return !allowWrite;
+    return false;
+  });
+}
+
+function isPiThinkingLevel(value: unknown): value is PiThinkingLevel {
+  return value === "off" || value === "minimal" || value === "low" || value === "medium" || value === "high" || value === "xhigh";
+}
+
+function piThinkingSetting(value: unknown): PiThinkingLevel | undefined {
+  return isPiThinkingLevel(value) ? value : undefined;
+}
+
+function booleanValue(value: unknown): boolean | undefined {
+  if (typeof value === "boolean") return value;
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalized)) return true;
+  if (["0", "false", "no", "off"].includes(normalized)) return false;
+  return undefined;
+}
+
+function positiveNumberValue(value: unknown): number | undefined {
+  const parsed = typeof value === "number" ? value : typeof value === "string" && value.trim() ? Number(value) : undefined;
+  return parsed !== undefined && Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+function piThinkingLevelArg(args: Args, effort: "low" | "medium" | "high" | undefined, settings = loadPiRuntimeSettingsSync()): PiThinkingLevel {
+  const value = stringArg(args, "pi-thinking") ?? process.env.PRAXIS_PI_THINKING;
+  if (isPiThinkingLevel(value)) return value;
+  if (settings.thinking) return settings.thinking;
+  if (effort === "high") return "high";
+  if (effort === "low") return "low";
+  return "medium";
+}
+
+function piTimeoutMsArg(args: Args, keys: string[], fallbackMs: number): number {
+  for (const key of keys) {
+    const parsed = numberArg(args, key);
+    if (parsed === undefined) continue;
+    if (parsed < 1_000) throw new Error(`Invalid timeout for --${key}: ${parsed}. Timeout must be at least 1000ms.`);
+    return parsed;
+  }
+  return loadPiRuntimeSettingsSync().timeoutMs ?? fallbackMs;
+}
+
+function reviewPiTimeoutMsArg(args: Args, fallbackMs: number): number {
+  const direct = timeoutMsArg(args, ["review-pi-timeout-ms", "pi-timeout-ms"], -1);
+  if (direct !== -1) return direct;
+  return loadPiRuntimeSettingsSync().reviewTimeoutMs ?? loadPiRuntimeSettingsSync().timeoutMs ?? fallbackMs;
+}
+
+async function piWorkerEnv(projectRoot: string, provider: string): Promise<NodeJS.ProcessEnv> {
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    PI_OFFLINE: process.env.PI_OFFLINE ?? "1",
+    PI_TELEMETRY: process.env.PI_TELEMETRY ?? "0"
+  };
+  const config = await loadModelConfig(projectRoot);
+  const providerKey = provider.toUpperCase().replace(/[^A-Z0-9]+/g, "_");
+  const providerEnv = `${providerKey}_API_KEY`;
+  if (!env[providerEnv]) {
+    const providerConfig = config.providers[provider];
+    const configuredEnv = providerConfig?.apiKeyEnv?.trim();
+    if (configuredEnv && env[configuredEnv]) env[providerEnv] = env[configuredEnv];
+    if (!env[providerEnv] && providerConfig?.apiKey?.trim()) env[providerEnv] = providerConfig.apiKey.trim();
+  }
+  return env;
+}
+
+function buildPiWorkerPrompt(options: PiWorkerRunOptions): string {
+  const targetSummary = describeChatTarget(options.graph, options.target);
+  const graphSummary = summarizeGraphForWorker(options.graph, options.target);
+  const history = summarizeChatHistoryForWorker(options.priorMessages);
+  const enabledTools = resolvePiToolAllowlist(options.args);
+  const canShell = enabledTools.includes("bash");
+  const canWrite = enabledTools.includes("edit") || enabledTools.includes("write");
+  const modeInstruction = options.mode === "plan"
+    ? "Produce a candidate plan. Do not claim implementation was performed."
+    : "Explain the selected target using repo evidence. Do not produce an implementation plan unless the user explicitly asks.";
+  return [
+    "You are running as a Pi worker inside Praxis Studio.",
+    "",
+    "## Authority Boundary",
+    "- Pi owns operational repository exploration for this run: inspect AGENTS.md/CLAUDE.md, files, package metadata, and available read-only context as needed.",
+    "- Praxis owns Development Graph, Project Memory, Trace, permissions, progress, and confirmation.",
+    canWrite
+      ? "- Source writes are enabled by Praxis settings for this run. When the user explicitly asks for implementation, use edit/write precisely and report changed paths."
+      : "- Do not write, edit, delete, move, or generate files in this run because write tools are not enabled.",
+    canShell
+      ? "- Shell is enabled by Praxis settings for this run. Use it when it is the right tool; keep commands scoped to the project and report important output."
+      : "- Do not run shell commands because bash is not enabled. Use only the enabled read/codegraph tools.",
+    "- Treat direct repository observations as FACT evidence. Treat your conclusions as CANDIDATE or INFERENCE until Praxis/user confirms them.",
+    "- Existing source code must only be modified in response to an explicit user implementation/fix request and only through enabled tools.",
+    "- CodeGraph tools are optional read-only context tools. If CodeGraph reports an uninitialized index, fall back to read/grep/find.",
+    `- Enabled tools for this run: ${enabledTools.join(", ") || "(none)"}.`,
+    "- Answer in the user's language.",
+    "",
+    "## Current Praxis Target",
+    targetSummary,
+    "",
+    "## Graph Hint",
+    graphSummary,
+    "",
+    history ? `## Recent Chat\n${history}\n` : "",
+    "## Task",
+    modeInstruction,
+    "",
+    "User instruction:",
+    options.instruction
+  ].filter(Boolean).join("\n");
+}
+
+function describeChatTarget(graph: DevelopmentGraph, target: ChatTarget): string {
+  if (target.type === "project") return `Project: ${graph.title || path.basename(graph.rootPath ?? "")}`;
+  if (target.type === "node") {
+    const node = findNode(graph, target.id);
+    return [
+      `Node: ${target.id}`,
+      node?.title ? `Title: ${node.title}` : undefined,
+      node?.kind ? `Kind: ${node.kind}` : undefined,
+      node?.description ? `Description: ${node.description}` : undefined
+    ].filter(Boolean).join("\n");
+  }
+  if (target.type === "edge") {
+    const edge = findEdge(graph, target.id);
+    if (!edge) return `Edge: ${target.id}`;
+    const source = findNode(graph, edge.source);
+    const destination = findNode(graph, edge.target);
+    return [
+      `Edge: ${target.id}`,
+      `Kind: ${edge.kind}`,
+      edge.title ? `Title: ${edge.title}` : undefined,
+      `Source: ${edge.source}${source?.title ? ` (${source.title})` : ""}`,
+      `Target: ${edge.target}${destination?.title ? ` (${destination.title})` : ""}`,
+      edge.description ? `Description: ${edge.description}` : undefined
+    ].filter(Boolean).join("\n");
+  }
+  return `Subgraph: ${target.nodeIds.length} node(s), ${target.edgeIds.length} edge(s)`;
+}
+
+function summarizeGraphForWorker(graph: DevelopmentGraph, target: ChatTarget): string {
+  const selectedNodeIds = target.type === "node"
+    ? [target.id]
+    : target.type === "edge"
+      ? graph.edges.filter((edge) => edge.id === target.id).flatMap((edge) => [edge.source, edge.target])
+      : target.type === "subgraph"
+        ? target.nodeIds
+        : graph.nodes.slice(0, 12).map((node) => node.id);
+  const selected = new Set(selectedNodeIds);
+  const nodes = graph.nodes
+    .filter((node) => selected.has(node.id))
+    .slice(0, 16)
+    .map((node) => `- ${node.id}: ${node.title} [${node.kind}, ${node.knowledgeKind}]`);
+  const edges = graph.edges
+    .filter((edge) => selected.has(edge.source) || selected.has(edge.target) || (target.type === "edge" && edge.id === target.id))
+    .slice(0, 20)
+    .map((edge) => `- ${edge.id}: ${edge.source} --${edge.kind}--> ${edge.target} [${edge.knowledgeKind}]`);
+  return [
+    `Graph: ${graph.title || graph.id}`,
+    `Nodes: ${graph.nodes.length}; Edges: ${graph.edges.length}`,
+    nodes.length ? ["Selected/nearby nodes:", ...nodes].join("\n") : undefined,
+    edges.length ? ["Selected/nearby edges:", ...edges].join("\n") : undefined,
+    "This graph hint is not a complete context packet. Explore the repository yourself when needed."
+  ].filter(Boolean).join("\n");
+}
+
+function summarizeChatHistoryForWorker(messages: ChatMessage[]): string {
+  return messages
+    .filter((message) => message.role === "user" || message.role === "assistant")
+    .slice(-8)
+    .map((message) => `${message.role}: ${message.content.slice(0, 1200)}`)
+    .join("\n\n");
+}
+
+function createExternalAgentRun(input: {
+  projectRoot: string;
+  sessionId: string;
+  target: SelectionTarget;
+  mode: "explain" | "plan";
+  instruction: string;
+  engine: AgentEngineKind;
+}): AgentRun {
+  const runId = `run-${input.engine}-${Date.now()}-${randomUUID().slice(0, 8)}-${slug(input.instruction.slice(0, 40))}`;
+  return {
+    id: runId,
+    projectRoot: input.projectRoot,
+    sessionId: input.sessionId,
+    status: "running",
+    target: input.target,
+    mode: input.mode,
+    instruction: input.instruction,
+    steps: [],
+    transitions: [{ reason: "next_turn", timestamp: new Date().toISOString(), detail: `${input.engine} engine selected.` }],
+    startedAt: new Date().toISOString()
+  };
+}
+
+function createExternalAgentStep(run: AgentRun, kind: AgentStep["kind"], fields: Partial<AgentStep> = {}): AgentStep {
+  const sequence = run.steps.length + 1;
+  return {
+    id: `step-${run.id}-${String(sequence).padStart(3, "0")}`,
+    runId: run.id,
+    sequence,
+    timestamp: new Date().toISOString(),
+    kind,
+    ...fields
+  };
+}
+
+function finishExternalAgentRun(
+  run: AgentRun,
+  status: AgentRun["status"],
+  terminalReason: AgentTerminalReason,
+  error?: string
+): void {
+  run.status = status;
+  run.terminalReason = terminalReason;
+  run.finishedAt = new Date().toISOString();
+  if (error) run.error = error;
+  run.transitions.push({ reason: terminalReason, timestamp: new Date().toISOString() });
+}
+
+async function appendAgentTrace(
+  projectRoot: string,
+  input: {
+    traceId: string;
+    kind: string;
+    target: SelectionTarget;
+    summary: string;
+    data?: Record<string, unknown>;
+  }
+): Promise<void> {
+  await appendTraceRecord(
+    projectRoot,
+    TraceRecordSchema.parse({
+      schemaVersion: "praxis.traceRecord.v1",
+      id: `trace-event:${safeFilePart(input.kind)}:${Date.now()}`,
+      traceId: input.traceId,
+      timestamp: new Date().toISOString(),
+      kind: input.kind,
+      target: traceTargetFromSelectionTarget(input.target),
+      summary: input.summary,
+      data: input.data
+    } satisfies TraceRecord)
+  ).catch(() => undefined);
+}
+
+function traceTargetFromSelectionTarget(target: SelectionTarget): TraceRecord["target"] {
+  if (target.type === "node" || target.type === "edge") return { type: target.type, id: target.id };
+  return { type: "subgraph" };
+}
+
+function spawnBuffered(
+  command: string,
+  commandArgs: string[],
+  options: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number }
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, commandArgs, {
+      cwd: options.cwd,
+      env: options.env,
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    const timeout = setTimeout(() => {
+      settled = true;
+      child.kill();
+      reject(new Error(`Pi worker timed out after ${Math.round(options.timeoutMs / 1000)} seconds.`));
+    }, options.timeoutMs);
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr?.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    child.on("error", (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      reject(error);
+    });
+    child.on("close", (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      resolve({ stdout, stderr, exitCode: code ?? 1 });
+    });
+  });
+}
+
+function spawnStreamingJson(
+  command: string,
+  commandArgs: string[],
+  options: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number; onJson: (event: PiJsonEvent) => Promise<void> | void }
+): Promise<{ stdout: string; stderr: string; exitCode: number; eventCount: number }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, commandArgs, {
+      cwd: options.cwd,
+      env: options.env,
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    let stdout = "";
+    let stderr = "";
+    let lineBuffer = "";
+    let eventCount = 0;
+    let callbackChain = Promise.resolve();
+    let settled = false;
+    const timeout = setTimeout(() => {
+      settled = true;
+      child.kill();
+      reject(new Error(`Pi worker timed out after ${Math.round(options.timeoutMs / 1000)} seconds.`));
+    }, options.timeoutMs);
+    const handleLine = (line: string) => {
+      const trimmed = line.trim();
+      if (!trimmed) return;
+      const parsed = safeJson(trimmed);
+      if (!isRecord(parsed)) return;
+      eventCount++;
+      callbackChain = callbackChain.then(() => options.onJson(parsed as PiJsonEvent));
+    };
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk) => {
+      stdout += chunk;
+      lineBuffer += chunk;
+      let newlineIndex = lineBuffer.indexOf("\n");
+      while (newlineIndex >= 0) {
+        const line = lineBuffer.slice(0, newlineIndex);
+        lineBuffer = lineBuffer.slice(newlineIndex + 1);
+        handleLine(line);
+        newlineIndex = lineBuffer.indexOf("\n");
+      }
+    });
+    child.stderr?.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    child.on("error", (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      reject(error);
+    });
+    child.on("close", (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      if (lineBuffer.trim()) handleLine(lineBuffer);
+      callbackChain
+        .then(() => resolve({ stdout, stderr, exitCode: code ?? 1, eventCount }))
+        .catch(reject);
+    });
+  });
+}
+
+function renderCommandLine(command: string, args: string[]): string {
+  const safeArgs = args.map((arg) => (arg.length > 240 ? `${arg.slice(0, 240)}...` : arg));
+  return [command, ...safeArgs].map(quoteCommandArg).join(" ");
+}
+
+function quoteCommandArg(value: string): string {
+  if (/^[A-Za-z0-9_./:=,-]+$/.test(value)) return value;
+  return `"${value.replace(/"/g, '\\"')}"`;
+}
+
+function sanitizePiOutput(value: string): string {
+  return value.replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, "").trim();
+}
+
+function normalizePiFinalMessage(stdout: string): string {
+  const content = sanitizePiOutput(stdout);
+  return content || "Pi completed without a text response.";
+}
+
+function piAssistantTextFromEvent(event: PiJsonEvent): string | undefined {
+  if ((event.type === "message_update" || event.type === "message_end" || event.type === "message_start") && isRecord(event.message)) {
+    return piMessageText(event.message);
+  }
+  if (event.type === "agent_end" && Array.isArray(event.messages)) {
+    return lastAssistantTextFromMessages(event.messages);
+  }
+  if (isRecord(event.message)) return piMessageText(event.message);
+  return undefined;
+}
+
+function piMessageText(message: Record<string, unknown>): string | undefined {
+  if (message.role !== "assistant") return undefined;
+  return textFromPiContent(message.content);
+}
+
+function lastAssistantTextFromMessages(messages: unknown[]): string | undefined {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index];
+    if (!isRecord(message) || message.role !== "assistant") continue;
+    const text = textFromPiContent(message.content);
+    if (text) return text;
+  }
+  return undefined;
+}
+
+function textFromPiContent(content: unknown): string | undefined {
+  if (typeof content === "string") return content.trim() || undefined;
+  if (!Array.isArray(content)) return undefined;
+  const text = content
+    .map((part) => {
+      if (typeof part === "string") return part;
+      if (isRecord(part) && part.type === "text" && typeof part.text === "string") return part.text;
+      return "";
+    })
+    .join("")
+    .trim();
+  return text || undefined;
+}
+
+function piToolViewFromEvent(event: PiJsonEvent): ToolCallView | null {
+  if (event.type !== "tool_execution_start" && event.type !== "tool_execution_update" && event.type !== "tool_execution_end") return null;
+  const name = String(event.toolName ?? "unknown");
+  const id = String(event.toolCallId ?? `${name}:${Date.now()}`);
+  const status: ToolCallView["status"] = event.type === "tool_execution_end" ? (event.isError ? "failed" : "success") : "running";
+  const inputSummary = summarizePiToolInput(name, event.args);
+  const outputSource = event.type === "tool_execution_update" ? event.partialResult : event.result;
+  const outputSummary = outputSource === undefined ? undefined : summarizeForRun(piContentSummary(outputSource), 1200);
+  return {
+    id,
+    name,
+    status,
+    inputSummary,
+    outputSummary,
+    riskLevel: piToolRiskLevel(name)
+  };
+}
+
+function summarizePiToolInput(name: string, input: unknown): string {
+  if (isRecord(input)) {
+    const pathValue = stringValue(input.path) ?? stringValue(input.file_path) ?? stringValue(input.filePath);
+    if (pathValue) return `${name}: ${pathValue}`;
+    const pattern = stringValue(input.pattern) ?? stringValue(input.query);
+    if (pattern) return `${name}: ${pattern}`;
+    const command = stringValue(input.command);
+    if (command) return `${name}: ${command.slice(0, 240)}`;
+  }
+  return `${name}: ${summarizeForRun(piContentSummary(input), 320)}`;
+}
+
+function piContentSummary(value: unknown): string {
+  if (value === undefined || value === null) return "";
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (Array.isArray(value)) return value.map(piContentSummary).filter(Boolean).join("\n");
+  if (isRecord(value)) {
+    if (Array.isArray(value.content)) return piContentSummary(value.content);
+    if (typeof value.text === "string") return value.text;
+    if (typeof value.output === "string") return value.output;
+    if (typeof value.error === "string") return value.error;
+  }
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function piToolRiskLevel(name: string): ToolCallView["riskLevel"] {
+  if (name === "bash") return "shell";
+  if (name === "edit" || name === "write") return "write_source";
+  if (name.toLowerCase().includes("network")) return "network";
+  return "read";
+}
+
+function piEventValue(event: PiJsonEvent, key: string): unknown {
+  return Object.prototype.hasOwnProperty.call(event, key) ? event[key] : undefined;
+}
+
+function summarizeForRun(value: string, limit: number): string {
+  const clean = sanitizePiOutput(value);
+  if (clean.length <= limit) return clean;
+  return `${clean.slice(0, limit)}\n...[truncated ${clean.length - limit} chars]`;
+}
+
+function piFailureMessage(errorMessage: string): string {
+  const note = "Praxis did not fall back to the previous AgentLoop automatically.";
+  if (errorMessage.includes("Praxis did not fall back")) return `Pi agent engine failed: ${errorMessage}`;
+  return [
+    `Pi agent engine failed: ${errorMessage}`,
+    "",
+    `${note} Fix the Pi environment, or explicitly choose --engine legacy / PRAXIS_AGENT_ENGINE=legacy if you want to test the old worker.`
+  ].join("\n");
+}
+
+function isPromptTooLongMessage(message: string): boolean {
+  const normalized = message.toLowerCase();
+  return normalized.includes("prompt") && normalized.includes("too long")
+    || normalized.includes("context") && normalized.includes("length")
+    || normalized.includes("maximum context")
+    || normalized.includes("context window")
+    || normalized.includes("413");
+}
+
+function stringArg(args: Args, key: string): string | undefined {
+  const value = args[key];
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
 async function commandChatSessionList(args: Args): Promise<void> {
@@ -2197,6 +3453,17 @@ async function commandReviewQueue(args: Args): Promise<void> {
     });
   }
 
+  const latestQualityReviewRun = await readLatestQualityReviewRunFromMemory(root);
+  const latestProgress = await readQualityReviewProgress(root);
+  const progressSupersedesMemory = Boolean(
+    latestProgress
+    && latestProgress.scope !== "category"
+    && latestProgress.runId !== latestQualityReviewRun?.id
+    && (!latestQualityReviewRun || timestampValue(latestProgress.startedAt) >= timestampValue(latestQualityReviewRun.generatedAt))
+  );
+  const activeReviewRunId = progressSupersedesMemory ? latestProgress?.runId : undefined;
+  const reviewFindings = await readQualityReviewFindingsFromMemory(root, activeReviewRunId);
+  const qualityReview = buildQualityReviewQueueSummary(reviewFindings, activeReviewRunId ? undefined : latestQualityReviewRun, activeReviewRunId ? latestProgress : undefined);
   const foundation = await buildFoundationReviewStatus(root);
   const result = {
     ok: true,
@@ -2206,14 +3473,2441 @@ async function commandReviewQueue(args: Args): Promise<void> {
     counts: {
       memorySuggestions: memorySuggestions.length,
       findingStatusPatches: findingStatusPatches.length,
+      qualityFindings: reviewFindings.length,
       total: memorySuggestions.length + findingStatusPatches.length
     },
+    qualityReview,
+    reviewFindings,
     foundation,
     memorySuggestions,
     findingStatusPatches
   };
   await maybeWriteJson(args, "out", result);
   outputJson(result);
+}
+
+async function commandReviewRun(args: Args): Promise<void> {
+  const root = path.resolve(required(args, "root"));
+  assertPiReviewEngine(args);
+  const category = reviewCategoryArg(args);
+  const review = category
+    ? await buildPiQualityReviewCategoryRetry(root, args, category)
+    : await buildPiQualityReviewFindings(root, args);
+  const reviewsDir = path.join(root, ".distinction", "reviews");
+  const runsDir = path.join(reviewsDir, "runs");
+  const findingsDir = path.join(reviewsDir, "findings");
+  await writeJson(path.join(runsDir, `${safeFilePart(review.run.id)}.json`), review.run, ReviewRunSchema);
+  for (const finding of review.findings) {
+    await writeJson(path.join(findingsDir, `${safeFilePart(finding.id)}.json`), finding, ReviewFindingSchema);
+  }
+  const candidateMemoryRecords = [
+    reviewRunToCandidateMemoryRecord(review.run),
+    ...review.findings.map((finding) => reviewFindingToCandidateMemoryRecord(finding))
+  ];
+  const memoryPath = await appendUniqueMemoryRecords(root, "candidates.jsonl", candidateMemoryRecords);
+  const traceRecord = TraceRecordSchema.parse({
+    schemaVersion: "praxis.traceRecord.v1",
+    id: `trace-event:quality-review-run:${safeFilePart(review.run.id)}:${Date.now()}`,
+    traceId: `trace:${review.run.id}`,
+    timestamp: new Date().toISOString(),
+    kind: "quality_review.run_generated",
+    target: { type: "project" },
+    summary: `生成 ${review.findings.length} 个工程质量候选评估问题。`,
+    data: {
+      runId: review.run.id,
+      source: review.run.source,
+      findings: review.findings.length,
+      bySeverity: review.run.summary.bySeverity,
+      candidateMemoryIds: candidateMemoryRecords.map((record) => record.id)
+    }
+  });
+  await appendTraceRecord(root, traceRecord);
+  await writeReviewProgress(qualityReviewProgressPath(root), {
+    schemaVersion: "praxis.reviewProgress.v1",
+    runId: review.run.id,
+    root,
+    source: "pi-agent",
+    scope: category ? "category" : "full",
+    retryCategory: category,
+    status: "completed",
+    startedAt: review.run.generatedAt,
+    updatedAt: new Date().toISOString(),
+    totalCategories: category ? 1 : reviewCategoryOrder.length,
+    completedCategories: category ? 1 : reviewCategoryOrder.length,
+    currentCategory: category,
+    currentEvaluator: category ? reviewEvaluatorFor(category).name : undefined,
+    message: category
+      ? `Pi 已完成分类重试：${reviewEvaluatorFor(category).name}，当前候选问题 ${review.findings.length} 个。`
+      : `Pi 工程评估完成，生成 ${review.findings.length} 个候选问题。`,
+    findings: review.findings.length,
+    evaluatorResults: review.run.evaluatorResults
+  });
+  outputJson({
+    ok: true,
+    root,
+    run: review.run,
+    findings: review.findings,
+    candidateMemoryRecords: candidateMemoryRecords.length,
+    paths: {
+      run: projectRelativePath(root, path.join(runsDir, `${safeFilePart(review.run.id)}.json`)),
+      findings: projectRelativePath(root, findingsDir),
+      candidateMemory: projectRelativePath(root, memoryPath)
+    }
+  });
+}
+
+async function commandReviewFindingRefresh(args: Args): Promise<void> {
+  const root = path.resolve(required(args, "root"));
+  assertPiReviewEngine(args);
+  const findingId = required(args, "finding");
+  const findings = await readQualityReviewFindingsFromMemory(root);
+  const finding = findings.find((item) => item.id === findingId);
+  if (!finding) throw new Error(`Review finding not found in latest candidate memory: ${findingId}`);
+
+  const startedAt = new Date().toISOString();
+  const runId = `finding-refresh-${Date.now()}-${randomUUID().slice(0, 8)}`;
+  const evaluator = reviewEvaluatorFor(finding.category);
+  const prompt = buildPiFindingRefreshPrompt(root, args, finding);
+  const result = await runPiReviewPrompt({
+    root,
+    args,
+    runId,
+    category: finding.category,
+    evaluator,
+    prompt,
+    timeoutMs: timeoutMsArg(args, ["finding-refresh-timeout-ms", "review-pi-timeout-ms", "pi-timeout-ms"], 180_000)
+  });
+  const patch = parsePiFindingStatusPatch(result.stdout, finding, runId, startedAt);
+  const patchPath = await writeFindingStatusPatch(root, patch);
+  const tracePath = await appendTraceRecord(
+    root,
+    TraceRecordSchema.parse({
+      schemaVersion: "praxis.traceRecord.v1",
+      id: `trace-event:finding-refresh:${safeFilePart(patch.id)}:${Date.now()}`,
+      traceId: `trace:${runId}`,
+      timestamp: new Date().toISOString(),
+      kind: "finding.status_refresh_generated",
+      target: { type: "finding", id: finding.id },
+      summary: patch.summary,
+      data: {
+        runId,
+        patchId: patch.id,
+        patchPath,
+        provider: result.provider,
+        model: result.model,
+        durationMs: result.durationMs,
+        diagnostics: result.diagnostics
+      }
+    } satisfies TraceRecord)
+  );
+  outputJson({
+    ok: true,
+    root,
+    findingId: finding.id,
+    patch,
+    patchPath,
+    tracePath,
+    diagnostics: result.diagnostics
+  });
+}
+
+function assertPiReviewEngine(args: Args): void {
+  const requested = stringArg(args, "engine") ?? stringArg(args, "mode") ?? process.env.PRAXIS_REVIEW_ENGINE;
+  if (!requested) return;
+  const normalized = requested.trim().toLowerCase();
+  if (normalized === "pi" || normalized === "pi-agent") return;
+  throw new Error([
+    `Engineering review must run through Pi; unsupported review engine: ${requested}.`,
+    "Praxis no longer generates engineering review findings from the local heuristic path.",
+    "Fix the Pi environment and rerun review-run without --engine/--mode, or set PRAXIS_REVIEW_ENGINE=pi."
+  ].join("\n"));
+}
+
+function reviewCategoryArg(args: Args): ReviewCategory | undefined {
+  const raw = args.category;
+  if (raw === undefined) return undefined;
+  const parsed = reviewCategoryValue(raw);
+  if (!parsed || parsed === "foundation_integrity") {
+    throw new Error(`Unsupported review category: ${String(raw)}.`);
+  }
+  return parsed;
+}
+
+async function readQualityReviewFindingsFromMemory(root: string, runId?: string): Promise<ReviewFinding[]> {
+  const candidatesPath = path.join(root, ".distinction", "memory", "candidates.jsonl");
+  const candidates = await readMemoryRecordJsonl(candidatesPath);
+  const latestRun = latestQualityReviewRunFromMemory(candidates);
+  const latestRunFindingIds = latestRun ? new Set(latestRun.findingIds) : undefined;
+  const findings = new Map<string, ReviewFinding>();
+  for (const record of candidates) {
+    if (record.type !== "quality.review.finding") continue;
+    const parsed = ReviewFindingSchema.safeParse(record.value);
+    if (!parsed.success) continue;
+    if (runId) {
+      if (parsed.data.runId !== runId) continue;
+    } else if (latestRunFindingIds && !latestRunFindingIds.has(parsed.data.id)) continue;
+    findings.set(parsed.data.id, parsed.data);
+  }
+  return sortReviewFindings(Array.from(findings.values()));
+}
+
+async function readQualityReviewProgress(root: string): Promise<ReviewProgressSnapshot | undefined> {
+  const parsed = await tryReadJsonFile(qualityReviewProgressPath(root));
+  if (!isRecord(parsed)) return undefined;
+  if (parsed.schemaVersion !== "praxis.reviewProgress.v1") return undefined;
+  if (typeof parsed.runId !== "string" || typeof parsed.root !== "string") return undefined;
+  if (parsed.status !== "running" && parsed.status !== "completed" && parsed.status !== "failed") return undefined;
+  if (parsed.source !== "pi-agent" && parsed.source !== "praxis-heuristic") return undefined;
+  return {
+    schemaVersion: "praxis.reviewProgress.v1",
+    runId: parsed.runId,
+    root: parsed.root,
+    source: parsed.source,
+    scope: parsed.scope === "category" ? "category" : parsed.scope === "full" ? "full" : undefined,
+    retryCategory: reviewCategoryValue(parsed.retryCategory),
+    retryOfRunId: typeof parsed.retryOfRunId === "string" ? parsed.retryOfRunId : undefined,
+    status: parsed.status,
+    startedAt: typeof parsed.startedAt === "string" ? parsed.startedAt : new Date(0).toISOString(),
+    updatedAt: typeof parsed.updatedAt === "string" ? parsed.updatedAt : new Date(0).toISOString(),
+    totalCategories: typeof parsed.totalCategories === "number" ? parsed.totalCategories : reviewCategoryOrder.length,
+    completedCategories: typeof parsed.completedCategories === "number" ? parsed.completedCategories : 0,
+    currentCategory: reviewCategoryValue(parsed.currentCategory),
+    currentEvaluator: typeof parsed.currentEvaluator === "string" ? parsed.currentEvaluator : undefined,
+    message: typeof parsed.message === "string" ? parsed.message : "",
+    findings: typeof parsed.findings === "number" ? parsed.findings : 0,
+    error: typeof parsed.error === "string" ? parsed.error : undefined,
+    evaluatorResults: reviewEvaluatorResultArray(parsed.evaluatorResults)
+  };
+}
+
+function reviewCategoryValue(value: unknown): ReviewCategory | undefined {
+  const parsed = ReviewCategorySchema.safeParse(value);
+  return parsed.success ? parsed.data : undefined;
+}
+
+function reviewEvaluatorResultArray(value: unknown): NonNullable<ReviewRun["evaluatorResults"]> | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const results: NonNullable<ReviewRun["evaluatorResults"]> = [];
+  for (const item of value) {
+    if (!isRecord(item)) continue;
+    const evaluator = isRecord(item.evaluator) ? item.evaluator : {};
+    const category = reviewCategoryValue(evaluator.category);
+    if (!category) continue;
+    const status = item.status === "completed" || item.status === "partial" || item.status === "failed" ? item.status : undefined;
+    if (!status) continue;
+    results.push({
+      evaluator: {
+        id: typeof evaluator.id === "string" && evaluator.id.trim() ? evaluator.id : reviewEvaluatorFor(category).id,
+        name: typeof evaluator.name === "string" && evaluator.name.trim() ? evaluator.name : reviewEvaluatorFor(category).name,
+        category,
+        prompt: typeof evaluator.prompt === "string" && evaluator.prompt.trim() ? evaluator.prompt : reviewEvaluatorFor(category).prompt,
+        source: "pi-agent"
+      },
+      status,
+      findingIds: Array.isArray(item.findingIds) ? item.findingIds.filter((id): id is string => typeof id === "string" && id.trim().length > 0) : [],
+      summary: typeof item.summary === "string" && item.summary.trim() ? item.summary : "Pi category review status is available without a summary."
+    });
+  }
+  return results;
+}
+
+async function readLatestQualityReviewRunFromMemory(root: string): Promise<ReviewRun | undefined> {
+  const candidatesPath = path.join(root, ".distinction", "memory", "candidates.jsonl");
+  return latestQualityReviewRunFromMemory(await readMemoryRecordJsonl(candidatesPath));
+}
+
+function latestQualityReviewRunFromMemory(records: MemoryRecord[]): ReviewRun | undefined {
+  let latest: ReviewRun | undefined;
+  for (const record of records) {
+    if (record.type !== "quality.review.run") continue;
+    const parsed = ReviewRunSchema.safeParse(record.value);
+    if (!parsed.success) continue;
+    if (!latest || timestampValue(parsed.data.generatedAt) >= timestampValue(latest.generatedAt)) latest = parsed.data;
+  }
+  return latest;
+}
+
+function reviewRunToCandidateMemoryRecord(run: ReviewRun): MemoryRecord {
+  return MemoryRecordSchema.parse({
+    id: `memory:candidate:${safeFilePart(run.id)}`,
+    kind: "CANDIDATE",
+    type: "quality.review.run",
+    subject: run.id,
+    predicate: "summarizes",
+    object: "quality.review.finding",
+    value: run,
+    summary: `工程质量评估运行生成 ${run.summary.total} 个候选问题。`,
+    evidence: [{
+      source: "repository_scan",
+      filePath: `.distinction/reviews/runs/${safeFilePart(run.id)}.json`,
+      excerpt: `severity=${JSON.stringify(run.summary.bySeverity)}`
+    }],
+    source: "static_analysis",
+    confidence: "high",
+    status: "proposed",
+    createdAt: run.generatedAt,
+    updatedAt: run.generatedAt
+  } satisfies MemoryRecord);
+}
+
+function reviewFindingToCandidateMemoryRecord(finding: ReviewFinding): MemoryRecord {
+  return MemoryRecordSchema.parse({
+    id: `memory:candidate:${safeFilePart(finding.id)}:${safeFilePart(finding.runId)}`,
+    kind: finding.knowledgeKind,
+    type: "quality.review.finding",
+    subject: finding.id,
+    predicate: "flags",
+    object: finding.category,
+    value: finding,
+    summary: finding.title,
+    evidence: finding.evidence.map(reviewEvidenceToCodeFactEvidence),
+    source: finding.source === "agent" ? "agent" : "static_analysis",
+    confidence: finding.confidence,
+    status: "proposed",
+    createdAt: finding.createdAt,
+    updatedAt: finding.updatedAt
+  } satisfies MemoryRecord);
+}
+
+function reviewEvidenceToCodeFactEvidence(evidence: ReviewEvidenceRef): CodeFactEvidenceRef {
+  return {
+    source: evidence.source === "agent" ? "agent_inference" : evidence.source === "code_fact_graph" ? "codegraph" : "repository_scan",
+    filePath: evidence.path ?? evidence.anchor?.path ?? evidence.anchor?.id ?? ".distinction/memory/candidates.jsonl",
+    excerpt: evidence.excerpt ?? evidence.summary
+  };
+}
+
+function timestampValue(value: string): number {
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+const reviewCategoryOrder = [
+  "architecture_boundaries",
+  "dependencies_coupling",
+  "build_release",
+  "testing_verification",
+  "security_secrets",
+  "configuration_environment",
+  "code_quality_maintainability",
+  "api_contracts_data_flow",
+  "performance_resources",
+  "documentation_knowledge"
+] as const satisfies readonly ReviewCategory[];
+
+const reviewEvaluatorProfiles: Record<ReviewCategory, ReviewEvaluatorRef> = {
+  foundation_integrity: {
+    id: "knowledge-memory-evaluator",
+    name: "文档、知识与项目记忆缺口评估器",
+    category: "documentation_knowledge",
+    source: "praxis-heuristic",
+    prompt: "你是文档、知识与项目记忆缺口评估器。只基于 Praxis 已采集的本地 FACT、候选记忆、投影视图和 trace，检查项目知识层是否缺失、过期、重复或无法支撑后续评估；输出候选问题，不写入已确认记忆。"
+  },
+  architecture_boundaries: {
+    id: "architecture-boundary-evaluator",
+    name: "架构与模块边界评估器",
+    category: "architecture_boundaries",
+    source: "praxis-heuristic",
+    prompt: "你是架构与模块边界评估器。检查源码目录、架构模型、模块候选和架构 finding 是否能解释真实模块边界、所有权和演进方向；只输出可证据化的候选问题。"
+  },
+  dependencies_coupling: {
+    id: "dependency-coupling-evaluator",
+    name: "依赖与耦合评估器",
+    category: "dependencies_coupling",
+    source: "praxis-heuristic",
+    prompt: "你是依赖与耦合评估器。检查 import/code fact、架构依赖、循环、未映射依赖和隐性耦合；区分扫描事实与候选判断。"
+  },
+  build_release: {
+    id: "build-release-evaluator",
+    name: "构建与发布评估器",
+    category: "build_release",
+    source: "praxis-heuristic",
+    prompt: "你是构建与发布评估器。检查构建入口、发布产物、构建输出污染、桌面打包和可验证发布路径；输出会影响构建可信度的候选问题。"
+  },
+  testing_verification: {
+    id: "testing-verification-evaluator",
+    name: "测试与验证评估器",
+    category: "testing_verification",
+    source: "praxis-heuristic",
+    prompt: "你是测试与验证评估器。检查真实测试项目、单元/集成/UI 验证、覆盖率证据和受控编码任务验收证据；没有 100% 覆盖率证据、只有单元测试、测试入口缺失或测试无法覆盖发布形态都必须输出候选问题。"
+  },
+  security_secrets: {
+    id: "security-secrets-evaluator",
+    name: "安全与敏感信息评估器",
+    category: "security_secrets",
+    source: "praxis-heuristic",
+    prompt: "你是安全与敏感信息评估器。检查密钥、凭据、pem/pfx/key/cert 文件、敏感配置、构建产物中的私钥、外部 worker 上下文泄露和 agent prompt 输入风险；只输出有路径或事实证据的问题。"
+  },
+  configuration_environment: {
+    id: "configuration-environment-evaluator",
+    name: "配置与环境评估器",
+    category: "configuration_environment",
+    source: "praxis-heuristic",
+    prompt: "你是配置与环境评估器。检查环境变量、配置文件、开发/生产差异、平台配置和运行前置条件是否有清晰所有权。"
+  },
+  code_quality_maintainability: {
+    id: "maintainability-evaluator",
+    name: "代码质量与可维护性评估器",
+    category: "code_quality_maintainability",
+    source: "praxis-heuristic",
+    prompt: "你是代码质量与可维护性评估器。检查源码规模、生成源码混入、超大文件、缺少符号级复杂度证据、重复事实和会让后续维护变脆弱的结构；输出具体维护问题，而不是抽象分数。"
+  },
+  api_contracts_data_flow: {
+    id: "api-data-flow-evaluator",
+    name: "接口契约与数据流评估器",
+    category: "api_contracts_data_flow",
+    source: "praxis-heuristic",
+    prompt: "你是接口契约与数据流评估器。检查 runtime、桌面端、schema、HTTP 客户端、服务接口、DTO/Request/Response、MCP/tool/worker 之间的契约是否可追踪；缺少契约测试、消费者证据或版本边界都必须输出候选问题。"
+  },
+  performance_resources: {
+    id: "performance-resource-evaluator",
+    name: "性能与资源风险评估器",
+    category: "performance_resources",
+    source: "praxis-heuristic",
+    prompt: "你是性能与资源风险评估器。检查扫描范围、构建产物、二进制/超大文件、上下文膨胀、热更新/文件监听和资源密集路径是否会拖慢 intake、agent 或桌面体验。"
+  },
+  documentation_knowledge: {
+    id: "knowledge-memory-evaluator",
+    name: "文档、知识与项目记忆缺口评估器",
+    category: "documentation_knowledge",
+    source: "praxis-heuristic",
+    prompt: "你是文档、知识与项目记忆缺口评估器。检查 README、AGENTS、.distinction、投影视图、trace 和候选/确认记忆是否足以支撑团队理解与后续 agent 工作。"
+  }
+};
+
+function reviewEvaluatorFor(category: ReviewCategory): ReviewEvaluatorRef {
+  return reviewEvaluatorProfiles[category];
+}
+
+type ReviewProgressStatus = "running" | "completed" | "failed";
+
+interface ReviewProgressSnapshot {
+  schemaVersion: "praxis.reviewProgress.v1";
+  runId: string;
+  root: string;
+  source: "pi-agent" | "praxis-heuristic";
+  scope?: "full" | "category";
+  retryCategory?: ReviewCategory;
+  retryOfRunId?: string;
+  status: ReviewProgressStatus;
+  startedAt: string;
+  updatedAt: string;
+  totalCategories: number;
+  completedCategories: number;
+  currentCategory?: ReviewCategory;
+  currentEvaluator?: string;
+  message: string;
+  findings: number;
+  error?: string;
+  evaluatorResults?: NonNullable<ReviewRun["evaluatorResults"]>;
+}
+
+async function buildPiQualityReviewFindings(root: string, args: Args): Promise<{ run: ReviewRun; findings: ReviewFinding[] }> {
+  const generatedAt = new Date().toISOString();
+  const runId = `review-run-pi-${Date.now()}-${randomUUID().slice(0, 8)}`;
+  const progressPath = qualityReviewProgressPath(root);
+  const findingsOut: ReviewFinding[] = [];
+  const evaluatorResults: NonNullable<ReviewRun["evaluatorResults"]> = [];
+
+  await writeReviewProgress(progressPath, {
+    schemaVersion: "praxis.reviewProgress.v1",
+    runId,
+    root,
+    source: "pi-agent",
+    status: "running",
+    startedAt: generatedAt,
+    updatedAt: new Date().toISOString(),
+    totalCategories: reviewCategoryOrder.length,
+    completedCategories: 0,
+    message: "Pi 工程评估已启动，正在按分类顺序运行。",
+    findings: 0,
+    evaluatorResults: []
+  });
+
+  try {
+    const heuristic = await buildQualityReviewFindings(root, runId, generatedAt);
+    for (const category of reviewCategoryOrder) {
+      const evaluator = reviewEvaluatorFor(category);
+      await writeReviewProgress(progressPath, {
+        schemaVersion: "praxis.reviewProgress.v1",
+        runId,
+        root,
+        source: "pi-agent",
+        status: "running",
+        startedAt: generatedAt,
+        updatedAt: new Date().toISOString(),
+        totalCategories: reviewCategoryOrder.length,
+        completedCategories: evaluatorResults.length,
+        currentCategory: category,
+        currentEvaluator: evaluator.name,
+        message: `Pi 正在评估：${evaluator.name}`,
+        findings: findingsOut.length,
+        evaluatorResults
+      });
+
+      let categoryFindings: ReviewFinding[] = [];
+      let categoryError: string | undefined;
+      try {
+        categoryFindings = await runPiQualityReviewCategory({
+          root,
+          args,
+          runId,
+          generatedAt,
+          category,
+          evaluator,
+          heuristicFindings: heuristic.findings.filter((finding) => displayReviewCategory(finding.category) === category)
+        });
+        findingsOut.push(...categoryFindings);
+        evaluatorResults.push({
+          evaluator: { ...evaluator, source: "pi-agent" },
+          status: "completed",
+          findingIds: categoryFindings.map((finding) => finding.id),
+          summary: categoryFindings.length
+            ? `Pi 生成 ${categoryFindings.length} 个候选问题。`
+            : "Pi 已运行但没有返回候选问题；不代表该类别健康。"
+        });
+        await persistQualityReviewFindings(root, categoryFindings);
+      } catch (error) {
+        categoryError = error instanceof Error ? error.message : String(error);
+        evaluatorResults.push({
+          evaluator: { ...evaluator, source: "pi-agent" },
+          status: "failed",
+          findingIds: [],
+          summary: `Pi 分类评估失败：${categoryError.slice(0, 1200)}`
+        });
+      }
+
+      await writeReviewProgress(progressPath, {
+        schemaVersion: "praxis.reviewProgress.v1",
+        runId,
+        root,
+        source: "pi-agent",
+        status: "running",
+        startedAt: generatedAt,
+        updatedAt: new Date().toISOString(),
+        totalCategories: reviewCategoryOrder.length,
+        completedCategories: evaluatorResults.length,
+        currentCategory: category,
+        currentEvaluator: evaluator.name,
+        message: categoryError ? `Pi 分类失败，继续下一类：${evaluator.name}` : `Pi 已完成：${evaluator.name}`,
+        findings: findingsOut.length,
+        error: categoryError,
+        evaluatorResults
+      });
+    }
+
+    const sorted = sortReviewFindings(dedupeReviewFindings(findingsOut)).map((finding) => ReviewFindingSchema.parse(finding));
+    const failedEvaluators = evaluatorResults.filter((result) => result.status === "failed");
+    const run = ReviewRunSchema.parse({
+      schemaVersion: "praxis.reviewRun.v1",
+      id: runId,
+      root,
+      generatedAt,
+      source: "pi-agent",
+      status: failedEvaluators.length ? "partial" : "completed",
+      categories: [...reviewCategoryOrder],
+      findingIds: sorted.map((finding) => finding.id),
+      evaluatorResults: completeReviewEvaluatorResults(sorted, evaluatorResults),
+      summary: buildReviewRunSummary(sorted),
+      traceIds: []
+    } satisfies ReviewRun);
+
+    await writeReviewProgress(progressPath, {
+      schemaVersion: "praxis.reviewProgress.v1",
+      runId,
+      root,
+      source: "pi-agent",
+      status: "completed",
+      startedAt: generatedAt,
+      updatedAt: new Date().toISOString(),
+      totalCategories: reviewCategoryOrder.length,
+      completedCategories: reviewCategoryOrder.length,
+      message: failedEvaluators.length
+        ? `Pi 工程评估部分完成，生成 ${sorted.length} 个候选问题；${failedEvaluators.length} 个分类失败。`
+        : `Pi 工程评估完成，生成 ${sorted.length} 个候选问题。`,
+      findings: sorted.length,
+      error: failedEvaluators.length ? failedEvaluators.map((result) => result.summary).join("\n") : undefined,
+      evaluatorResults
+    });
+
+    return { run, findings: sorted };
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    await writeReviewProgress(progressPath, {
+      schemaVersion: "praxis.reviewProgress.v1",
+      runId,
+      root,
+      source: "pi-agent",
+      status: "failed",
+      startedAt: generatedAt,
+      updatedAt: new Date().toISOString(),
+      totalCategories: reviewCategoryOrder.length,
+      completedCategories: evaluatorResults.length,
+      message: "Pi 工程评估失败。",
+      findings: findingsOut.length,
+      error: errorMessage,
+      evaluatorResults
+    });
+    throw error;
+  }
+}
+
+async function buildPiQualityReviewCategoryRetry(
+  root: string,
+  args: Args,
+  category: ReviewCategory
+): Promise<{ run: ReviewRun; findings: ReviewFinding[] }> {
+  const generatedAt = new Date().toISOString();
+  const runId = `review-run-pi-retry-${Date.now()}-${randomUUID().slice(0, 8)}`;
+  const progressPath = qualityReviewProgressPath(root);
+  const evaluator = reviewEvaluatorFor(category);
+  const latestRun = await readLatestQualityReviewRunFromMemory(root);
+  const previousFindings = await readQualityReviewFindingsFromMemory(root);
+  const preservedFindings = previousFindings.filter((finding) => displayReviewCategory(finding.category) !== category);
+  const previousEvaluatorResults = latestRun?.evaluatorResults?.length
+    ? latestRun.evaluatorResults
+    : buildReviewEvaluatorResults(previousFindings) ?? [];
+  const retryOfRunId = latestRun?.id;
+
+  const runningProgress = {
+    schemaVersion: "praxis.reviewProgress.v1" as const,
+    runId,
+    root,
+    source: "pi-agent" as const,
+    scope: "category" as const,
+    retryCategory: category,
+    retryOfRunId,
+    status: "running" as const,
+    startedAt: generatedAt,
+    updatedAt: new Date().toISOString(),
+    totalCategories: 1,
+    completedCategories: 0,
+    currentCategory: category,
+    currentEvaluator: evaluator.name,
+    message: `Pi 正在重试分类：${evaluator.name}`,
+    findings: preservedFindings.length,
+    evaluatorResults: replaceEvaluatorResult(
+      completeReviewEvaluatorResults(preservedFindings, previousEvaluatorResults),
+      category,
+      {
+        evaluator: { ...evaluator, source: "pi-agent" },
+        status: "partial",
+        findingIds: [],
+        summary: "Pi 正在重新评估这个分类，旧结果会在成功后被替换。"
+      }
+    )
+  } satisfies ReviewProgressSnapshot;
+  await writeReviewProgress(progressPath, runningProgress);
+
+  try {
+    const heuristic = await buildQualityReviewFindings(root, runId, generatedAt);
+    const categoryFindings = await runPiQualityReviewCategory({
+      root,
+      args,
+      runId,
+      generatedAt,
+      category,
+      evaluator,
+      heuristicFindings: heuristic.findings.filter((finding) => displayReviewCategory(finding.category) === category)
+    });
+    await persistQualityReviewFindings(root, categoryFindings);
+
+    const sorted = sortReviewFindings(dedupeReviewFindings([...preservedFindings, ...categoryFindings]))
+      .map((finding) => ReviewFindingSchema.parse(finding));
+    const evaluatorResults = replaceEvaluatorResult(
+      completeReviewEvaluatorResults(sorted, previousEvaluatorResults),
+      category,
+      {
+        evaluator: { ...evaluator, source: "pi-agent" },
+        status: "completed",
+        findingIds: categoryFindings.map((finding) => finding.id),
+        summary: categoryFindings.length
+          ? `Pi 重新评估生成 ${categoryFindings.length} 个候选问题。`
+          : "Pi 已重新评估该分类，但没有返回候选问题；这不代表该类别健康。"
+      }
+    );
+    const failedEvaluators = evaluatorResults.filter((result) => result.status === "failed");
+    const run = ReviewRunSchema.parse({
+      schemaVersion: "praxis.reviewRun.v1",
+      id: runId,
+      root,
+      generatedAt,
+      source: "pi-agent",
+      status: failedEvaluators.length ? "partial" : "completed",
+      categories: [...reviewCategoryOrder],
+      findingIds: sorted.map((finding) => finding.id),
+      evaluatorResults,
+      summary: buildReviewRunSummary(sorted),
+      traceIds: []
+    } satisfies ReviewRun);
+
+    await writeReviewProgress(progressPath, {
+      schemaVersion: "praxis.reviewProgress.v1",
+      runId,
+      root,
+      source: "pi-agent",
+      scope: "category",
+      retryCategory: category,
+      retryOfRunId,
+      status: "completed",
+      startedAt: generatedAt,
+      updatedAt: new Date().toISOString(),
+      totalCategories: 1,
+      completedCategories: 1,
+      currentCategory: category,
+      currentEvaluator: evaluator.name,
+      message: `Pi 已完成分类重试：${evaluator.name}，当前候选问题 ${sorted.length} 个。`,
+      findings: sorted.length,
+      evaluatorResults
+    });
+
+    return { run, findings: sorted };
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const evaluatorResults = replaceEvaluatorResult(
+      completeReviewEvaluatorResults(preservedFindings, previousEvaluatorResults),
+      category,
+      {
+        evaluator: { ...evaluator, source: "pi-agent" },
+        status: "failed",
+        findingIds: [],
+        summary: `Pi 分类重试失败：${errorMessage.slice(0, 1200)}`
+      }
+    );
+    await writeReviewProgress(progressPath, {
+      schemaVersion: "praxis.reviewProgress.v1",
+      runId,
+      root,
+      source: "pi-agent",
+      scope: "category",
+      retryCategory: category,
+      retryOfRunId,
+      status: "failed",
+      startedAt: generatedAt,
+      updatedAt: new Date().toISOString(),
+      totalCategories: 1,
+      completedCategories: 0,
+      currentCategory: category,
+      currentEvaluator: evaluator.name,
+      message: `Pi 分类重试失败：${evaluator.name}`,
+      findings: preservedFindings.length,
+      error: errorMessage,
+      evaluatorResults
+    });
+    throw error;
+  }
+}
+
+async function runPiQualityReviewCategory(input: {
+  root: string;
+  args: Args;
+  runId: string;
+  generatedAt: string;
+  category: ReviewCategory;
+  evaluator: ReviewEvaluatorRef;
+  heuristicFindings: ReviewFinding[];
+}): Promise<ReviewFinding[]> {
+  const prompt = buildPiQualityReviewPrompt(input);
+  const pi = await runPiReviewPrompt({
+    root: input.root,
+    args: input.args,
+    runId: input.runId,
+    category: input.category,
+    evaluator: input.evaluator,
+    prompt,
+    timeoutMs: reviewPiTimeoutMsArg(input.args, 300_000)
+  });
+  return parsePiReviewFindings(pi.stdout, input);
+}
+
+async function runPiReviewPrompt(input: PiReviewPromptRunInput): Promise<PiWorkerRunResult> {
+  const piCli = await resolvePiCliPath(input.args);
+  const modelRoute = await resolvePiModelRoute(input.root, "plan", { type: "project" }, input.args);
+  const tools = resolvePiToolAllowlist(input.args);
+  const codeGraphExtension = isPiCodeGraphEnabled(input.args) ? resolvePiCodeGraphExtensionPath() : undefined;
+  const piArgs = [
+    piCli.cliPath,
+    "--offline",
+    "--provider",
+    modelRoute.provider,
+    "--model",
+    modelRoute.model,
+    "--thinking",
+    stringArg(input.args, "review-pi-thinking") ?? loadPiRuntimeSettingsSync().reviewThinking ?? modelRoute.thinking,
+    "--system-prompt",
+    piSystemPrompt(),
+    "--no-session",
+    "--no-extensions",
+    ...(codeGraphExtension ? ["--extension", codeGraphExtension] : []),
+    "--tools",
+    tools.join(","),
+    "-p",
+    input.prompt
+  ];
+  const env = await piWorkerEnv(input.root, modelRoute.provider);
+  env.PRAXIS_PI_PROJECT_ROOT = input.root;
+  const diagnostics = piRuntimeDiagnostics(piCli, modelRoute, env);
+  const startedAt = Date.now();
+  let spawned: { stdout: string; stderr: string; exitCode: number };
+  try {
+    spawned = await spawnBuffered(process.execPath, piArgs, {
+      cwd: input.root,
+      env,
+      timeoutMs: input.timeoutMs
+    });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(formatPiFailureDetail(detail, diagnostics));
+  }
+
+  const cleanStdout = sanitizePiOutput(spawned.stdout);
+  const cleanStderr = sanitizePiOutput(spawned.stderr);
+  await appendPiReviewCategoryLog(input.root, input.runId, {
+    schemaVersion: "praxis.piReviewCategoryLog.v1",
+    timestamp: new Date().toISOString(),
+    runId: input.runId,
+    category: input.category,
+    evaluator: { ...input.evaluator, source: "pi-agent" },
+    status: spawned.exitCode === 0 ? "completed" : "failed",
+    diagnostics,
+    stdout: cleanStdout,
+    stderr: cleanStderr
+  });
+
+  if (spawned.exitCode !== 0) {
+    const detail = [cleanStderr, cleanStdout].filter(Boolean).join("\n\n").trim();
+    throw new Error(formatPiFailureDetail(detail || `Pi exited with code ${spawned.exitCode}.`, diagnostics));
+  }
+
+  return {
+    stdout: cleanStdout,
+    stderr: cleanStderr,
+    exitCode: spawned.exitCode,
+    durationMs: Date.now() - startedAt,
+    commandLine: renderCommandLine(process.execPath, piArgs),
+    provider: modelRoute.provider,
+    model: modelRoute.model,
+    modelRoute: `${modelRoute.provider}/${modelRoute.model}`,
+    tools,
+    diagnostics
+  };
+}
+
+function buildPiQualityReviewPrompt(input: {
+  root: string;
+  args: Args;
+  runId: string;
+  generatedAt: string;
+  category: ReviewCategory;
+  evaluator: ReviewEvaluatorRef;
+  heuristicFindings: ReviewFinding[];
+}): string {
+  const responseLanguage = reviewResponseLanguage(input.args);
+  return [
+    "You are a Praxis Studio engineering quality review worker running through Pi.",
+    `Respond in the user's language: ${responseLanguage}.`,
+    `All user-visible JSON string fields MUST use ${responseLanguage}: title, summary, whyItMatters, suggestedAction, evidence.summary, and evidence.excerpt.`,
+    `Do not switch to English unless ${responseLanguage} is English or the text is a code identifier, path, command, API name, stack trace, or source excerpt.`,
+    "Return strict JSON only. No Markdown fences. No preface. No explanation outside JSON.",
+    "",
+    "你是 Praxis Studio 的工程质量评估 worker，正在由 Pi 执行。",
+    "",
+    "## 绝对边界",
+    "- 你必须真实检查当前仓库；不要只复述提示词。",
+    "- 你可以使用 read、grep、find、ls、CodeGraph 只读工具。",
+    "- 不要写文件，不要修改源码，不要确认记忆。",
+    "- 本地扫描事实是 FACT；你的结论全部是 CANDIDATE。",
+    "- 输出必须是严格 JSON，不要 Markdown，不要额外解释。",
+    "",
+    "## 当前分类",
+    `category: ${input.category}`,
+    `evaluator: ${input.evaluator.name}`,
+    "",
+    "## 分类评估准则",
+    input.evaluator.prompt,
+    "",
+    "## 重要要求",
+    "- 至少检查 AGENTS.md、README/package/build/test 配置、.distinction/cache 中相关事实。",
+    "- 如果没有测试覆盖率证据，测试与验证类必须指出“不能证明 100% 覆盖”。",
+    "- 如果发现密钥/证书/私钥/凭据路径，安全类必须列为候选问题。",
+    "- 如果工具证据不足，也要把“证据不足导致不能判断健康”作为候选问题，而不是输出空数组。",
+    "- 每个 finding 必须有具体 title、summary、whyItMatters、suggestedAction、evidence。",
+    "- severity 只能是 P0/P1/P2/P3；confidence 只能是 high/medium/low。",
+    "",
+    "## Praxis 本地规则线索",
+    "下面只是给你的线索，不是最终答案。你必须用 Pi 工具检查或补充。",
+    JSON.stringify(input.heuristicFindings.map((finding) => ({
+      title: finding.title,
+      severity: finding.severity,
+      summary: finding.summary,
+      evidence: finding.evidence.slice(0, 3)
+    })), null, 2),
+    "",
+    "## 输出 JSON Schema",
+    JSON.stringify({
+      findings: [
+        {
+          severity: "P1",
+          title: "具体问题标题",
+          summary: "具体问题描述，必须说明证据和风险",
+          whyItMatters: "为什么这会影响工程质量",
+          suggestedAction: "下一步建议",
+          confidence: "high",
+          evidence: [
+            { path: "relative/path", summary: "证据摘要", excerpt: "可选短摘录" }
+          ],
+          affectedPaths: ["relative/path"]
+        }
+      ]
+    }, null, 2)
+  ].join("\n");
+}
+
+function buildPiFindingRefreshPrompt(root: string, args: Args, finding: ReviewFinding): string {
+  const responseLanguage = reviewResponseLanguage(args);
+  const evidence = finding.evidence.slice(0, 8).map((item) => ({
+    path: item.path ?? item.anchor?.path ?? item.anchor?.id,
+    summary: item.summary,
+    excerpt: item.excerpt
+  }));
+  return [
+    "You are a Praxis Studio single-finding review worker running through Pi.",
+    `Respond in the user's language: ${responseLanguage}.`,
+    `All user-visible JSON string fields MUST use ${responseLanguage}: summary, rationale, evidence.excerpt.`,
+    "Return strict JSON only. No Markdown fences. No preface. No explanation outside JSON.",
+    "",
+    "## Boundary",
+    "- Re-check only the single finding below.",
+    "- Do not run a whole-project review and do not create unrelated findings.",
+    "- Do not edit files or write memory. Praxis will turn your result into a pending FindingStatusPatch.",
+    "- Inspect the current repository state with read-only tools. Use CodeGraph if useful.",
+    "- If the issue still exists, return status open.",
+    "- If there is credible evidence that it is fixed, return status resolved or mitigated.",
+    "- If evidence is insufficient, return status acknowledged and explain what evidence is missing.",
+    "",
+    "## Project",
+    root,
+    "",
+    "## Finding To Re-check",
+    JSON.stringify({
+      id: finding.id,
+      category: finding.category,
+      severity: finding.severity,
+      title: finding.title,
+      summary: finding.summary,
+      whyItMatters: finding.whyItMatters,
+      suggestedAction: finding.suggestedAction,
+      evidence,
+      affectedAnchors: finding.affectedAnchors
+    }, null, 2),
+    "",
+    "## Output JSON Schema",
+    JSON.stringify({
+      status: "open",
+      summary: "One-sentence current status of this finding.",
+      rationale: "Short evidence-based explanation of why the issue still exists or no longer exists.",
+      evidence: [
+        { filePath: "relative/path", excerpt: "short current evidence" }
+      ]
+    }, null, 2)
+  ].join("\n");
+}
+
+function reviewResponseLanguage(args: Args): string {
+  const explicit = stringArg(args, "response-language") ?? stringArg(args, "language") ?? process.env.PRAXIS_RESPONSE_LANGUAGE;
+  if (explicit?.trim()) return explicit.trim();
+  const locale = stringArg(args, "locale") ?? process.env.PRAXIS_LOCALE;
+  if (locale === "zh-CN" || locale?.toLowerCase().startsWith("zh")) return "Simplified Chinese";
+  if (locale === "en" || locale?.toLowerCase().startsWith("en")) return "English";
+  return "the same language as the user's Praxis Studio UI";
+}
+
+function parsePiReviewFindings(
+  stdout: string,
+  input: {
+    runId: string;
+    generatedAt: string;
+    category: ReviewCategory;
+    evaluator: ReviewEvaluatorRef;
+  }
+): ReviewFinding[] {
+  const parsed = parsePiReviewJson(stdout) ?? salvagePiReviewJson(stdout);
+  if (!isRecord(parsed) || !Array.isArray(parsed.findings)) {
+    throw new Error(`Pi did not return review JSON for ${input.category}. Output was:\n${stdout.slice(0, 3000)}`);
+  }
+
+  const findings: ReviewFinding[] = [];
+  const rejected: string[] = [];
+  parsed.findings.forEach((item, index) => {
+    if (!isRecord(item)) {
+      rejected.push(`findings[${index}] is not an object`);
+      return;
+    }
+    const title = optionalString(item.title);
+    const summary = optionalString(item.summary);
+    const whyItMatters = optionalString(item.whyItMatters) ?? optionalString(item.why_it_matters);
+    const suggestedAction = optionalString(item.suggestedAction) ?? optionalString(item.suggested_action);
+    if (!title || !summary) {
+      rejected.push(`findings[${index}] is missing title or summary`);
+      return;
+    }
+    const severity = reviewSeverityValue(item.severity);
+    const confidence = reviewConfidenceValue(item.confidence);
+    const evidenceItems = Array.isArray(item.evidence) ? item.evidence.filter(isRecord) : [];
+    const affectedPaths = Array.isArray(item.affectedPaths)
+      ? item.affectedPaths.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+      : [];
+    const evidence: ReviewEvidenceRef[] = evidenceItems.length
+      ? evidenceItems.map((evidence) => ({
+        source: "agent" as const,
+        path: optionalString(evidence.path),
+        summary: optionalString(evidence.summary)
+          ?? optionalString(evidence.excerpt)?.slice(0, 260)
+          ?? (optionalString(evidence.path) ? `Evidence in ${optionalString(evidence.path)}` : `Pi returned evidence ${index + 1} without a summary.`),
+        excerpt: optionalString(evidence.excerpt)?.slice(0, 800)
+      }))
+      : [{ source: "agent" as const, summary: "Pi returned this candidate without path-level evidence." }];
+    const anchors = affectedPaths.length
+      ? affectedPaths.slice(0, 12).map((filePath) => fileAnchor(filePath))
+      : evidence.flatMap((evidence) => evidence.path ? [fileAnchor(evidence.path)] : []);
+    const evaluator: ReviewEvaluatorRef = { ...input.evaluator, source: "pi-agent" };
+    findings.push(ReviewFindingSchema.parse({
+      schemaVersion: "praxis.reviewFinding.v1",
+      id: `review:${severity.toLowerCase()}:${input.category}:${safeFilePart(title)}:${index + 1}`,
+      runId: input.runId,
+      category: input.category,
+      severity,
+      status: "candidate",
+      title,
+      summary,
+      whyItMatters: whyItMatters ?? "Pi did not provide a separate impact explanation; review the summary and evidence before accepting this candidate.",
+      suggestedAction: suggestedAction ?? "Review the evidence, then create a follow-up task or mark this candidate as needing more evidence.",
+      confidence,
+      source: "agent",
+      evaluator,
+      knowledgeKind: "CANDIDATE",
+      evidence,
+      affectedAnchors: anchors.slice(0, 12),
+      traceIds: [],
+      createdAt: input.generatedAt,
+      updatedAt: input.generatedAt
+    } satisfies ReviewFinding));
+  });
+  if (!findings.length && rejected.length) {
+    throw new Error(`Pi returned review JSON for ${input.category}, but no usable findings could be normalized: ${rejected.slice(0, 5).join("; ")}`);
+  }
+  return findings;
+}
+
+function parsePiFindingStatusPatch(
+  stdout: string,
+  finding: ReviewFinding,
+  runId: string,
+  createdAt: string
+): FindingStatusPatch {
+  const parsed = parsePiReviewJson(stdout);
+  if (!isRecord(parsed)) {
+    throw new Error(`Pi did not return finding refresh JSON for ${finding.id}. Output was:\n${stdout.slice(0, 2000)}`);
+  }
+  const rawStatus = optionalString(parsed.status)?.toLowerCase();
+  const status = findingStatusValue(rawStatus);
+  const summary = optionalString(parsed.summary)
+    ?? (status === "open" ? `复查后仍然检测到：${finding.title}` : `复查后状态更新为 ${status}：${finding.title}`);
+  const rationale = optionalString(parsed.rationale);
+  const evidenceItems = Array.isArray(parsed.evidence) ? parsed.evidence.filter(isRecord) : [];
+  const evidence: CodeFactEvidenceRef[] = evidenceItems.length
+    ? evidenceItems.map((item) => ({
+      source: "agent_inference" as const,
+      filePath: optionalString(item.filePath) ?? optionalString(item.path) ?? ".distinction/memory/candidates.jsonl",
+      excerpt: optionalString(item.excerpt) ?? optionalString(item.summary) ?? summary
+    }))
+    : finding.evidence.slice(0, 3).map(reviewEvidenceToCodeFactEvidence);
+  return FindingStatusPatchSchema.parse({
+    schemaVersion: "praxis.findingStatusPatch.v1",
+    id: `finding-status:${safeFilePart(finding.id)}:${safeFilePart(runId)}`,
+    sourceResultId: runId,
+    findingId: finding.id,
+    status,
+    summary,
+    rationale,
+    evidence,
+    createdAt
+  } satisfies FindingStatusPatch);
+}
+
+function findingStatusValue(value: unknown): FindingStatusPatch["status"] {
+  if (
+    value === "open"
+    || value === "acknowledged"
+    || value === "planned"
+    || value === "in_progress"
+    || value === "mitigated"
+    || value === "resolved"
+    || value === "false_positive"
+    || value === "accepted_risk"
+  ) {
+    return value;
+  }
+  return "acknowledged";
+}
+
+interface ProjectTreeFileEntry {
+  path: string;
+  language?: string;
+  roleHint?: string;
+  lineCount?: number;
+  sizeBytes?: number;
+}
+
+interface ProjectTreeNode {
+  id: string;
+  name: string;
+  path: string;
+  kind: "directory" | "file";
+  children: ProjectTreeNode[];
+  fileCount: number;
+  directoryCount: number;
+  language?: string;
+  roleHint?: string;
+  lineCount?: number;
+  sizeBytes?: number;
+  truncated?: boolean;
+}
+
+function buildProjectTree(files: ProjectTreeFileEntry[], maxDepth: number, maxEntries: number): {
+  ok: boolean;
+  generatedAt: string;
+  maxDepth: number;
+  maxEntries: number;
+  root: ProjectTreeNode;
+  totalFiles: number;
+  renderedEntries: number;
+  truncated: boolean;
+} {
+  const root: ProjectTreeNode = {
+    id: ".",
+    name: ".",
+    path: ".",
+    kind: "directory",
+    children: [],
+    fileCount: 0,
+    directoryCount: 0
+  };
+  const byPath = new Map<string, ProjectTreeNode>([[".", root]]);
+  for (const file of files.sort((left, right) => left.path.localeCompare(right.path))) {
+    const parts = file.path.split(/[\\/]+/).filter(Boolean);
+    let parent = root;
+    let currentPath = "";
+    parts.forEach((part, index) => {
+      currentPath = currentPath ? `${currentPath}/${part}` : part;
+      const isFile = index === parts.length - 1;
+      let node = byPath.get(currentPath);
+      if (!node) {
+        node = {
+          id: currentPath,
+          name: part,
+          path: currentPath,
+          kind: isFile ? "file" : "directory",
+          children: [],
+          fileCount: 0,
+          directoryCount: 0
+        };
+        byPath.set(currentPath, node);
+        parent.children.push(node);
+      }
+      if (isFile) {
+        node.language = file.language;
+        node.roleHint = file.roleHint;
+        node.lineCount = file.lineCount;
+        node.sizeBytes = file.sizeBytes;
+      }
+      parent = node;
+    });
+  }
+  annotateProjectTree(root);
+  let renderedEntries = 0;
+  const limitedRoot = limitProjectTree(root, 0, maxDepth, maxEntries, () => renderedEntries, (value) => { renderedEntries = value; });
+  return {
+    ok: true,
+    generatedAt: new Date().toISOString(),
+    maxDepth,
+    maxEntries,
+    root: limitedRoot,
+    totalFiles: files.length,
+    renderedEntries,
+    truncated: renderedEntries >= maxEntries || treeHasTruncation(limitedRoot)
+  };
+}
+
+function annotateProjectTree(node: ProjectTreeNode): { files: number; directories: number } {
+  if (node.kind === "file") {
+    node.fileCount = 1;
+    node.directoryCount = 0;
+    return { files: 1, directories: 0 };
+  }
+  let files = 0;
+  let directories = 0;
+  node.children.sort((left, right) => left.kind === right.kind ? left.name.localeCompare(right.name) : left.kind === "directory" ? -1 : 1);
+  for (const child of node.children) {
+    const counts = annotateProjectTree(child);
+    files += counts.files;
+    directories += child.kind === "directory" ? 1 + counts.directories : counts.directories;
+  }
+  node.fileCount = files;
+  node.directoryCount = directories;
+  return { files, directories };
+}
+
+function limitProjectTree(
+  node: ProjectTreeNode,
+  depth: number,
+  maxDepth: number,
+  maxEntries: number,
+  getRendered: () => number,
+  setRendered: (value: number) => void
+): ProjectTreeNode {
+  const next: ProjectTreeNode = { ...node, children: [] };
+  if (depth >= maxDepth) {
+    next.truncated = node.children.length > 0;
+    return next;
+  }
+  for (const child of node.children) {
+    if (getRendered() >= maxEntries) {
+      next.truncated = true;
+      break;
+    }
+    setRendered(getRendered() + 1);
+    next.children.push(limitProjectTree(child, depth + 1, maxDepth, maxEntries, getRendered, setRendered));
+  }
+  return next;
+}
+
+function treeHasTruncation(node: ProjectTreeNode): boolean {
+  return Boolean(node.truncated || node.children.some(treeHasTruncation));
+}
+
+function parsePiReviewJson(stdout: string): unknown {
+  const candidate = extractPiReviewJson(stdout);
+  return safeJson(candidate) ?? safeJson(repairPiReviewJson(candidate));
+}
+
+function salvagePiReviewJson(stdout: string): unknown {
+  const text = stripMarkdownJsonFence(stdout);
+  const findings: unknown[] = [];
+  for (const chunk of splitLikelyFindingChunks(text)) {
+    const severity = matchJsonStringField(chunk, "severity");
+    const title = matchJsonStringField(chunk, "title");
+    const summary = matchJsonStringField(chunk, "summary");
+    if (!title || !summary) continue;
+    const whyItMatters = matchJsonStringField(chunk, "whyItMatters") ?? matchJsonStringField(chunk, "why_it_matters");
+    const suggestedAction = matchJsonStringField(chunk, "suggestedAction") ?? matchJsonStringField(chunk, "suggested_action");
+    const confidence = matchJsonStringField(chunk, "confidence");
+    const paths = Array.from(chunk.matchAll(/"path"\s*:\s*"((?:\\.|[^"\\])*)"/g))
+      .map((match) => decodeJsonString(match[1] ?? ""))
+      .filter((value): value is string => Boolean(value));
+    const evidenceSummaries = Array.from(chunk.matchAll(/"summary"\s*:\s*"((?:\\.|[^"\\])*)"/g))
+      .slice(1, 5)
+      .map((match) => decodeJsonString(match[1] ?? ""))
+      .filter((value): value is string => Boolean(value));
+    const fallbackEvidenceSummary = "Pi returned a finding, but the JSON evidence block was incomplete or truncated; inspect the Pi review log for the full text.";
+    findings.push({
+      severity: severity ?? "P2",
+      title,
+      summary,
+      whyItMatters,
+      suggestedAction,
+      confidence: confidence ?? "medium",
+      evidence: paths.length
+        ? paths.slice(0, 6).map((filePath, index) => ({
+          path: filePath,
+          summary: evidenceSummaries[index] ?? fallbackEvidenceSummary
+        }))
+        : [{ summary: fallbackEvidenceSummary, excerpt: chunk.slice(0, 800) }],
+      affectedPaths: paths
+    });
+  }
+  return findings.length ? { findings } : undefined;
+}
+
+function stripMarkdownJsonFence(value: string): string {
+  const fenced = Array.from(value.matchAll(/```(?:json)?\s*([\s\S]*?)(?:```|$)/gi), (match) => match[1]?.trim() ?? "")
+    .filter(Boolean);
+  return fenced[0] ?? value;
+}
+
+function splitLikelyFindingChunks(value: string): string[] {
+  const marker = /"severity"\s*:\s*"P[0-3]"/g;
+  const starts = Array.from(value.matchAll(marker), (match) => match.index ?? -1).filter((index) => index >= 0);
+  if (!starts.length) return [value];
+  return starts.map((start, index) => {
+    const end = starts[index + 1] ?? value.length;
+    return value.slice(start, end);
+  });
+}
+
+function matchJsonStringField(value: string, field: string): string | undefined {
+  const escapedField = field.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = new RegExp(`"${escapedField}"\\s*:\\s*"((?:\\\\.|[^"\\\\])*)"`, "s").exec(value);
+  return match ? decodeJsonString(match[1] ?? "") : undefined;
+}
+
+function decodeJsonString(value: string): string | undefined {
+  const parsed = safeJson(`"${value.replace(/"/g, "\\\"")}"`);
+  if (typeof parsed === "string" && parsed.trim()) return parsed.trim();
+  return value.replace(/\\"/g, "\"").replace(/\\n/g, "\n").replace(/\\r/g, "\r").replace(/\\t/g, "\t").trim() || undefined;
+}
+
+function extractPiReviewJson(value: string): string {
+  const trimmed = value.trim();
+  const candidates = [
+    trimmed,
+    ...Array.from(trimmed.matchAll(/```(?:json)?\s*([\s\S]*?)(?:```|$)/gi), (match) => match[1]?.trim() ?? "")
+  ].filter(Boolean);
+  for (const candidate of candidates) {
+    const parsed = firstBalancedJsonObject(candidate);
+    if (parsed) return parsed;
+  }
+  return trimmed;
+}
+
+function firstBalancedJsonObject(value: string): string | undefined {
+  const start = value.indexOf("{");
+  if (start < 0) return undefined;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = start; index < value.length; index += 1) {
+    const char = value[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      escaped = inString;
+      continue;
+    }
+    if (char === "\"") {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+    if (char === "{") depth += 1;
+    else if (char === "}") {
+      depth -= 1;
+      if (depth === 0) return value.slice(start, index + 1);
+    }
+  }
+  return undefined;
+}
+
+function repairPiReviewJson(value: string): string {
+  let repaired = "";
+  let inString = false;
+  let escaped = false;
+  for (const char of value) {
+    if (!inString) {
+      if (char === "\"") inString = true;
+      repaired += char;
+      continue;
+    }
+    if (escaped) {
+      repaired += isJsonEscapeChar(char) ? char : `\\${char}`;
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (char === "\"") {
+      inString = false;
+      repaired += char;
+      continue;
+    }
+    if (char === "\n") {
+      repaired += "\\n";
+      continue;
+    }
+    if (char === "\r") {
+      repaired += "\\r";
+      continue;
+    }
+    if (char === "\t") {
+      repaired += "\\t";
+      continue;
+    }
+    repaired += char;
+  }
+  if (escaped) repaired += "\\\\";
+  return repaired;
+}
+
+function isJsonEscapeChar(value: string): boolean {
+  return value === "\"" || value === "\\" || value === "/" || value === "b" || value === "f" || value === "n" || value === "r" || value === "t" || value === "u";
+}
+
+function optionalString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function reviewSeverityValue(value: unknown): ReviewSeverity {
+  if (value === "P0" || value === "P1" || value === "P2" || value === "P3") return value;
+  return "P2";
+}
+
+function reviewConfidenceValue(value: unknown): ReviewFinding["confidence"] {
+  if (value === "high" || value === "medium" || value === "low") return value;
+  return "medium";
+}
+
+function qualityReviewProgressPath(root: string): string {
+  return path.join(root, ".distinction", "reviews", "progress", "latest.json");
+}
+
+async function writeReviewProgress(filePath: string, progress: ReviewProgressSnapshot): Promise<void> {
+  await writeJsonAtomic(filePath, progress);
+}
+
+async function appendPiReviewCategoryLog(root: string, runId: string, entry: unknown): Promise<void> {
+  const filePath = path.join(root, ".distinction", "reviews", "logs", `${safeFilePart(runId)}.jsonl`);
+  await mkdir(path.dirname(filePath), { recursive: true });
+  await appendFile(filePath, `${JSON.stringify(entry)}\n`, "utf8");
+}
+
+async function buildQualityReviewFindings(root: string, forcedRunId?: string, forcedGeneratedAt?: string): Promise<{ run: ReviewRun; findings: ReviewFinding[] }> {
+  const generatedAt = forcedGeneratedAt ?? new Date().toISOString();
+  const runId = forcedRunId ?? `review-run-${Date.now()}-${randomUUID().slice(0, 8)}`;
+  const cacheDir = path.join(root, ".distinction", "cache");
+  const memoryDir = path.join(root, ".distinction", "memory");
+  const repositorySnapshotPath = path.join(cacheDir, "repository-snapshot.json");
+  const codeFactsPath = path.join(cacheDir, "code-fact-graph.json");
+  const profilePath = path.join(cacheDir, "project-profile.json");
+  const understandingPath = path.join(cacheDir, "repository-understanding-patch.json");
+  const factsPath = path.join(memoryDir, "facts.jsonl");
+  const architecturePath = path.join(cacheDir, "architecture-model-patch.json");
+  const findingsPath = path.join(cacheDir, "architecture-findings.json");
+  const manifestPath = path.join(cacheDir, "projection-manifest.json");
+
+  const [repositorySnapshot, codeFacts, profile, understanding, factRecords, architecture, findings, manifest, projectedViews] = await Promise.all([
+    tryReadJsonFile(repositorySnapshotPath),
+    tryReadJsonWithSchema(codeFactsPath, CodeFactGraphSnapshotSchema),
+    tryReadJsonFile(profilePath),
+    tryReadJsonWithSchema(understandingPath, RepositoryUnderstandingPatchSchema),
+    readMemoryRecordJsonl(factsPath),
+    tryReadJsonWithSchema(architecturePath, ArchitectureModelPatchSchema),
+    tryReadJsonWithSchema(findingsPath, ArchitectureFindingReportSchema),
+    tryReadJsonWithSchema(manifestPath, ProjectionManifestSchema),
+    readProjectedGraphViewRecords(root)
+  ]);
+
+  const snapshotFiles = isRecord(repositorySnapshot) && Array.isArray(repositorySnapshot.files)
+    ? repositorySnapshot.files.filter(isRecord)
+    : [];
+  const projectKinds = isRecord(profile) && Array.isArray(profile.projectKinds) ? profile.projectKinds.filter((item): item is string => typeof item === "string") : [];
+  const frameworks = isRecord(profile) && Array.isArray(profile.frameworks) ? profile.frameworks.filter((item): item is string => typeof item === "string") : [];
+  const languages = isRecord(profile) && Array.isArray(profile.languages) ? profile.languages.filter((item): item is string => typeof item === "string") : [];
+  const findingsOut: ReviewFinding[] = [];
+  const context: QualityReviewContext = {
+    root,
+    runId,
+    generatedAt,
+    repositorySnapshotPath,
+    codeFactsPath,
+    profilePath,
+    understandingPath,
+    factsPath,
+    architecturePath,
+    findingsPath,
+    manifestPath,
+    snapshotFiles,
+    codeFacts,
+    projectKinds,
+    frameworks,
+    languages,
+    understanding,
+    factRecords,
+    architecture,
+    findings,
+    manifest,
+    projectedViews
+  };
+
+  addFoundationIntegrityFindings(context, findingsOut);
+  addArchitectureQualityFindings(context, findingsOut);
+  addBuildReleaseFindings(context, findingsOut);
+  addTestingFindings(context, findingsOut);
+  addSecurityAndConfigFindings(context, findingsOut);
+  addMaintainabilityFindings(context, findingsOut);
+  addApiContractFindings(context, findingsOut);
+  addPerformanceResourceFindings(context, findingsOut);
+  addProjectionFindings(context, findingsOut);
+  addExternalDetectorFindings(context, findingsOut);
+
+  const sorted = sortReviewFindings(dedupeReviewFindings(findingsOut)).map((finding) => ReviewFindingSchema.parse(finding));
+  const run = ReviewRunSchema.parse({
+    schemaVersion: "praxis.reviewRun.v1",
+    id: runId,
+    root,
+    generatedAt,
+    source: "praxis-heuristic",
+    status: "completed",
+    categories: [...reviewCategoryOrder],
+    findingIds: sorted.map((finding) => finding.id),
+    evaluatorResults: buildReviewEvaluatorResults(sorted),
+    summary: buildReviewRunSummary(sorted),
+    traceIds: []
+  } satisfies ReviewRun);
+  return { run, findings: sorted };
+}
+
+interface QualityReviewContext {
+  root: string;
+  runId: string;
+  generatedAt: string;
+  repositorySnapshotPath: string;
+  codeFactsPath: string;
+  profilePath: string;
+  understandingPath: string;
+  factsPath: string;
+  architecturePath: string;
+  findingsPath: string;
+  manifestPath: string;
+  snapshotFiles: Record<string, unknown>[];
+  codeFacts?: CodeFactGraphSnapshot;
+  projectKinds: string[];
+  frameworks: string[];
+  languages: string[];
+  understanding?: RepositoryUnderstandingPatch;
+  factRecords: MemoryRecord[];
+  architecture?: ArchitectureModelPatch;
+  findings?: ArchitectureFindingReport;
+  manifest?: unknown;
+  projectedViews: Awaited<ReturnType<typeof readProjectedGraphViewRecords>>;
+}
+
+function addFoundationIntegrityFindings(context: QualityReviewContext, findings: ReviewFinding[]): void {
+  if (!context.snapshotFiles.length) {
+    findings.push(reviewFinding(context, {
+      slug: "missing-repository-snapshot",
+      category: "documentation_knowledge",
+      severity: "P0",
+      title: "项目接入尚未产生仓库快照",
+      summary: "当前项目没有 repository-snapshot 缓存，后续图谱、记忆和工程评估都缺少可信事实层。",
+      whyItMatters: "v0.1 规格要求先由本地扫描产生 FACT，再允许 agent 生成候选判断或等待用户确认。",
+      suggestedAction: "先运行项目接入，再使用工程评估结果或生成编码任务。",
+      confidence: "high",
+      evidence: [fileEvidence(context, context.repositorySnapshotPath, "缺少仓库快照缓存。")],
+      affectedAnchors: []
+    }));
+    return;
+  }
+
+  const ignoredLike = context.snapshotFiles
+    .map((file) => String(file.path ?? ""))
+    .filter((filePath) => ignoredBuildArtifactPath(filePath));
+  if (ignoredLike.length > 0) {
+    const sample = ignoredLike.slice(0, 8);
+    findings.push(reviewFinding(context, {
+      slug: "scanner-includes-build-artifacts",
+      category: "documentation_knowledge",
+      severity: ignoredLike.length >= 50 ? "P0" : "P1",
+      title: "仓库扫描包含构建或发布产物",
+      summary: `仓库快照包含 ${ignoredLike.length} 个生成/构建产物路径，例如 ${sample.slice(0, 3).join(", ")}。`,
+      whyItMatters: "生成产物会污染 FACT 记忆、CodeGraph 事实、架构推断和后续评审优先级。",
+      suggestedAction: "让扫描器遵守 .gitignore 或项目专属忽略规则，然后重新生成 intake、代码事实、记忆和投影视图。",
+      confidence: "high",
+      evidence: [
+        fileEvidence(context, context.repositorySnapshotPath, `快照包含疑似应忽略的构建路径：${sample.join(", ")}。`),
+        {
+          source: "file",
+          path: ".gitignore",
+          summary: "存在项目忽略规则时，应把它作为扫描边界证据。"
+        }
+      ],
+      affectedAnchors: sample.map((filePath) => fileAnchor(filePath))
+    }));
+  }
+
+  const factStats = factRecordDuplicateStats(context.factRecords);
+  if (factStats.duplicateRecordCount > 0) {
+    findings.push(reviewFinding(context, {
+      slug: "fact-memory-duplicates",
+      category: "documentation_knowledge",
+      severity: factStats.duplicateRecordCount >= 100 ? "P1" : "P2",
+      title: "FACT 记忆中存在重复记录 id",
+      summary: `${factStats.duplicateIds} 个 FACT id 重复，额外产生 ${factStats.duplicateRecordCount} 行 facts.jsonl 记录。`,
+      whyItMatters: "追加式重复会让评审统计失真，也会影响架构和 finding 的候选推断。",
+      suggestedAction: "按记录 id 去重 FACT 记忆，或先让 accept-understanding 具备幂等性，再信任聚合结果。",
+      confidence: "high",
+      evidence: [
+        fileEvidence(context, context.factsPath, `facts.jsonl 行数=${context.factRecords.length}；唯一 id=${factStats.uniqueIds}；重复行=${factStats.duplicateRecordCount}。`)
+      ],
+      affectedAnchors: [{ kind: "memory", id: "facts.jsonl", path: ".distinction/memory/facts.jsonl" }]
+    }));
+  }
+
+  if (context.understanding && context.factRecords.length > 0) {
+    const patchIds = new Set(context.understanding.memoryPatches.map((patch) => patch.record.id));
+    const acceptedIds = new Set(context.factRecords.map((record) => record.id));
+    const missingAccepted = Array.from(patchIds).filter((id) => !acceptedIds.has(id)).length;
+    const extraAccepted = Array.from(acceptedIds).filter((id) => !patchIds.has(id)).length;
+    if (missingAccepted || extraAccepted) {
+      findings.push(reviewFinding(context, {
+        slug: "understanding-acceptance-drift",
+        category: "documentation_knowledge",
+        severity: "P2",
+        title: "仓库理解 patch 与 FACT 记忆不同步",
+        summary: `当前仓库理解 patch 与已接受 FACT 记忆不一致：缺少 ${missingAccepted} 个，额外存在 ${extraAccepted} 个唯一 FACT id。`,
+        whyItMatters: "Praxis 必须区分当前候选理解与已确认记忆；二者漂移会让页面错误地宣称某些知识已经被接受。",
+        suggestedAction: "先把当前 repository-understanding patch 与长期 FACT 记忆对齐，再把它作为已确认项目知识使用。",
+        confidence: "medium",
+        evidence: [
+          fileEvidence(context, context.understandingPath, `memoryPatches=${context.understanding.memoryPatches.length}。`),
+          fileEvidence(context, context.factsPath, `已接受唯一 FACT id=${acceptedIds.size}。`)
+        ],
+        affectedAnchors: [{ kind: "memory", id: "repository-understanding", path: ".distinction/cache/repository-understanding-patch.json" }]
+      }));
+    }
+  }
+
+  if (context.codeFacts?.provider.source === "native") {
+    findings.push(reviewFinding(context, {
+      slug: "native-code-facts-limited",
+      category: "documentation_knowledge",
+      severity: "P2",
+      title: "代码事实来自能力有限的 native provider",
+      summary: "当前 provider 只记录文件和 import 事实，缺少符号、调用和引用级证据。",
+      whyItMatters: "没有更强证据时，架构、影响面和工程评估项不能假装拥有符号级确定性。",
+      suggestedAction: "使用 CodeGraph 支撑更深的架构与依赖评估，或把相关候选项明确标为低深度证据。",
+      confidence: "high",
+      evidence: [fileEvidence(context, context.codeFactsPath, `provider=${context.codeFacts.provider.name}；能力=${context.codeFacts.provider.capabilities.join(", ")}。`)],
+      affectedAnchors: [{ kind: "code_fact_node", id: "provider:native", path: ".distinction/cache/code-fact-graph.json" }]
+    }));
+  }
+}
+
+function addArchitectureQualityFindings(context: QualityReviewContext, findings: ReviewFinding[]): void {
+  const sourceRootDirs = sourceRootDirectoryNames(context.snapshotFiles);
+  const moduleCount = context.architecture?.modules.length ?? 0;
+  if (sourceRootDirs.length >= 3 && moduleCount <= 1) {
+    findings.push(reviewFinding(context, {
+      slug: "architecture-model-underfits-project",
+      category: "architecture_boundaries",
+      severity: "P1",
+      title: "架构模型没有覆盖项目真实模块结构",
+      summary: `扫描发现 ${sourceRootDirs.length} 个类似源码的顶层区域，但当前架构模型只有 ${moduleCount} 个模块。`,
+      whyItMatters: "过弱的架构模型会让依赖、所有权和 finding 评审看起来比真实项目更干净。",
+      suggestedAction: "先让架构建模识别本项目的模块约定，再把架构 finding 当作完整结论接受。",
+      confidence: "high",
+      evidence: [
+        fileEvidence(context, context.repositorySnapshotPath, `类似源码的顶层区域：${sourceRootDirs.slice(0, 12).join(", ")}。`),
+        fileEvidence(context, context.architecturePath, `架构模块数=${moduleCount}。`)
+      ],
+      affectedAnchors: sourceRootDirs.slice(0, 12).map((dir) => ({ kind: "architecture_module", id: dir, path: dir }))
+    }));
+  }
+
+  if ((context.architecture?.warnings.length ?? 0) > 0) {
+    findings.push(reviewFinding(context, {
+      slug: "architecture-model-warnings",
+      category: "architecture_boundaries",
+      severity: "P2",
+      title: "架构模型仍有未处理警告",
+      summary: context.architecture?.warnings.map((warning) => warning.summary).join(" ") ?? "架构模型报告了警告。",
+      whyItMatters: "架构警告说明推断模型并不完整，不能直接当作已确认设计知识。",
+      suggestedAction: "逐条评审架构警告：要么补强证据，要么显式标记受影响模型为有意不完整。",
+      confidence: "high",
+      evidence: [fileEvidence(context, context.architecturePath, `${context.architecture?.warnings.length ?? 0} 条架构警告。`)],
+      affectedAnchors: [{ kind: "architecture_module", id: "architecture-model", path: ".distinction/cache/architecture-model-patch.json" }]
+    }));
+  }
+
+  const importEdges = context.codeFacts?.statistics.edgesByKind?.imports ?? 0;
+  const dependencyCount = context.architecture?.dependencies.length ?? 0;
+  if (importEdges > 0 && dependencyCount === 0) {
+    findings.push(reviewFinding(context, {
+      slug: "imports-not-lifted-to-architecture-dependencies",
+      category: "dependencies_coupling",
+      severity: "P2",
+      title: "import 证据没有提升为架构依赖",
+      summary: `代码事实里有 ${importEdges} 条 import 关系，但架构模型没有任何依赖。`,
+      whyItMatters: "如果 import 证据没有映射到架构边界，依赖评估就无法判断耦合、循环或越界引用。",
+      suggestedAction: "先把项目专属命名空间/模块映射到架构模块，再重新生成依赖视图和 findings。",
+      confidence: "medium",
+      evidence: [
+        fileEvidence(context, context.codeFactsPath, `imports=${importEdges}。`),
+        fileEvidence(context, context.architecturePath, `dependencies=${dependencyCount}。`)
+      ],
+      affectedAnchors: [{ kind: "architecture_dependency", id: "missing-import-mapping", path: ".distinction/cache/architecture-model-patch.json" }]
+    }));
+  }
+}
+
+function addBuildReleaseFindings(context: QualityReviewContext, findings: ReviewFinding[]): void {
+  const buildFiles = context.snapshotFiles.map((file) => String(file.path ?? "")).filter((filePath) => buildOutputPath(filePath));
+  if (buildFiles.length > 0) {
+    findings.push(reviewFinding(context, {
+      slug: "build-outputs-in-repository-snapshot",
+      category: "build_release",
+      severity: buildFiles.length >= 50 ? "P1" : "P2",
+      title: "扫描范围中包含构建输出",
+      summary: `当前快照包含 ${buildFiles.length} 个构建输出路径，例如 ${buildFiles.slice(0, 3).join(", ")}。`,
+      whyItMatters: "构建输出会放大项目体积、遮蔽源码所有权，也可能让 worker 上下文误读二进制或产物而不是源码。",
+      suggestedAction: "从 intake 中排除生成目录，并确认是否确实需要把某些产物作为发布资产提交。",
+      confidence: "high",
+      evidence: [fileEvidence(context, context.repositorySnapshotPath, `构建输出样例：${buildFiles.slice(0, 8).join(", ")}。`)],
+      affectedAnchors: buildFiles.slice(0, 8).map((filePath) => fileAnchor(filePath))
+    }));
+  }
+
+  const manifestNames = new Set(context.snapshotFiles.map((file) => path.basename(String(file.path ?? "")).toLowerCase()));
+  const hasBuildManifest = ["package.json", "cargo.toml", "csproj", "sln", "pom.xml", "build.gradle", "go.mod", "pyproject.toml"].some((name) => {
+    if (name === "csproj") return Array.from(manifestNames).some((item) => item.endsWith(".csproj"));
+    if (name === "sln") return Array.from(manifestNames).some((item) => item.endsWith(".sln"));
+    return manifestNames.has(name);
+  });
+  if (!hasBuildManifest && context.snapshotFiles.length > 0) {
+    findings.push(reviewFinding(context, {
+      slug: "no-build-manifest-detected",
+      category: "build_release",
+      severity: "P2",
+      title: "扫描项目中没有检测到构建清单",
+      summary: "仓库扫描没有识别到 package.json、Cargo.toml、.sln、.csproj、pom.xml 或 go.mod 等常见构建入口。",
+      whyItMatters: "缺少构建入口时，Praxis 无法为生成的受控编码任务给出可信验证命令。",
+      suggestedAction: "确认真实构建系统，并把它写入项目记忆或扫描器的构建清单检测逻辑。",
+      confidence: "medium",
+      evidence: [fileEvidence(context, context.repositorySnapshotPath, "快照文件名中没有发现常见构建清单。")],
+      affectedAnchors: []
+    }));
+  }
+}
+
+function addTestingFindings(context: QualityReviewContext, findings: ReviewFinding[]): void {
+  const allPaths = snapshotFilePaths(context);
+  const sourceFiles = allPaths.filter((filePath) => reviewableSourceCodePath(filePath));
+  const realTestFiles = allPaths.filter((filePath) => realTestPath(filePath));
+  const testLikeArtifacts = allPaths.filter((filePath) => testPath(filePath) && !realTestPath(filePath));
+  const coverageArtifacts = allPaths.filter((filePath) => coverageEvidencePath(filePath));
+  const integrationLikeTests = realTestFiles.filter((filePath) => integrationOrUiTestPath(filePath));
+  const isDesktopProject = context.projectKinds.includes("desktop_app")
+    || context.frameworks.some((framework) => /avalonia|tauri|electron|wpf|winui/i.test(framework));
+
+  if (sourceFiles.length >= 20 && realTestFiles.length === 0) {
+    findings.push(reviewFinding(context, {
+      slug: "no-real-tests-detected",
+      category: "testing_verification",
+      severity: "P1",
+      title: "非小型代码库没有检测到真实测试入口",
+      summary: `当前快照包含 ${sourceFiles.length} 个可评审源码文件，但没有检测到真实 test/spec 文件、Tests 项目或测试目录。`,
+      whyItMatters: "受控编码任务需要验证命令；没有测试时，回归只能依赖人工检查或仅构建检查。",
+      suggestedAction: "先补充至少一条可运行的测试入口，并把验证命令写入项目记忆；否则编码 worker 不能声称具备回归保护。",
+      confidence: "high",
+      evidence: [
+        fileEvidence(context, context.repositorySnapshotPath, `可评审源码=${sourceFiles.length}；真实测试入口=${realTestFiles.length}。`)
+      ],
+      affectedAnchors: sourceFiles.slice(0, 8).map((filePath) => fileAnchor(filePath))
+    }));
+  }
+
+  if (sourceFiles.length >= 20 && coverageArtifacts.length === 0) {
+    findings.push(reviewFinding(context, {
+      slug: "missing-coverage-evidence",
+      category: "testing_verification",
+      severity: "P1",
+      title: "缺少覆盖率证据，不能证明 100% 覆盖",
+      summary: "当前快照没有检测到 lcov、cobertura、opencover、.coverage、coverage 目录或覆盖率配置。",
+      whyItMatters: "没有覆盖率报告时，Praxis 不能把“已有测试”解释成“质量已被验证”；即使存在单元测试，也无法证明关键路径或发布形态被覆盖。",
+      suggestedAction: "为项目建立覆盖率产出和阈值，并在工程评审中把低于 100% 或没有覆盖率证据都列为待评审问题。",
+      confidence: "high",
+      evidence: [fileEvidence(context, context.repositorySnapshotPath, `覆盖率证据=${coverageArtifacts.length}；可评审源码=${sourceFiles.length}。`)],
+      affectedAnchors: sourceFiles.slice(0, 8).map((filePath) => fileAnchor(filePath))
+    }));
+  }
+
+  if (isDesktopProject && sourceFiles.length >= 20 && integrationLikeTests.length === 0) {
+    findings.push(reviewFinding(context, {
+      slug: "desktop-flow-verification-missing",
+      category: "testing_verification",
+      severity: realTestFiles.length === 0 ? "P1" : "P2",
+      title: "桌面关键流程缺少集成/UI/端到端验证证据",
+      summary: `项目被识别为桌面应用，但没有检测到 integration、ui、e2e、playwright、selenium 或类似发布形态验证入口。`,
+      whyItMatters: "桌面应用的风险通常在窗口生命周期、平台资源、硬件/驱动集成和发布包行为里，仅靠单元测试或构建成功无法覆盖这些问题。",
+      suggestedAction: "补充桌面冒烟、UI 自动化或发布包级验证，并把验证入口纳入受控编码任务的验收条件。",
+      confidence: "medium",
+      evidence: [
+        fileEvidence(context, context.profilePath, `projectKinds=${context.projectKinds.join(", ")}；frameworks=${context.frameworks.join(", ")}。`),
+        fileEvidence(context, context.repositorySnapshotPath, `真实测试入口=${realTestFiles.length}；集成/UI/E2E 测试入口=${integrationLikeTests.length}。`)
+      ],
+      affectedAnchors: sourceFiles.slice(0, 8).map((filePath) => fileAnchor(filePath))
+    }));
+  }
+
+  if (testLikeArtifacts.length > 0) {
+    findings.push(reviewFinding(context, {
+      slug: "test-like-artifacts-pollute-verification-signal",
+      category: "testing_verification",
+      severity: "P2",
+      title: "test 字样的构建产物污染了测试识别信号",
+      summary: `检测到 ${testLikeArtifacts.length} 个 test-like 路径不是真实测试入口，例如 ${testLikeArtifacts.slice(0, 3).join(", ")}。`,
+      whyItMatters: "如果把 dcrf32test.exe、发布目录或私钥文件名里的 test 当成测试证据，评审页会错误显示“暂无问题”。",
+      suggestedAction: "测试识别只能接受真实测试源文件、测试项目或测试框架入口；构建产物和二进制文件应继续作为构建/性能/安全风险处理。",
+      confidence: "high",
+      evidence: [fileEvidence(context, context.repositorySnapshotPath, `误导性 test-like 路径样例：${testLikeArtifacts.slice(0, 8).join(", ")}。`)],
+      affectedAnchors: testLikeArtifacts.slice(0, 8).map((filePath) => fileAnchor(filePath))
+    }));
+  }
+}
+
+function addSecurityAndConfigFindings(context: QualityReviewContext, findings: ReviewFinding[]): void {
+  const allPaths = snapshotFilePaths(context);
+  const sensitiveFiles = context.snapshotFiles
+    .map((file) => String(file.path ?? ""))
+    .filter((filePath) => sensitiveConfigPath(filePath));
+  const sensitiveBuildFiles = sensitiveFiles.filter((filePath) => buildOutputPath(filePath));
+  if (sensitiveBuildFiles.length > 0) {
+    findings.push(reviewFinding(context, {
+      slug: "sensitive-material-in-build-artifacts",
+      category: "security_secrets",
+      severity: "P0",
+      title: "发布或构建产物中包含疑似密钥材料",
+      summary: `构建/发布路径里发现 ${sensitiveBuildFiles.length} 个疑似敏感文件，例如 ${sensitiveBuildFiles.slice(0, 3).join(", ")}。`,
+      whyItMatters: "私钥、证书或凭据一旦进入发布产物、agent 上下文或项目记忆，后续 worker 可能无意扩散敏感信息。",
+      suggestedAction: "立即确认这些文件是否是真实密钥；若是，轮换密钥并把构建输出、发布目录和密钥目录加入扫描与上下文过滤规则。",
+      confidence: "high",
+      evidence: [fileEvidence(context, context.repositorySnapshotPath, `敏感构建产物样例：${sensitiveBuildFiles.slice(0, 8).join(", ")}。`)],
+      affectedAnchors: sensitiveBuildFiles.slice(0, 8).map((filePath) => fileAnchor(filePath))
+    }));
+  }
+
+  if (sensitiveFiles.length > 0) {
+    findings.push(reviewFinding(context, {
+      slug: "sensitive-config-files-present",
+      category: "security_secrets",
+      severity: sensitiveBuildFiles.length > 0 ? "P1" : "P2",
+      title: "扫描范围中存在疑似敏感文件",
+      summary: `发现 ${sensitiveFiles.length} 个疑似敏感配置文件，例如 ${sensitiveFiles.slice(0, 3).join(", ")}。`,
+      whyItMatters: "凭据、私钥、证书和环境专属值在进入 agent 上下文、项目记忆或外部 worker 提示词前必须先评审。",
+      suggestedAction: "检查这些文件是否包含密钥；未来 agent 运行前应遮蔽、摘要化或忽略敏感值。",
+      confidence: sensitiveBuildFiles.length > 0 ? "high" : "medium",
+      evidence: [fileEvidence(context, context.repositorySnapshotPath, `敏感配置样例：${sensitiveFiles.slice(0, 8).join(", ")}。`)],
+      affectedAnchors: sensitiveFiles.slice(0, 8).map((filePath) => fileAnchor(filePath))
+    }));
+  }
+
+  const configFiles = allPaths.filter((filePath) => configPath(filePath));
+  const generatedConfigFiles = configFiles.filter((filePath) => buildOutputPath(filePath));
+  if (configFiles.length >= 20) {
+    findings.push(reviewFinding(context, {
+      slug: "large-config-surface",
+      category: "configuration_environment",
+      severity: "P2",
+      title: "配置面过大，需要明确环境所有权",
+      summary: `项目中检测到 ${configFiles.length} 个配置文件。`,
+      whyItMatters: "配置扩散经常隐藏环境专属行为，agent 可能把这些行为误解为源码真相。",
+      suggestedAction: "在把配置内容写入长期项目记忆前，先区分生产、开发和生成配置文件。",
+      confidence: "medium",
+      evidence: [fileEvidence(context, context.repositorySnapshotPath, `配置样例：${configFiles.slice(0, 8).join(", ")}。`)],
+      affectedAnchors: configFiles.slice(0, 8).map((filePath) => fileAnchor(filePath))
+    }));
+  }
+
+  if (generatedConfigFiles.length >= 5) {
+    findings.push(reviewFinding(context, {
+      slug: "generated-configs-treated-as-environment-facts",
+      category: "configuration_environment",
+      severity: "P2",
+      title: "生成配置混入扫描范围，环境事实所有权不清",
+      summary: `检测到 ${generatedConfigFiles.length} 个位于构建/发布路径下的配置文件，例如 ${generatedConfigFiles.slice(0, 3).join(", ")}。`,
+      whyItMatters: "生成配置经常是发布结果或本机环境快照，不能直接当成源码层面的环境约定写入长期记忆。",
+      suggestedAction: "把源码配置、发布配置和本机生成配置分层；只有经过确认的环境约定才能进入已确认项目记忆。",
+      confidence: "high",
+      evidence: [fileEvidence(context, context.repositorySnapshotPath, `生成配置样例：${generatedConfigFiles.slice(0, 8).join(", ")}。`)],
+      affectedAnchors: generatedConfigFiles.slice(0, 8).map((filePath) => fileAnchor(filePath))
+    }));
+  }
+}
+
+function addMaintainabilityFindings(context: QualityReviewContext, findings: ReviewFinding[]): void {
+  const sourceFiles = context.snapshotFiles.filter((file) => reviewableSourceCodePath(String(file.path ?? "")));
+  const generatedSourceFiles = context.snapshotFiles
+    .map((file) => String(file.path ?? ""))
+    .filter((filePath) => generatedSourcePath(filePath));
+  const largeSourceFiles = sourceFiles.filter((file) => {
+    const filePath = String(file.path ?? "");
+    return !generatedSourcePath(filePath) && (snapshotLineCount(file) >= 800 || snapshotSizeBytes(file) >= 120_000);
+  }).map((file) => String(file.path ?? ""));
+
+  if (generatedSourceFiles.length > 0) {
+    findings.push(reviewFinding(context, {
+      slug: "generated-source-contaminates-maintainability-signal",
+      category: "code_quality_maintainability",
+      severity: generatedSourceFiles.length >= 50 ? "P1" : "P2",
+      title: "生成源码混入评审范围，维护性信号被污染",
+      summary: `检测到 ${generatedSourceFiles.length} 个生成源码路径，例如 ${generatedSourceFiles.slice(0, 3).join(", ")}。`,
+      whyItMatters: "GlobalUsings、AssemblyInfo、g.cs 和 obj/bin 下的源码不是工程师直接维护的主源码，把它们纳入质量判断会稀释真正的复杂度和所有权问题。",
+      suggestedAction: "在源码评审、复杂度评估和上下文构造中排除生成源码，同时保留它们作为扫描边界污染的候选问题证据。",
+      confidence: "high",
+      evidence: [fileEvidence(context, context.repositorySnapshotPath, `生成源码样例：${generatedSourceFiles.slice(0, 8).join(", ")}。`)],
+      affectedAnchors: generatedSourceFiles.slice(0, 8).map((filePath) => fileAnchor(filePath))
+    }));
+  }
+
+  if (sourceFiles.length >= 100 && context.codeFacts?.provider.source === "native") {
+    findings.push(reviewFinding(context, {
+      slug: "maintainability-lacks-symbol-and-call-facts",
+      category: "code_quality_maintainability",
+      severity: "P2",
+      title: "维护性评估缺少符号、调用和复杂度事实",
+      summary: `当前有 ${sourceFiles.length} 个可评审源码文件，但代码事实 provider 只有 ${context.codeFacts.provider.capabilities.join(", ")} 能力。`,
+      whyItMatters: "没有符号/调用/引用事实时，评审器无法可靠发现大类、长方法、隐藏耦合或影响面，不能把空结果解释成代码质量良好。",
+      suggestedAction: "接入 CodeGraph 或等价符号级事实后，再让维护性评估器生成复杂度、重复、调用链和影响面候选问题。",
+      confidence: "high",
+      evidence: [
+        fileEvidence(context, context.codeFactsPath, `provider=${context.codeFacts.provider.name}；capabilities=${context.codeFacts.provider.capabilities.join(", ")}。`),
+        fileEvidence(context, context.repositorySnapshotPath, `可评审源码=${sourceFiles.length}。`)
+      ],
+      affectedAnchors: [{ kind: "code_fact_node", id: "provider:native", path: ".distinction/cache/code-fact-graph.json" }]
+    }));
+  }
+
+  if (largeSourceFiles.length > 0) {
+    findings.push(reviewFinding(context, {
+      slug: "large-source-files-need-maintainability-review",
+      category: "code_quality_maintainability",
+      severity: "P2",
+      title: "存在超大源码文件，需要维护性拆解评审",
+      summary: `检测到 ${largeSourceFiles.length} 个超大源码文件，例如 ${largeSourceFiles.slice(0, 3).join(", ")}。`,
+      whyItMatters: "超大文件通常意味着职责聚合、测试困难和变更影响面难以判断，尤其会削弱后续 agent 的局部理解能力。",
+      suggestedAction: "对这些文件补充职责说明、测试锚点和拆解计划；在没有证据前保持为候选维护风险。",
+      confidence: "medium",
+      evidence: [fileEvidence(context, context.repositorySnapshotPath, `超大源码样例：${largeSourceFiles.slice(0, 8).join(", ")}。`)],
+      affectedAnchors: largeSourceFiles.slice(0, 8).map((filePath) => fileAnchor(filePath))
+    }));
+  }
+}
+
+function addApiContractFindings(context: QualityReviewContext, findings: ReviewFinding[]): void {
+  const allPaths = snapshotFilePaths(context);
+  const contractFiles = allPaths.filter((filePath) => apiContractPath(filePath));
+  const httpFlowFiles = allPaths.filter((filePath) => httpOrDataFlowPath(filePath));
+  const contractTests = allPaths.filter((filePath) => realTestPath(filePath) && apiContractTestPath(filePath));
+
+  if ((contractFiles.length >= 5 || httpFlowFiles.length > 0) && contractTests.length === 0) {
+    findings.push(reviewFinding(context, {
+      slug: "api-contracts-without-contract-tests",
+      category: "api_contracts_data_flow",
+      severity: "P1",
+      title: "接口契约和数据流缺少契约测试证据",
+      summary: `检测到 ${contractFiles.length} 个契约/DTO/服务接口路径和 ${httpFlowFiles.length} 个 HTTP/数据流路径，但没有契约测试入口。`,
+      whyItMatters: "服务接口、Request/Response DTO 和 HTTP 客户端一旦漂移，桌面端可能在运行期才失败；没有消费者或契约测试时，agent 也无法安全改动接口。",
+      suggestedAction: "为服务契约、DTO 序列化和 HTTP 调用补充契约测试或消费者验证，并把契约边界写入项目记忆。",
+      confidence: "high",
+      evidence: [
+        fileEvidence(context, context.repositorySnapshotPath, `契约样例：${contractFiles.slice(0, 8).join(", ")}。`),
+        fileEvidence(context, context.repositorySnapshotPath, `HTTP/数据流样例：${httpFlowFiles.slice(0, 8).join(", ")}。`)
+      ],
+      affectedAnchors: [...contractFiles, ...httpFlowFiles].slice(0, 8).map((filePath) => fileAnchor(filePath))
+    }));
+  }
+
+  if (contractFiles.length >= 10 && (context.architecture?.dependencies.length ?? 0) === 0) {
+    findings.push(reviewFinding(context, {
+      slug: "contract-boundaries-not-projected-to-architecture",
+      category: "api_contracts_data_flow",
+      severity: "P2",
+      title: "接口契约没有投影到架构依赖和消费者关系",
+      summary: `项目存在 ${contractFiles.length} 个契约相关文件，但架构模型 dependencies=0。`,
+      whyItMatters: "契约层如果没有消费者和依赖方向，评审器只能看到文件名，无法判断数据从哪里来、被谁消费、改动会破坏谁。",
+      suggestedAction: "把服务接口、DTO、HTTP 客户端和消费模块映射成架构边或投影视图，再执行接口契约评审。",
+      confidence: "medium",
+      evidence: [
+        fileEvidence(context, context.repositorySnapshotPath, `契约文件=${contractFiles.length}。`),
+        fileEvidence(context, context.architecturePath, `dependencies=${context.architecture?.dependencies.length ?? 0}。`)
+      ],
+      affectedAnchors: contractFiles.slice(0, 8).map((filePath) => fileAnchor(filePath))
+    }));
+  }
+}
+
+function addPerformanceResourceFindings(context: QualityReviewContext, findings: ReviewFinding[]): void {
+  const buildFiles = snapshotFilePaths(context).filter((filePath) => buildOutputPath(filePath));
+  const unknownFiles = context.snapshotFiles
+    .filter((file) => String(file.language ?? "").toLowerCase() === "unknown")
+    .map((file) => String(file.path ?? ""));
+  const binaryFiles = snapshotFilePaths(context).filter((filePath) => binaryOrNativeArtifactPath(filePath));
+  const largeFiles = context.snapshotFiles
+    .filter((file) => snapshotSizeBytes(file) >= 1_000_000)
+    .map((file) => String(file.path ?? ""));
+  const resourceHeavyPaths = snapshotFilePaths(context).filter((filePath) => resourceHeavyPath(filePath));
+  const performanceTests = snapshotFilePaths(context).filter((filePath) => realTestPath(filePath) && performanceTestPath(filePath));
+
+  if (buildFiles.length >= 50 || unknownFiles.length >= 100 || binaryFiles.length >= 20) {
+    findings.push(reviewFinding(context, {
+      slug: "repository-scan-surface-too-large-for-agent-context",
+      category: "performance_resources",
+      severity: buildFiles.length >= 500 || unknownFiles.length >= 500 ? "P1" : "P2",
+      title: "扫描面包含大量产物/未知/二进制文件，会放大 agent 上下文",
+      summary: `快照中构建产物=${buildFiles.length}，Unknown 文件=${unknownFiles.length}，二进制/原生文件=${binaryFiles.length}。`,
+      whyItMatters: "过大的扫描面会拖慢 intake、CodeGraph、上下文构造和桌面评审，也会把 worker 注意力从源码转移到发布产物。",
+      suggestedAction: "先收紧扫描边界，排除构建输出、发布目录、日志和二进制库，再重新生成事实层和评审候选项。",
+      confidence: "high",
+      evidence: [
+        fileEvidence(context, context.repositorySnapshotPath, `构建产物样例：${buildFiles.slice(0, 8).join(", ")}。`),
+        fileEvidence(context, context.codeFactsPath, `files=${context.codeFacts?.statistics.fileCount ?? context.snapshotFiles.length}；Unknown=${context.codeFacts?.statistics.filesByLanguage?.Unknown ?? unknownFiles.length}。`)
+      ],
+      affectedAnchors: [...buildFiles, ...unknownFiles, ...binaryFiles].slice(0, 8).map((filePath) => fileAnchor(filePath))
+    }));
+  }
+
+  if (largeFiles.length > 0) {
+    findings.push(reviewFinding(context, {
+      slug: "large-files-in-review-scope",
+      category: "performance_resources",
+      severity: largeFiles.length >= 20 ? "P1" : "P2",
+      title: "大文件进入评审范围，可能拖慢扫描和上下文构造",
+      summary: `检测到 ${largeFiles.length} 个超过 1MB 的文件，例如 ${largeFiles.slice(0, 3).join(", ")}。`,
+      whyItMatters: "大文件和二进制资产通常不适合直接送入 agent 上下文；它们需要摘要、引用或资源清单，而不是全文扫描。",
+      suggestedAction: "为大文件建立资源清单和摘要策略，并从默认上下文包中排除原始内容。",
+      confidence: "medium",
+      evidence: [fileEvidence(context, context.repositorySnapshotPath, `大文件样例：${largeFiles.slice(0, 8).join(", ")}。`)],
+      affectedAnchors: largeFiles.slice(0, 8).map((filePath) => fileAnchor(filePath))
+    }));
+  }
+
+  if (resourceHeavyPaths.length > 0 && performanceTests.length === 0) {
+    findings.push(reviewFinding(context, {
+      slug: "resource-heavy-paths-without-performance-verification",
+      category: "performance_resources",
+      severity: "P2",
+      title: "资源密集路径缺少性能或压力验证证据",
+      summary: `检测到 ${resourceHeavyPaths.length} 个驱动、原生库、watcher、hot reload 或资源路径，但没有性能/压力测试入口。`,
+      whyItMatters: "桌面应用和硬件/原生库集成常见风险不是编译失败，而是启动慢、资源泄漏、文件监听膨胀或发布包体积失控。",
+      suggestedAction: "为启动、发布包、驱动加载和资源访问建立性能预算或压力验证，并把结果写入候选评审记忆。",
+      confidence: "medium",
+      evidence: [fileEvidence(context, context.repositorySnapshotPath, `资源密集路径样例：${resourceHeavyPaths.slice(0, 8).join(", ")}。`)],
+      affectedAnchors: resourceHeavyPaths.slice(0, 8).map((filePath) => fileAnchor(filePath))
+    }));
+  }
+}
+
+function addProjectionFindings(context: QualityReviewContext, findings: ReviewFinding[]): void {
+  const failedViews = context.projectedViews.filter((record) => record.view.status === "failed");
+  if (!context.manifest || context.projectedViews.length === 0) {
+    findings.push(reviewFinding(context, {
+      slug: "projection-views-missing",
+      category: "documentation_knowledge",
+      severity: "P2",
+      title: "缺少工程投影视图",
+      summary: "当前没有可用于架构、代码事实、findings、记忆或 trace 的投影视图。",
+      whyItMatters: "评审项需要图谱锚点和可导航证据；没有投影时，评审队列会失去上下文所有权。",
+      suggestedAction: "在 intake 和记忆接受后生成工程投影视图。",
+      confidence: "high",
+      evidence: [fileEvidence(context, context.manifestPath, "缺少 projection manifest 或视图记录。")],
+      affectedAnchors: []
+    }));
+  } else if (failedViews.length > 0) {
+    findings.push(reviewFinding(context, {
+      slug: "projection-views-failed",
+      category: "documentation_knowledge",
+      severity: "P2",
+      title: "部分工程投影视图生成失败",
+      summary: `${failedViews.length} 个投影视图被标记为失败。`,
+      whyItMatters: "失败投影可能隐藏受影响节点，让评审证据难以检查。",
+      suggestedAction: "检查失败的 projection 记录，修复源缓存问题后重新生成投影视图。",
+      confidence: "high",
+      evidence: [fileEvidence(context, context.manifestPath, `失败视图数=${failedViews.length}。`)],
+      affectedAnchors: failedViews.map((record) => ({ kind: "projection_node", id: record.view.id, path: record.path }))
+    }));
+  }
+}
+
+function addExternalDetectorFindings(context: QualityReviewContext, findings: ReviewFinding[]): void {
+  for (const finding of context.findings?.findings ?? []) {
+    findings.push(reviewFinding(context, {
+      slug: safeFilePart(finding.id),
+      category: externalArchitectureFindingReviewCategory(finding),
+      severity: architectureFindingSeverity(finding.severity),
+      title: localizeArchitectureFindingTitle(finding),
+      summary: localizeArchitectureFindingSummary(finding),
+      whyItMatters: "架构 detector 的输出只是候选工程评估项，必须经过用户确认、驳回或补充证据后才能进入已确认记忆。",
+      suggestedAction: "检查 detector 证据，并选择接受、驳回或请求更多证据。",
+      confidence: finding.confidence,
+      evidence: [
+        fileEvidence(context, context.findingsPath, `Detector ${finding.antiPatternId} 报告了 ${finding.id}。`),
+        ...finding.evidence.map((evidence) => ({
+          source: "file" as const,
+          path: evidence.filePath,
+          summary: evidence.excerpt ?? `${finding.id} 的证据。`,
+          excerpt: evidence.excerpt
+        }))
+      ],
+      affectedAnchors: [{ kind: "finding", id: finding.id }]
+    }));
+  }
+}
+
+function externalArchitectureFindingReviewCategory(finding: ArchitectureFinding): ReviewCategory {
+  if (finding.antiPatternId === "package_dependency_cycle") return "dependencies_coupling";
+  return "architecture_boundaries";
+}
+
+function localizeArchitectureFindingTitle(finding: ArchitectureFinding): string {
+  if (finding.antiPatternId === "architecture_dependency_without_evidence") return `架构依赖缺少证据：${finding.affectedDependencyIds.join(", ")}`;
+  if (finding.antiPatternId === "package_dependency_cycle") return `模块依赖存在循环：${finding.affectedModuleIds.join(" -> ")}`;
+  return finding.title;
+}
+
+function localizeArchitectureFindingSummary(finding: ArchitectureFinding): string {
+  if (finding.antiPatternId === "architecture_dependency_without_evidence") {
+    return "有架构依赖缺少来源记忆或证据引用，当前不能作为已确认架构知识使用。";
+  }
+  if (finding.antiPatternId === "package_dependency_cycle") {
+    return "模块级依赖形成循环，会让架构边界更难演进，也会削弱受控编码任务的影响面判断。";
+  }
+  return finding.summary;
+}
+
+function architectureFindingSeverity(severity: ArchitectureFinding["severity"]): ReviewSeverity {
+  if (severity === "critical" || severity === "high") return "P1";
+  if (severity === "medium") return "P2";
+  return "P3";
+}
+
+function buildQualityReviewQueueSummary(findings: ReviewFinding[], latestRun?: ReviewRun, progress?: ReviewProgressSnapshot) {
+  return {
+    counts: buildReviewRunSummary(findings),
+    generatedAt: new Date().toISOString(),
+    severityOrder: ["P0", "P1", "P2", "P3"] as ReviewSeverity[],
+    categoryOrder: [...reviewCategoryOrder],
+    evaluatorResults: progress
+      ? completeReviewEvaluatorResults(findings, progress.evaluatorResults ?? [], progress)
+      : latestRun?.evaluatorResults?.length
+        ? completeReviewEvaluatorResults(findings, latestRun.evaluatorResults)
+        : buildReviewEvaluatorResults(findings)
+  };
+}
+
+function buildReviewEvaluatorResults(findings: ReviewFinding[]): ReviewRun["evaluatorResults"] {
+  return reviewCategoryOrder.map((category) => {
+    const categoryFindingIds = findings
+      .filter((finding) => displayReviewCategory(finding.category) === category)
+      .map((finding) => finding.id);
+    return {
+      evaluator: reviewEvaluatorFor(category),
+      status: "completed" as const,
+      findingIds: categoryFindingIds,
+      summary: categoryFindingIds.length
+        ? `评估器生成 ${categoryFindingIds.length} 个候选问题。`
+        : "当前规则未命中候选问题；不代表该类别健康。"
+    };
+  });
+}
+
+function completeReviewEvaluatorResults(
+  findings: ReviewFinding[],
+  existing: NonNullable<ReviewRun["evaluatorResults"]>,
+  progress?: ReviewProgressSnapshot
+): NonNullable<ReviewRun["evaluatorResults"]> {
+  const byCategory = new Map(existing.map((item) => [displayReviewCategory(item.evaluator.category), item]));
+  const currentCategory = progress?.status === "running" ? progress.currentCategory : undefined;
+  const completedCategories = new Set(existing.map((item) => displayReviewCategory(item.evaluator.category)));
+  return reviewCategoryOrder.map((category) => {
+    const current = byCategory.get(category);
+    if (current) return current;
+    const categoryFindingIds = findings
+      .filter((finding) => displayReviewCategory(finding.category) === category)
+      .map((finding) => finding.id);
+    if (progress?.status === "running" && category === currentCategory) {
+      return {
+        evaluator: reviewEvaluatorFor(category),
+        status: "partial",
+        findingIds: categoryFindingIds,
+        summary: progress.message || "Pi is currently evaluating this category."
+      };
+    }
+    if (progress?.status === "running" && !completedCategories.has(category)) {
+      return {
+        evaluator: reviewEvaluatorFor(category),
+        status: "partial",
+        findingIds: categoryFindingIds,
+        summary: "Pi has not reached this category in the current run yet."
+      };
+    }
+    if (progress?.status === "failed" && category === currentCategory) {
+      return {
+        evaluator: reviewEvaluatorFor(category),
+        status: "failed",
+        findingIds: categoryFindingIds,
+        summary: progress.error ?? progress.message ?? "Pi failed while evaluating this category."
+      };
+    }
+    if (progress?.status === "failed" && !completedCategories.has(category)) {
+      return {
+        evaluator: reviewEvaluatorFor(category),
+        status: "partial",
+        findingIds: categoryFindingIds,
+        summary: "Pi did not complete before this category ran."
+      };
+    }
+    return {
+      evaluator: reviewEvaluatorFor(category),
+      status: "completed",
+      findingIds: categoryFindingIds,
+      summary: categoryFindingIds.length
+        ? `评估器生成 ${categoryFindingIds.length} 个候选问题。`
+        : "当前规则未命中候选问题；不代表该类别健康。"
+    };
+  });
+}
+
+function replaceEvaluatorResult(
+  results: NonNullable<ReviewRun["evaluatorResults"]>,
+  category: ReviewCategory,
+  replacement: NonNullable<ReviewRun["evaluatorResults"]>[number]
+): NonNullable<ReviewRun["evaluatorResults"]> {
+  const displayCategory = displayReviewCategory(category);
+  return reviewCategoryOrder.map((item) =>
+    item === displayCategory
+      ? replacement
+      : results.find((result) => displayReviewCategory(result.evaluator.category) === item) ?? {
+        evaluator: reviewEvaluatorFor(item),
+        status: "partial",
+        findingIds: [],
+        summary: "该分类还没有可用的评估结果。"
+      }
+  );
+}
+
+function displayReviewCategory(category: ReviewCategory): ReviewCategory {
+  return category === "foundation_integrity" ? "documentation_knowledge" : category;
+}
+
+function reviewFinding(
+  context: QualityReviewContext,
+  input: {
+    slug: string;
+    category: ReviewCategory;
+    severity: ReviewSeverity;
+    title: string;
+    summary: string;
+    whyItMatters: string;
+    suggestedAction: string;
+    confidence: "high" | "medium" | "low";
+    evidence: ReviewEvidenceRef[];
+    affectedAnchors: GraphAnchor[];
+    source?: ReviewFinding["source"];
+  }
+): ReviewFinding {
+  const category = displayReviewCategory(input.category);
+  return ReviewFindingSchema.parse({
+    schemaVersion: "praxis.reviewFinding.v1",
+    id: `review:${input.severity.toLowerCase()}:${category}:${safeFilePart(input.slug)}`,
+    runId: context.runId,
+    category,
+    severity: input.severity,
+    status: "candidate",
+    title: input.title,
+    summary: input.summary,
+    whyItMatters: input.whyItMatters,
+    suggestedAction: input.suggestedAction,
+    confidence: input.confidence,
+    source: input.source ?? "hybrid",
+    evaluator: reviewEvaluatorFor(category),
+    knowledgeKind: "CANDIDATE",
+    evidence: input.evidence,
+    affectedAnchors: input.affectedAnchors,
+    traceIds: [],
+    createdAt: context.generatedAt,
+    updatedAt: context.generatedAt
+  } satisfies ReviewFinding);
+}
+
+function fileEvidence(context: QualityReviewContext, absolutePath: string, summary: string): ReviewEvidenceRef {
+  return {
+    source: absolutePath.includes(`${path.sep}.distinction${path.sep}memory${path.sep}`) ? "memory" : "repository_snapshot",
+    path: projectRelativePath(context.root, absolutePath),
+    summary
+  };
+}
+
+function fileAnchor(filePath: string): GraphAnchor {
+  return { kind: "file", id: filePath, path: filePath };
+}
+
+function factRecordDuplicateStats(records: MemoryRecord[]) {
+  const ids = new Map<string, number>();
+  for (const record of records) ids.set(record.id, (ids.get(record.id) ?? 0) + 1);
+  let duplicateIds = 0;
+  let duplicateRecordCount = 0;
+  for (const count of ids.values()) {
+    if (count > 1) {
+      duplicateIds += 1;
+      duplicateRecordCount += count - 1;
+    }
+  }
+  return { uniqueIds: ids.size, duplicateIds, duplicateRecordCount };
+}
+
+function sourceRootDirectoryNames(files: Record<string, unknown>[]): string[] {
+  const candidates = new Set<string>();
+  for (const file of files) {
+    const filePath = String(file.path ?? "");
+    if (!reviewableSourceCodePath(filePath)) continue;
+    const first = filePath.split("/")[0];
+    if (first && !ignoredBuildArtifactPath(filePath)) candidates.add(first);
+  }
+  return Array.from(candidates).sort();
+}
+
+function snapshotFilePaths(context: QualityReviewContext): string[] {
+  return context.snapshotFiles.map((file) => String(file.path ?? "")).filter(Boolean);
+}
+
+function snapshotSizeBytes(file: Record<string, unknown>): number {
+  const size = Number(file.sizeBytes);
+  return Number.isFinite(size) ? size : 0;
+}
+
+function snapshotLineCount(file: Record<string, unknown>): number {
+  const lines = Number(file.lineCount);
+  return Number.isFinite(lines) ? lines : 0;
+}
+
+function ignoredBuildArtifactPath(filePath: string): boolean {
+  const normalized = filePath.replace(/\\/g, "/").toLowerCase();
+  return /(^|\/)(artifacts|artifacts_obj|publish-docker|publish|bin|obj|logs|test-build|bin_codex|obj_codex|target|dist|build|coverage|node_modules)(\/|$)/.test(normalized)
+    || /\.(dll|exe|pdb|cache|so|dylib|class|o|obj|lib|up2date|bin|dat|trx|coverage)$/i.test(normalized);
+}
+
+function buildOutputPath(filePath: string): boolean {
+  const normalized = filePath.replace(/\\/g, "/").toLowerCase();
+  return /(^|\/)(bin|obj|build|dist|target|publish|publish-docker|artifacts|artifacts_obj|test-build)(\/|$)/.test(normalized)
+    || /\.(dll|exe|pdb|so|dylib|class|o|obj|lib|up2date)$/i.test(normalized);
+}
+
+function sourceCodePath(filePath: string): boolean {
+  return /\.(ts|tsx|js|jsx|rs|cs|fs|java|kt|go|py|cpp|c|h|hpp|swift|xaml|axaml)$/i.test(filePath);
+}
+
+function reviewableSourceCodePath(filePath: string): boolean {
+  return sourceCodePath(filePath)
+    && !ignoredBuildArtifactPath(filePath)
+    && !generatedSourcePath(filePath);
+}
+
+function generatedSourcePath(filePath: string): boolean {
+  const normalized = filePath.replace(/\\/g, "/").toLowerCase();
+  return /(^|\/)(bin|obj|artifacts|artifacts_obj|publish|publish-docker|generated)(\/|$)/.test(normalized)
+    || /\.(g|designer|assemblyinfo|globalusings)\.cs$/i.test(normalized)
+    || /(^|\/)(generated|sourcegenerated|sourcegeneratedfiles)(\/|$)/.test(normalized);
+}
+
+function testPath(filePath: string): boolean {
+  const normalized = filePath.replace(/\\/g, "/").toLowerCase();
+  return /(^|\/)(test|tests|spec|specs|__tests__)(\/|$)/.test(normalized)
+    || /\.(test|spec)\.[a-z0-9]+$/i.test(normalized)
+    || /test/.test(path.basename(normalized));
+}
+
+function realTestPath(filePath: string): boolean {
+  const normalized = filePath.replace(/\\/g, "/").toLowerCase();
+  if (ignoredBuildArtifactPath(filePath) || generatedSourcePath(filePath)) return false;
+  if (!sourceCodePath(filePath) && !/\.(csproj|fsproj|vbproj|sln|props|targets|json|config)$/i.test(normalized)) return false;
+  return /(^|\/)(__tests__|tests?|specs?)(\/|$)/.test(normalized)
+    || /(^|\/)[^/]*(\.tests?|\.specs?)(\/|$)/.test(normalized)
+    || /\.(test|spec)\.[a-z0-9]+$/i.test(normalized)
+    || /(^|\/)[^/]*(tests?|specs?)\.(csproj|fsproj|vbproj)$/i.test(normalized);
+}
+
+function coverageEvidencePath(filePath: string): boolean {
+  const normalized = filePath.replace(/\\/g, "/").toLowerCase();
+  return /(^|\/)(coverage|coverage-report|testresults|test-results)(\/|$)/.test(normalized)
+    || /(lcov\.info|cobertura|opencover|coverage\.xml|coverage\.json|coverage\.lcov|\.coverage|\.trx$)/.test(normalized)
+    || /(coverlet|collectcoverage|threshold|coverage)/.test(path.basename(normalized));
+}
+
+function integrationOrUiTestPath(filePath: string): boolean {
+  const normalized = filePath.replace(/\\/g, "/").toLowerCase();
+  return /(integration|e2e|endtoend|ui|smoke|playwright|selenium|cypress|appium|desktop|golden|snapshot)/.test(normalized);
+}
+
+function sensitiveConfigPath(filePath: string): boolean {
+  const normalized = filePath.replace(/\\/g, "/").toLowerCase();
+  return /(^|\/)\.env($|\.)/.test(normalized)
+    || (/\/(keys?|secrets?|credentials?)\//.test(normalized) && !/\.(md|txt)$/i.test(normalized))
+    || /(secret|secrets|credential|credentials|private-key|private_key|apikey|api-key|access-token|access_token|refresh-token|refresh_token|password|passwd|token|auth)/.test(normalized)
+    || /(^|\/)[^/]*(priv|private)[^/]*\.(pem|key|pfx|p12|cer|crt)$/i.test(normalized)
+    || /\.(pem|pfx|p12|key|crt|cer)$/i.test(normalized)
+    || /appsettings\.(production|prod|release)\.json$/.test(normalized);
+}
+
+function configPath(filePath: string): boolean {
+  return /\.(json|yaml|yml|toml|ini|config|props|targets|xml)$/i.test(filePath)
+    || path.basename(filePath).toLowerCase().startsWith("appsettings");
+}
+
+function apiContractPath(filePath: string): boolean {
+  const normalized = filePath.replace(/\\/g, "/").toLowerCase();
+  if (ignoredBuildArtifactPath(filePath) || generatedSourcePath(filePath)) return false;
+  return /(^|\/)(contracts?|services\.contracts?|schemas?|proto|openapi|swagger)(\/|$)/.test(normalized)
+    || /(request|response|dto|contract|api(model|models)?|commonapimodels|service|client|endpoint|message|eventargs)/.test(path.basename(normalized))
+    || /^i[A-Z]/.test(path.basename(filePath));
+}
+
+function httpOrDataFlowPath(filePath: string): boolean {
+  const normalized = filePath.replace(/\\/g, "/").toLowerCase();
+  if (ignoredBuildArtifactPath(filePath) || generatedSourcePath(filePath)) return false;
+  return /(httpclient|httphandler|messagehandler|authenticated|intercepting|grpc|rest|jsonpropertyname|serializer|deserializer|api|endpoint|route)/.test(normalized);
+}
+
+function apiContractTestPath(filePath: string): boolean {
+  const normalized = filePath.replace(/\\/g, "/").toLowerCase();
+  return /(contract|consumer|api|serialization|schema|http|integration|e2e)/.test(normalized);
+}
+
+function binaryOrNativeArtifactPath(filePath: string): boolean {
+  const normalized = filePath.replace(/\\/g, "/").toLowerCase();
+  return /\.(dll|exe|so|dylib|pdb|lib|bin|dat)$/i.test(normalized)
+    || /(^|\/)(driver|drivers|native|lib|libs|runtime|resources)(\/|$)/.test(normalized);
+}
+
+function resourceHeavyPath(filePath: string): boolean {
+  const normalized = filePath.replace(/\\/g, "/").toLowerCase();
+  return /(watcher|filesystemwatcher|hotreload|driver|drivers|native|lib\/|resources|asset|assets|image|font|kiosk|card\/|serial|device|hardware)/.test(normalized);
+}
+
+function performanceTestPath(filePath: string): boolean {
+  const normalized = filePath.replace(/\\/g, "/").toLowerCase();
+  return /(performance|perf|benchmark|stress|load|startup|memory|leak|resource)/.test(normalized);
+}
+
+function dedupeReviewFindings(findings: ReviewFinding[]): ReviewFinding[] {
+  const byId = new Map<string, ReviewFinding>();
+  for (const finding of findings) {
+    if (!byId.has(finding.id)) byId.set(finding.id, finding);
+  }
+  return Array.from(byId.values());
+}
+
+function sortReviewFindings(findings: ReviewFinding[]): ReviewFinding[] {
+  const severityRank: Record<ReviewSeverity, number> = { P0: 0, P1: 1, P2: 2, P3: 3 };
+  const confidenceRank = { high: 0, medium: 1, low: 2 };
+  return [...findings].sort((left, right) =>
+    severityRank[left.severity] - severityRank[right.severity]
+    || confidenceRank[left.confidence] - confidenceRank[right.confidence]
+    || left.category.localeCompare(right.category)
+    || left.title.localeCompare(right.title)
+  );
+}
+
+function buildReviewRunSummary(findings: ReviewFinding[]): ReviewRun["summary"] {
+  const bySeverity: Record<ReviewSeverity, number> = { P0: 0, P1: 0, P2: 0, P3: 0 };
+  const byCategory: Partial<Record<ReviewCategory, number>> = {};
+  for (const finding of findings) {
+    bySeverity[finding.severity] += 1;
+    byCategory[finding.category] = (byCategory[finding.category] ?? 0) + 1;
+  }
+  return { total: findings.length, bySeverity, byCategory };
 }
 
 async function buildFoundationReviewStatus(root: string) {
@@ -2257,11 +5951,11 @@ async function buildFoundationReviewStatus(root: string) {
         : "foundation_ready";
 
   const nextActions: string[] = [];
-  if (!repositorySnapshot) nextActions.push("Run project intake to create repository/cache facts.");
-  if (pendingUnderstanding) nextActions.push("Accept repository understanding to persist FACT memory.");
-  if (!manifest || projectedViews.length === 0) nextActions.push("Generate projected graph views for architecture, code facts, findings and memory.");
-  if (findings && findings.findings.length > 0) nextActions.push("Review open findings or create governed finding status patches.");
-  if (!nextActions.length) nextActions.push("No pending governance review items. Use Projection Inspector or Agent Session for exploration.");
+  if (!repositorySnapshot) nextActions.push("运行项目接入，生成仓库缓存事实。");
+  if (pendingUnderstanding) nextActions.push("接受仓库理解，将 FACT 写入长期记忆。");
+  if (!manifest || projectedViews.length === 0) nextActions.push("生成架构、代码事实、findings 和记忆的工程投影视图。");
+  if (findings && findings.findings.length > 0) nextActions.push("评审未处理 findings，或创建受治理的 finding 状态 patch。");
+  if (!nextActions.length) nextActions.push("当前没有待治理评审项，可进入投影检查器或 Agent 会话继续探索。");
 
   return {
     status,
@@ -2571,6 +6265,24 @@ async function appendMemoryRecords(root: string, fileName: string, records: Memo
   const lines = records.map((record) => JSON.stringify(MemoryRecordSchema.parse(record))).join("\n");
   await appendFile(memoryPath, `${lines}\n`, "utf8");
   return memoryPath;
+}
+
+async function appendUniqueMemoryRecords(root: string, fileName: string, records: MemoryRecord[]): Promise<string> {
+  const memoryPath = path.join(root, ".distinction", "memory", fileName);
+  await mkdir(path.dirname(memoryPath), { recursive: true });
+  const existingIds = new Set((await readMemoryRecordJsonl(memoryPath)).map((record) => record.id));
+  const uniqueRecords = records.filter((record) => !existingIds.has(record.id));
+  if (!uniqueRecords.length) {
+    await appendFile(memoryPath, "", "utf8");
+    return memoryPath;
+  }
+  const lines = uniqueRecords.map((record) => JSON.stringify(MemoryRecordSchema.parse(record))).join("\n");
+  await appendFile(memoryPath, `${lines}\n`, "utf8");
+  return memoryPath;
+}
+
+async function persistQualityReviewFindings(root: string, findings: ReviewFinding[]): Promise<string> {
+  return appendUniqueMemoryRecords(root, "candidates.jsonl", findings.map((finding) => reviewFindingToCandidateMemoryRecord(finding)));
 }
 
 async function writeFindingStatusPatch(root: string, patch: FindingStatusPatch): Promise<string> {
@@ -3217,7 +6929,7 @@ async function readOrBuildCodeFacts(root: string, args: Args) {
 }
 
 function codeFactProviderArg(args: Args): CodeFactProviderSource {
-  const provider = String(args.provider ?? "native");
+  const provider = String(args.provider ?? process.env.PRAXIS_CODE_FACT_PROVIDER ?? "codegraph");
   if (provider === "native" || provider === "codegraph" || provider === "lsp" || provider === "scip") return provider;
   throw new Error(`Unsupported code fact provider: ${provider}`);
 }
@@ -3235,6 +6947,17 @@ function numberArg(args: Args, key: string): number | undefined {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) throw new Error(`Invalid numeric value for --${key}: ${value}`);
   return parsed;
+}
+
+function timeoutMsArg(args: Args, keys: string[], fallbackMs: number): number {
+  for (const key of keys) {
+    const parsed = numberArg(args, key);
+    if (parsed === undefined) continue;
+    if (parsed < 1_000) throw new Error(`Invalid timeout for --${key}: ${parsed}. Timeout must be at least 1000ms.`);
+    return parsed;
+  }
+  if (fallbackMs < 0) return fallbackMs;
+  return fallbackMs;
 }
 
 async function readAllMemoryRecords(root: string): Promise<MemoryRecord[]> {
@@ -3376,10 +7099,19 @@ async function exists(filePath: string): Promise<boolean> {
 
 function safeJson(content: string): unknown {
   try {
-    return JSON.parse(content);
+    return JSON.parse(stripJsonBom(content));
   } catch {
     return undefined;
   }
+}
+
+function safeJsonRecord(content: string): Record<string, unknown> | null {
+  const parsed = safeJson(content);
+  return isRecord(parsed) ? parsed : null;
+}
+
+function stripJsonBom(content: string): string {
+  return content.charCodeAt(0) === 0xfeff ? content.slice(1) : content;
 }
 
 async function maybeWriteJson(args: Args, key: string, value: unknown): Promise<void> {
@@ -3396,6 +7128,14 @@ async function writeJson<T>(filePath: string, value: T, schema?: JsonSchema<T>):
   const parsed = schema ? schema.parse(value) : value;
   await mkdir(path.dirname(filePath), { recursive: true });
   await writeFile(filePath, `${JSON.stringify(parsed, null, 2)}\n`, "utf8");
+}
+
+async function writeJsonAtomic<T>(filePath: string, value: T, schema?: JsonSchema<T>): Promise<void> {
+  const parsed = schema ? schema.parse(value) : value;
+  await mkdir(path.dirname(filePath), { recursive: true });
+  const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+  await writeFile(tempPath, `${JSON.stringify(parsed, null, 2)}\n`, "utf8");
+  await rename(tempPath, filePath);
 }
 
 function outputJson(value: unknown): void {

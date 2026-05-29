@@ -34,7 +34,36 @@ export interface ModelRouterConfig {
   defaultProvider: string;
   providers: Record<string, ModelProviderConfig>;
   routes: Record<ModelTaskType, ModelRoute>;
+  agent?: {
+    pi?: {
+      provider?: string;
+      model?: string;
+      thinking?: string;
+      tools?: string;
+      codeGraph?: boolean;
+      allowRead?: boolean;
+      allowShell?: boolean;
+      allowWrite?: boolean;
+      timeoutMs?: number;
+      reviewThinking?: string;
+      reviewTimeoutMs?: number;
+    };
+  };
 }
+
+const defaultPiAgentSettings = {
+  provider: "deepseek",
+  model: "deepseek-v4-pro",
+  thinking: "high",
+  tools: "read,grep,find,ls,codegraph_query,codegraph_context,codegraph_relations,bash,edit,write",
+  codeGraph: true,
+  allowRead: true,
+  allowShell: true,
+  allowWrite: true,
+  timeoutMs: 300_000,
+  reviewThinking: "high",
+  reviewTimeoutMs: 300_000
+} satisfies NonNullable<NonNullable<ModelRouterConfig["agent"]>["pi"]>;
 
 export const defaultModelRouterConfig: ModelRouterConfig = {
   defaultProvider: "deepseek",
@@ -57,6 +86,9 @@ export const defaultModelRouterConfig: ModelRouterConfig = {
     "coding.task.generate": { provider: "deepseek", model: "deepseek-v4-pro", reasoning: true, reasoningEffort: "high" },
     "memory.summarize": { provider: "deepseek", model: "deepseek-v4-flash", reasoning: false },
     "report.generate": { provider: "deepseek", model: "deepseek-v4-flash", reasoning: false }
+  },
+  agent: {
+    pi: defaultPiAgentSettings
   }
 };
 
@@ -103,6 +135,24 @@ function applyIdeModelSettings(config: ModelRouterConfig, settingsJson: string |
   return {
     ...config,
     defaultProvider,
+    agent: {
+      ...config.agent,
+      pi: {
+        ...defaultPiAgentSettings,
+        ...config.agent?.pi,
+        provider: stringValue(settings.piProvider) ?? config.agent?.pi?.provider ?? defaultPiAgentSettings.provider,
+        model: stringValue(settings.piModel) ?? config.agent?.pi?.model ?? defaultPiAgentSettings.model,
+        thinking: stringValue(settings.piThinking) ?? config.agent?.pi?.thinking ?? defaultPiAgentSettings.thinking,
+        tools: stringValue(settings.piTools) ?? config.agent?.pi?.tools ?? defaultPiAgentSettings.tools,
+        codeGraph: booleanValue(settings.piCodeGraph) ?? config.agent?.pi?.codeGraph ?? defaultPiAgentSettings.codeGraph,
+        allowRead: booleanValue(settings.piAllowRead) ?? config.agent?.pi?.allowRead ?? defaultPiAgentSettings.allowRead,
+        allowShell: booleanValue(settings.piAllowShell) ?? config.agent?.pi?.allowShell ?? defaultPiAgentSettings.allowShell,
+        allowWrite: booleanValue(settings.piAllowWrite) ?? config.agent?.pi?.allowWrite ?? defaultPiAgentSettings.allowWrite,
+        timeoutMs: numberValue(settings.piTimeoutMs) ?? config.agent?.pi?.timeoutMs ?? defaultPiAgentSettings.timeoutMs,
+        reviewThinking: stringValue(settings.reviewPiThinking) ?? config.agent?.pi?.reviewThinking ?? defaultPiAgentSettings.reviewThinking,
+        reviewTimeoutMs: numberValue(settings.reviewPiTimeoutMs) ?? config.agent?.pi?.reviewTimeoutMs ?? defaultPiAgentSettings.reviewTimeoutMs
+      }
+    },
     providers: {
       ...config.providers,
       deepseek: {
@@ -133,15 +183,33 @@ function routeWithModel(route: ModelRoute, value: unknown): ModelRoute {
 
 function safeJsonRecord(value: string): Record<string, unknown> | undefined {
   try {
-    const parsed = JSON.parse(value) as unknown;
+    const parsed = JSON.parse(stripJsonBom(value)) as unknown;
     return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : undefined;
   } catch {
     return undefined;
   }
 }
 
+function stripJsonBom(value: string): string {
+  return value.charCodeAt(0) === 0xfeff ? value.slice(1) : value;
+}
+
 function stringValue(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function booleanValue(value: unknown): boolean | undefined {
+  if (typeof value === "boolean") return value;
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalized)) return true;
+  if (["0", "false", "no", "off"].includes(normalized)) return false;
+  return undefined;
+}
+
+function numberValue(value: unknown): number | undefined {
+  const parsed = typeof value === "number" ? value : typeof value === "string" && value.trim() ? Number(value) : undefined;
+  return parsed !== undefined && Number.isFinite(parsed) ? parsed : undefined;
 }
 
 function looksLikeApiKey(value: string): boolean {

@@ -4,7 +4,6 @@ import { ProjectIntakeReviewPage } from "./pages/ProjectIntakeReviewPage";
 import { CreateProjectWizardPage } from "./pages/CreateProjectWizardPage";
 import { DevelopmentGraphWorkspacePage } from "./pages/DevelopmentGraphWorkspacePage";
 import { AgentWorkspacePage } from "./pages/AgentWorkspacePage";
-import { CodingWorkerPage } from "./pages/CodingWorkerPage";
 import { ModelSettingsPage } from "./pages/ModelSettingsPage";
 import { ReviewQueuePage } from "./pages/ReviewQueuePage";
 import { ProjectedGraphInspectorPage } from "./pages/ProjectedGraphInspectorPage";
@@ -38,6 +37,7 @@ function AppContent() {
   const [recentProjects, setRecentProjects] = useState<RecentProject[]>([]);
   const [projectionFocus, setProjectionFocus] = useState<{ anchor: RuntimeGraphAnchor; token: number } | null>(null);
   const [reviewFocus, setReviewFocus] = useState<{ findingId: string; token: number } | null>(null);
+  const [assistantDraft, setAssistantDraft] = useState<{ text: string; mode: "explain" | "plan"; token: number } | null>(null);
   const { locale, setLocale, t } = useI18n();
 
   useEffect(() => {
@@ -92,6 +92,11 @@ function AppContent() {
     setRoute("review-queue");
   }
 
+  function openAssistantDraft(text: string, mode: "explain" | "plan" = "plan") {
+    setAssistantDraft({ text, mode, token: Date.now() });
+    setRoute("agent-workspace");
+  }
+
   return (
     <main className="app-shell">
       <header className="app-header">
@@ -125,7 +130,9 @@ function AppContent() {
 
       <section
         className={
-          route === "agent-workspace" || route === "projection-inspector" ? "app-content app-content-fill" : "app-content app-content-scroll"
+          route === "agent-workspace" || route === "projection-inspector" || route === "graph-workspace"
+            ? "app-content app-content-fill"
+            : "app-content app-content-scroll"
         }
       >
         {route === "home" ? (
@@ -165,16 +172,13 @@ function AppContent() {
         {route === "agent-workspace" && projectRoot ? (
           <AgentWorkspacePage
             projectRoot={projectRoot}
+            initialDraft={assistantDraft}
+            onDraftConsumed={(token) => {
+              setAssistantDraft((current) => current?.token === token ? null : current);
+            }}
             onNavigateToGraph={() => setRoute("graph-workspace")}
             onNavigateToSettings={() => setRoute("model-settings")}
             onNavigateHome={() => setRoute("home")}
-          />
-        ) : null}
-        {route === "coding-worker" ? (
-          <CodingWorkerPage
-            projectRoot={projectRoot}
-            onProjectRootChange={setProjectRoot}
-            onOpenReviewQueue={() => setRoute("review-queue")}
           />
         ) : null}
         {route === "review-queue" ? (
@@ -184,6 +188,7 @@ function AppContent() {
             focusFindingId={reviewFocus?.findingId}
             focusToken={reviewFocus?.token}
             onOpenProjectionAnchor={openProjectionAnchor}
+            onOpenAssistantDraft={openAssistantDraft}
           />
         ) : null}
         {route === "projection-inspector" ? (
@@ -193,9 +198,18 @@ function AppContent() {
             focusAnchor={projectionFocus?.anchor}
             focusToken={projectionFocus?.token}
             onOpenReviewFinding={openReviewFinding}
+            onOpenAssistantDraft={openAssistantDraft}
           />
         ) : null}
-        {route === "graph-workspace" ? <DevelopmentGraphWorkspacePage projectRoot={projectRoot} graph={graph} onGraphLoaded={setGraph} /> : null}
+        {route === "graph-workspace" ? (
+          <DevelopmentGraphWorkspacePage
+            projectRoot={projectRoot}
+            graph={graph}
+            onGraphLoaded={setGraph}
+            onProjectRootChange={setProjectRoot}
+            onOpenAssistantDraft={openAssistantDraft}
+          />
+        ) : null}
         {route === "model-settings" ? <ModelSettingsPage projectRoot={projectRoot} /> : null}
       </section>
     </main>
@@ -207,7 +221,6 @@ const routeLabelKeys: Record<AppRoute, TranslationKey> = {
   "project-intake": "route.projectIntake",
   "create-project": "route.createProject",
   "agent-workspace": "route.agentWorkspace",
-  "coding-worker": "route.codingWorker",
   "review-queue": "route.reviewQueue",
   "projection-inspector": "route.projectionInspector",
   "graph-workspace": "route.graphWorkspace",
