@@ -108,7 +108,7 @@ import {
 import { isGraphPlan, type GraphPlan, type PlanAction } from "@praxis/plan-model";
 import { loadModelConfig, resolveModelRoute } from "@praxis/model-router";
 import { createProvider } from "@praxis/provider-deepseek";
-import { getPrompt } from "@praxis/prompt-registry";
+import { getPrompt, reviewPromptNameForCategory } from "@praxis/prompt-registry";
 import { AgentLoop, persistRun, type AgentConversationMessage, type AgentRun, type AgentStep, type AgentTerminalReason } from "@praxis/agent-loop";
 import { ToolRegistry } from "@praxis/tool-registry";
 import { registerAgentTools } from "@praxis/agent-loop/tools";
@@ -3504,7 +3504,7 @@ async function commandReviewQueue(args: Args): Promise<void> {
   const activeReviewRunId = progressSupersedesMemory ? latestProgress?.runId : undefined;
   const rawReviewFindings = await readQualityReviewFindingsFromMemory(root, activeReviewRunId);
   const reviewFindings = await applyReviewFindingRefreshState(root, rawReviewFindings, includeAccepted);
-  const qualityReview = buildQualityReviewQueueSummary(reviewFindings, activeReviewRunId ? undefined : latestQualityReviewRun, activeReviewRunId ? latestProgress : undefined);
+  const qualityReview = buildQualityReviewQueueSummary(root, reviewFindings, activeReviewRunId ? undefined : latestQualityReviewRun, activeReviewRunId ? latestProgress : undefined);
   const foundation = await buildFoundationReviewStatus(root);
   const result = {
     ok: true,
@@ -3576,9 +3576,9 @@ async function commandReviewRun(args: Args): Promise<void> {
     totalCategories: category ? 1 : reviewCategoryOrder.length,
     completedCategories: category ? 1 : reviewCategoryOrder.length,
     currentCategory: category,
-    currentEvaluator: category ? reviewEvaluatorFor(category).name : undefined,
+    currentEvaluator: category ? reviewEvaluatorFor(category, root).name : undefined,
     message: category
-      ? `Pi 已完成分类重试：${reviewEvaluatorFor(category).name}，当前候选问题 ${review.findings.length} 个。`
+      ? `Pi 已完成分类重试：${reviewEvaluatorFor(category, root).name}，当前候选问题 ${review.findings.length} 个。`
       : `Pi 工程评估完成，生成 ${review.findings.length} 个候选问题。`,
     findings: review.findings.length,
     evaluatorResults: review.run.evaluatorResults
@@ -3607,7 +3607,7 @@ async function commandReviewFindingRefresh(args: Args): Promise<void> {
 
   const startedAt = new Date().toISOString();
   const runId = `finding-refresh-${Date.now()}-${randomUUID().slice(0, 8)}`;
-  const evaluator = reviewEvaluatorFor(finding.category);
+  const evaluator = reviewEvaluatorFor(finding.category, root);
   const prompt = buildPiFindingRefreshPrompt(root, args, finding);
   const result = await runPiReviewPrompt({
     root,
@@ -3956,82 +3956,96 @@ const reviewEvaluatorProfiles: Record<ReviewCategory, ReviewEvaluatorRef> = {
     name: "文档、知识与项目记忆缺口评估器",
     category: "documentation_knowledge",
     source: "praxis-heuristic",
-    prompt: "你是文档、知识与项目记忆缺口评估器。只基于 Praxis 已采集的本地 FACT、候选记忆、投影视图和 trace，检查项目知识层是否缺失、过期、重复或无法支撑后续评估；输出候选问题，不写入已确认记忆。"
+    prompt: "review-documentation-knowledge"
   },
   architecture_boundaries: {
     id: "architecture-boundary-evaluator",
     name: "架构与模块边界评估器",
     category: "architecture_boundaries",
     source: "praxis-heuristic",
-    prompt: "你是架构与模块边界评估器。检查源码目录、架构模型、模块候选和架构 finding 是否能解释真实模块边界、所有权和演进方向；只输出可证据化的候选问题。"
+    prompt: "review-architecture-boundaries"
   },
   dependencies_coupling: {
     id: "dependency-coupling-evaluator",
     name: "依赖与耦合评估器",
     category: "dependencies_coupling",
     source: "praxis-heuristic",
-    prompt: "你是依赖与耦合评估器。检查 import/code fact、架构依赖、循环、未映射依赖和隐性耦合；区分扫描事实与候选判断。"
+    prompt: "review-dependencies-coupling"
   },
   build_release: {
     id: "build-release-evaluator",
     name: "构建与发布评估器",
     category: "build_release",
     source: "praxis-heuristic",
-    prompt: "你是构建与发布评估器。检查构建入口、发布产物、构建输出污染、桌面打包和可验证发布路径；输出会影响构建可信度的候选问题。"
+    prompt: "review-build-release"
   },
   testing_verification: {
     id: "testing-verification-evaluator",
     name: "测试与验证评估器",
     category: "testing_verification",
     source: "praxis-heuristic",
-    prompt: "你是测试与验证评估器。检查真实测试项目、单元/集成/UI 验证、覆盖率证据和受控编码任务验收证据；没有 100% 覆盖率证据、只有单元测试、测试入口缺失或测试无法覆盖发布形态都必须输出候选问题。"
+    prompt: "review-testing-verification"
   },
   security_secrets: {
     id: "security-secrets-evaluator",
     name: "安全与敏感信息评估器",
     category: "security_secrets",
     source: "praxis-heuristic",
-    prompt: "你是安全与敏感信息评估器。检查密钥、凭据、pem/pfx/key/cert 文件、敏感配置、构建产物中的私钥、外部 worker 上下文泄露和 agent prompt 输入风险；只输出有路径或事实证据的问题。"
+    prompt: "review-security-secrets"
   },
   configuration_environment: {
     id: "configuration-environment-evaluator",
     name: "配置与环境评估器",
     category: "configuration_environment",
     source: "praxis-heuristic",
-    prompt: "你是配置与环境评估器。检查环境变量、配置文件、开发/生产差异、平台配置和运行前置条件是否有清晰所有权。"
+    prompt: "review-configuration-environment"
   },
   code_quality_maintainability: {
     id: "maintainability-evaluator",
     name: "代码质量与可维护性评估器",
     category: "code_quality_maintainability",
     source: "praxis-heuristic",
-    prompt: "你是代码质量与可维护性评估器。检查源码规模、生成源码混入、超大文件、缺少符号级复杂度证据、重复事实和会让后续维护变脆弱的结构；输出具体维护问题，而不是抽象分数。"
+    prompt: "review-code-quality-maintainability"
   },
   api_contracts_data_flow: {
     id: "api-data-flow-evaluator",
     name: "接口契约与数据流评估器",
     category: "api_contracts_data_flow",
     source: "praxis-heuristic",
-    prompt: "你是接口契约与数据流评估器。检查 runtime、桌面端、schema、HTTP 客户端、服务接口、DTO/Request/Response、MCP/tool/worker 之间的契约是否可追踪；缺少契约测试、消费者证据或版本边界都必须输出候选问题。"
+    prompt: "review-api-contracts-data-flow"
   },
   performance_resources: {
     id: "performance-resource-evaluator",
     name: "性能与资源风险评估器",
     category: "performance_resources",
     source: "praxis-heuristic",
-    prompt: "你是性能与资源风险评估器。检查扫描范围、构建产物、二进制/超大文件、上下文膨胀、热更新/文件监听和资源密集路径是否会拖慢 intake、agent 或桌面体验。"
+    prompt: "review-performance-resources"
   },
   documentation_knowledge: {
     id: "knowledge-memory-evaluator",
     name: "文档、知识与项目记忆缺口评估器",
     category: "documentation_knowledge",
     source: "praxis-heuristic",
-    prompt: "你是文档、知识与项目记忆缺口评估器。检查 README、AGENTS、.distinction、投影视图、trace 和候选/确认记忆是否足以支撑团队理解与后续 agent 工作。"
+    prompt: "review-documentation-knowledge"
   }
 };
 
-function reviewEvaluatorFor(category: ReviewCategory): ReviewEvaluatorRef {
-  return reviewEvaluatorProfiles[category];
+function reviewEvaluatorFor(category: ReviewCategory, root?: string): ReviewEvaluatorRef {
+  const displayCategory = displayReviewCategory(category);
+  const profile = reviewEvaluatorProfiles[category] ?? reviewEvaluatorProfiles[displayCategory];
+  return {
+    ...profile,
+    category: displayCategory,
+    prompt: getPrompt(reviewPromptNameForCategory(displayCategory), { overrideDirs: root ? reviewPromptOverrideDirs(root) : undefined }).body
+  };
+}
+
+function reviewPromptOverrideDirs(root: string): string[] {
+  const envDirs = process.env.PRAXIS_PROMPT_DIR
+    ?.split(path.delimiter)
+    .map((dir) => dir.trim())
+    .filter(Boolean) ?? [];
+  return [path.join(root, ".distinction", "prompts"), ...envDirs];
 }
 
 type ReviewProgressStatus = "running" | "completed" | "failed";
@@ -4108,7 +4122,7 @@ async function buildPiQualityReviewFindings(root: string, args: Args): Promise<{
   try {
     const heuristic = await buildQualityReviewFindings(root, runId, generatedAt);
     for (const category of reviewCategoryOrder) {
-      const evaluator = reviewEvaluatorFor(category);
+      const evaluator = reviewEvaluatorFor(category, root);
       const categoryProgressBase: ReviewProgressSnapshot = {
         schemaVersion: "praxis.reviewProgress.v1",
         runId,
@@ -4193,7 +4207,7 @@ async function buildPiQualityReviewFindings(root: string, args: Args): Promise<{
       status: failedEvaluators.length ? "partial" : "completed",
       categories: [...reviewCategoryOrder],
       findingIds: sorted.map((finding) => finding.id),
-      evaluatorResults: completeReviewEvaluatorResults(sorted, evaluatorResults),
+      evaluatorResults: completeReviewEvaluatorResults(sorted, evaluatorResults, undefined, root),
       summary: buildReviewRunSummary(sorted),
       traceIds: []
     } satisfies ReviewRun);
@@ -4246,13 +4260,13 @@ async function buildPiQualityReviewCategoryRetry(
   const generatedAt = new Date().toISOString();
   const runId = `review-run-pi-retry-${Date.now()}-${randomUUID().slice(0, 8)}`;
   const progressPath = qualityReviewProgressPath(root);
-  const evaluator = reviewEvaluatorFor(category);
+  const evaluator = reviewEvaluatorFor(category, root);
   const latestRun = await readLatestQualityReviewRunFromMemory(root);
   const previousFindings = await readQualityReviewFindingsFromMemory(root);
   const preservedFindings = previousFindings.filter((finding) => displayReviewCategory(finding.category) !== category);
   const previousEvaluatorResults = latestRun?.evaluatorResults?.length
     ? latestRun.evaluatorResults
-    : buildReviewEvaluatorResults(previousFindings) ?? [];
+    : buildReviewEvaluatorResults(previousFindings, root) ?? [];
   const retryOfRunId = latestRun?.id;
 
   const runningProgress = {
@@ -4273,14 +4287,15 @@ async function buildPiQualityReviewCategoryRetry(
     message: `Pi 正在重试分类：${evaluator.name}`,
     findings: preservedFindings.length,
     evaluatorResults: replaceEvaluatorResult(
-      completeReviewEvaluatorResults(preservedFindings, previousEvaluatorResults),
+      completeReviewEvaluatorResults(preservedFindings, previousEvaluatorResults, undefined, root),
       category,
       {
         evaluator: { ...evaluator, source: "pi-agent" },
         status: "partial",
         findingIds: [],
         summary: "Pi 正在重新评估这个分类，旧结果会在成功后被替换。"
-      }
+      },
+      root
     )
   } satisfies ReviewProgressSnapshot;
   await writeReviewProgress(progressPath, runningProgress);
@@ -4303,7 +4318,7 @@ async function buildPiQualityReviewCategoryRetry(
     const sorted = sortReviewFindings(dedupeReviewFindings([...preservedFindings, ...categoryFindings]))
       .map((finding) => ReviewFindingSchema.parse(finding));
     const evaluatorResults = replaceEvaluatorResult(
-      completeReviewEvaluatorResults(sorted, previousEvaluatorResults),
+      completeReviewEvaluatorResults(sorted, previousEvaluatorResults, undefined, root),
       category,
       {
         evaluator: { ...evaluator, source: "pi-agent" },
@@ -4312,7 +4327,8 @@ async function buildPiQualityReviewCategoryRetry(
         summary: categoryFindings.length
           ? `Pi 重新评估生成 ${categoryFindings.length} 个候选问题。`
           : "Pi 已重新评估该分类，但没有返回候选问题；这不代表该类别健康。"
-      }
+      },
+      root
     );
     const failedEvaluators = evaluatorResults.filter((result) => result.status === "failed");
     const run = ReviewRunSchema.parse({
@@ -4353,14 +4369,15 @@ async function buildPiQualityReviewCategoryRetry(
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     const evaluatorResults = replaceEvaluatorResult(
-      completeReviewEvaluatorResults(preservedFindings, previousEvaluatorResults),
+      completeReviewEvaluatorResults(preservedFindings, previousEvaluatorResults, undefined, root),
       category,
       {
         evaluator: { ...evaluator, source: "pi-agent" },
         status: "failed",
         findingIds: [],
         summary: `Pi 分类重试失败：${errorMessage.slice(0, 1200)}`
-      }
+      },
+      root
     );
     await writeReviewProgress(progressPath, {
       schemaVersion: "praxis.reviewProgress.v1",
@@ -4601,48 +4618,19 @@ function buildPiQualityReviewPrompt(input: {
   heuristicFindings: ReviewFinding[];
 }): string {
   const responseLanguage = reviewResponseLanguage(input.args);
-  return [
-    "You are a Praxis Studio engineering quality review worker running through Pi.",
-    `Respond in the user's language: ${responseLanguage}.`,
-    `All user-visible JSON string fields MUST use ${responseLanguage}: title, summary, whyItMatters, suggestedAction, evidence.summary, and evidence.excerpt.`,
-    `Do not switch to English unless ${responseLanguage} is English or the text is a code identifier, path, command, API name, stack trace, or source excerpt.`,
-    "Return strict JSON only. No Markdown fences. No preface. No explanation outside JSON.",
-    "",
-    "你是 Praxis Studio 的工程质量评估 worker，正在由 Pi 执行。",
-    "",
-    "## 绝对边界",
-    "- 你必须真实检查当前仓库；不要只复述提示词。",
-    "- 你可以使用 read、grep、find、ls、CodeGraph 只读工具。",
-    "- 不要写文件，不要修改源码，不要确认记忆。",
-    "- 本地扫描事实是 FACT；你的结论全部是 CANDIDATE。",
-    "- 输出必须是严格 JSON，不要 Markdown，不要额外解释。",
-    "",
-    "## 当前分类",
-    `category: ${input.category}`,
-    `evaluator: ${input.evaluator.name}`,
-    "",
-    "## 分类评估准则",
-    input.evaluator.prompt,
-    "",
-    "## 重要要求",
-    "- 至少检查 AGENTS.md、README/package/build/test 配置、.distinction/cache 中相关事实。",
-    "- 如果没有测试覆盖率证据，测试与验证类必须指出“不能证明 100% 覆盖”。",
-    "- 如果发现密钥/证书/私钥/凭据路径，安全类必须列为候选问题。",
-    "- 如果工具证据不足，也要把“证据不足导致不能判断健康”作为候选问题，而不是输出空数组。",
-    "- 每个 finding 必须有具体 title、summary、whyItMatters、suggestedAction、evidence。",
-    "- severity 只能是 P0/P1/P2/P3；confidence 只能是 high/medium/low。",
-    "",
-    "## Praxis 本地规则线索",
-    "下面只是给你的线索，不是最终答案。你必须用 Pi 工具检查或补充。",
-    JSON.stringify(input.heuristicFindings.map((finding) => ({
+  const basePrompt = getPrompt("review-quality-base", { overrideDirs: reviewPromptOverrideDirs(input.root) }).body;
+  return renderPromptTemplate(basePrompt, {
+    responseLanguage,
+    category: input.category,
+    evaluatorName: input.evaluator.name,
+    categoryPrompt: input.evaluator.prompt,
+    heuristicFindingsJson: JSON.stringify(input.heuristicFindings.map((finding) => ({
       title: finding.title,
       severity: finding.severity,
       summary: finding.summary,
       evidence: finding.evidence.slice(0, 3)
     })), null, 2),
-    "",
-    "## 输出 JSON Schema",
-    JSON.stringify({
+    outputSchemaJson: JSON.stringify({
       findings: [
         {
           severity: "P1",
@@ -4658,7 +4646,15 @@ function buildPiQualityReviewPrompt(input: {
         }
       ]
     }, null, 2)
-  ].join("\n");
+  });
+}
+
+function renderPromptTemplate(template: string, variables: Record<string, string>): string {
+  let rendered = template;
+  for (const [key, value] of Object.entries(variables)) {
+    rendered = rendered.split(`{{${key}}}`).join(value);
+  }
+  return rendered;
 }
 
 function buildPiFindingRefreshPrompt(root: string, args: Args, finding: ReviewFinding): string {
@@ -4762,7 +4758,7 @@ function parsePiReviewFindings(
         summary: optionalString(evidence.summary)
           ?? optionalString(evidence.excerpt)?.slice(0, 260)
           ?? (optionalString(evidence.path) ? `Evidence in ${optionalString(evidence.path)}` : `Pi returned evidence ${index + 1} without a summary.`),
-        excerpt: optionalString(evidence.excerpt)?.slice(0, 800)
+        excerpt: optionalString(evidence.excerpt)?.slice(0, 12_000)
       }))
       : [{ source: "agent" as const, summary: "Pi returned this candidate without path-level evidence." }];
     const anchors = affectedPaths.length
@@ -5108,7 +5104,7 @@ function salvagePiReviewJson(stdout: string): unknown {
           path: filePath,
           summary: evidenceSummaries[index] ?? fallbackEvidenceSummary
         }))
-        : [{ summary: fallbackEvidenceSummary, excerpt: chunk.slice(0, 800) }],
+        : [{ summary: fallbackEvidenceSummary, excerpt: chunk.slice(0, 12_000) }],
       affectedPaths: paths
     });
   }
@@ -5350,7 +5346,7 @@ async function buildQualityReviewFindings(root: string, forcedRunId?: string, fo
     status: "completed",
     categories: [...reviewCategoryOrder],
     findingIds: sorted.map((finding) => finding.id),
-    evaluatorResults: buildReviewEvaluatorResults(sorted),
+    evaluatorResults: buildReviewEvaluatorResults(sorted, root),
     summary: buildReviewRunSummary(sorted),
     traceIds: []
   } satisfies ReviewRun);
@@ -5970,27 +5966,27 @@ function architectureFindingSeverity(severity: ArchitectureFinding["severity"]):
   return "P3";
 }
 
-function buildQualityReviewQueueSummary(findings: ReviewFinding[], latestRun?: ReviewRun, progress?: ReviewProgressSnapshot) {
+function buildQualityReviewQueueSummary(root: string, findings: ReviewFinding[], latestRun?: ReviewRun, progress?: ReviewProgressSnapshot) {
   return {
     counts: buildReviewRunSummary(findings),
     generatedAt: new Date().toISOString(),
     severityOrder: ["P0", "P1", "P2", "P3"] as ReviewSeverity[],
     categoryOrder: [...reviewCategoryOrder],
     evaluatorResults: progress
-      ? completeReviewEvaluatorResults(findings, progress.evaluatorResults ?? [], progress)
+      ? completeReviewEvaluatorResults(findings, progress.evaluatorResults ?? [], progress, root)
       : latestRun?.evaluatorResults?.length
-        ? completeReviewEvaluatorResults(findings, latestRun.evaluatorResults)
-        : buildReviewEvaluatorResults(findings)
+        ? completeReviewEvaluatorResults(findings, latestRun.evaluatorResults, undefined, root)
+        : buildReviewEvaluatorResults(findings, root)
   };
 }
 
-function buildReviewEvaluatorResults(findings: ReviewFinding[]): ReviewRun["evaluatorResults"] {
+function buildReviewEvaluatorResults(findings: ReviewFinding[], root?: string): ReviewRun["evaluatorResults"] {
   return reviewCategoryOrder.map((category) => {
     const categoryFindingIds = findings
       .filter((finding) => displayReviewCategory(finding.category) === category)
       .map((finding) => finding.id);
     return {
-      evaluator: reviewEvaluatorFor(category),
+      evaluator: reviewEvaluatorFor(category, root),
       status: "completed" as const,
       findingIds: categoryFindingIds,
       summary: categoryFindingIds.length
@@ -6003,7 +5999,8 @@ function buildReviewEvaluatorResults(findings: ReviewFinding[]): ReviewRun["eval
 function completeReviewEvaluatorResults(
   findings: ReviewFinding[],
   existing: NonNullable<ReviewRun["evaluatorResults"]>,
-  progress?: ReviewProgressSnapshot
+  progress?: ReviewProgressSnapshot,
+  root?: string
 ): NonNullable<ReviewRun["evaluatorResults"]> {
   const byCategory = new Map(existing.map((item) => [displayReviewCategory(item.evaluator.category), item]));
   const currentCategory = progress?.status === "running" ? progress.currentCategory : undefined;
@@ -6016,7 +6013,7 @@ function completeReviewEvaluatorResults(
       .map((finding) => finding.id);
     if (progress?.status === "running" && category === currentCategory) {
       return {
-        evaluator: reviewEvaluatorFor(category),
+        evaluator: reviewEvaluatorFor(category, root),
         status: "partial",
         findingIds: categoryFindingIds,
         summary: progress.message || "Pi is currently evaluating this category."
@@ -6024,7 +6021,7 @@ function completeReviewEvaluatorResults(
     }
     if (progress?.status === "running" && !completedCategories.has(category)) {
       return {
-        evaluator: reviewEvaluatorFor(category),
+        evaluator: reviewEvaluatorFor(category, root),
         status: "partial",
         findingIds: categoryFindingIds,
         summary: "Pi has not reached this category in the current run yet."
@@ -6032,7 +6029,7 @@ function completeReviewEvaluatorResults(
     }
     if (progress?.status === "failed" && category === currentCategory) {
       return {
-        evaluator: reviewEvaluatorFor(category),
+        evaluator: reviewEvaluatorFor(category, root),
         status: "failed",
         findingIds: categoryFindingIds,
         summary: progress.error ?? progress.message ?? "Pi failed while evaluating this category."
@@ -6040,14 +6037,14 @@ function completeReviewEvaluatorResults(
     }
     if (progress?.status === "failed" && !completedCategories.has(category)) {
       return {
-        evaluator: reviewEvaluatorFor(category),
+        evaluator: reviewEvaluatorFor(category, root),
         status: "partial",
         findingIds: categoryFindingIds,
         summary: "Pi did not complete before this category ran."
       };
     }
     return {
-      evaluator: reviewEvaluatorFor(category),
+      evaluator: reviewEvaluatorFor(category, root),
       status: "completed",
       findingIds: categoryFindingIds,
       summary: categoryFindingIds.length
@@ -6060,14 +6057,15 @@ function completeReviewEvaluatorResults(
 function replaceEvaluatorResult(
   results: NonNullable<ReviewRun["evaluatorResults"]>,
   category: ReviewCategory,
-  replacement: NonNullable<ReviewRun["evaluatorResults"]>[number]
+  replacement: NonNullable<ReviewRun["evaluatorResults"]>[number],
+  root?: string
 ): NonNullable<ReviewRun["evaluatorResults"]> {
   const displayCategory = displayReviewCategory(category);
   return reviewCategoryOrder.map((item) =>
     item === displayCategory
       ? replacement
       : results.find((result) => displayReviewCategory(result.evaluator.category) === item) ?? {
-        evaluator: reviewEvaluatorFor(item),
+        evaluator: reviewEvaluatorFor(item, root),
         status: "partial",
         findingIds: [],
         summary: "该分类还没有可用的评估结果。"
@@ -6109,7 +6107,7 @@ function reviewFinding(
     suggestedAction: input.suggestedAction,
     confidence: input.confidence,
     source: input.source ?? "hybrid",
-    evaluator: reviewEvaluatorFor(category),
+    evaluator: reviewEvaluatorFor(category, context.root),
     knowledgeKind: "CANDIDATE",
     evidence: input.evidence,
     affectedAnchors: input.affectedAnchors,

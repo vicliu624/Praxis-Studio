@@ -1997,6 +1997,22 @@ textarea {
   font-size: 12px;
 }
 
+.review-evidence-excerpt {
+  max-height: 260px;
+  margin: 0;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  border: 1px solid #263241;
+  border-radius: 6px;
+  background: #0c1118;
+  color: #d8e2ee;
+  padding: 10px;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .review-anchor-list {
   display: flex;
   flex-wrap: wrap;

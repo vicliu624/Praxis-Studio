@@ -845,6 +845,7 @@ function ReviewFindingCard({
           <div className="review-evidence" key={`${finding.id}:evidence:${index}`}>
             <span>{evidence.source}</span>
             <p>{evidence.summary}</p>
+            {evidence.excerpt ? <pre className="review-evidence-excerpt">{evidence.excerpt}</pre> : null}
             {evidence.path ? <small>{evidence.path}</small> : null}
           </div>
         ))}
