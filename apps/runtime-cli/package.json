@@ -14,7 +14,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "^0.76.0",
+    "@earendil-works/pi-coding-agent": "^0.79.8",
     "@praxis/agent-loop": "0.1.0-alpha.0",
     "@praxis/agent-runtime": "0.1.0-alpha.0",
     "@praxis/architecture-modeler": "0.1.0-alpha.0",
