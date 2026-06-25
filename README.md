@@ -324,6 +324,37 @@ artifacts/desktop/windows/bundle/msi/
 artifacts/desktop/windows/bundle/nsis/
 ```
 
+macOS 桌面打包需要在 macOS 机器上运行，不能从 Windows 直接交叉打包。先确保本机已经安装：
+
+```bash
+xcode-select --install
+rustup default stable
+npm install
+```
+
+然后在仓库根目录执行：
+
+```bash
+npm run package:desktop:macos
+```
+
+这个命令会依次构建 packages、runtime-cli 和 Tauri release。固定产物目录：
+
+```text
+artifacts/desktop/macos/praxis-studio
+artifacts/desktop/macos/bundle/macos/
+artifacts/desktop/macos/bundle/dmg/
+```
+
+Tauri 原始产物仍然保留在：
+
+```text
+apps/studio-desktop/src-tauri/target/release/
+apps/studio-desktop/src-tauri/target/release/bundle/
+```
+
+常见 macOS 产物包括 `.app` 和 `.dmg`，文件名会随架构和 Tauri 配置变化，例如 `Praxis Studio.app` 或 `Praxis Studio_0.1.0_aarch64.dmg`。本地未配置签名密钥时，脚本会按本地开发打包方式跳过 updater 签名产物；正式发布时再配置 `TAURI_SIGNING_PRIVATE_KEY` 或 `TAURI_SIGNING_PRIVATE_KEY_PATH`。
+
 ---
 
 ## 一句话
