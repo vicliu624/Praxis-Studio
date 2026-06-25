@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">Praxis Studio memory axis mark</title>
+  <desc id="desc">A minimal amber memory axis with three cyan governance states and one controlled projection rail.</desc>
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M96 58V198M96 128H198" stroke="#0C1116" stroke-width="40" />
+    <path d="M96 58V198M96 128H198" stroke="#E7A23C" stroke-width="24" />
+  </g>
+  <g>
+    <circle cx="96" cy="58" r="25" fill="#0C1116" />
+    <circle cx="96" cy="58" r="14" fill="#6EE7D8" />
+    <circle cx="96" cy="128" r="25" fill="#0C1116" />
+    <circle cx="96" cy="128" r="14" fill="#6EE7D8" />
+    <circle cx="96" cy="198" r="25" fill="#0C1116" />
+    <circle cx="96" cy="198" r="14" fill="#6EE7D8" />
+    <circle cx="198" cy="128" r="17" fill="#0C1116" />
+    <circle cx="198" cy="128" r="8" fill="#E7A23C" />
+  </g>
+</svg>

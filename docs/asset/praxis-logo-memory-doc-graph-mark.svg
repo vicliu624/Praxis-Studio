@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">Praxis Studio memory document graph mark</title>
+  <desc id="desc">Governed cyan graph nodes feed an amber project memory document.</desc>
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M62 84H98M62 128H98M62 172H98" stroke="#0C1116" stroke-width="32" />
+    <path d="M62 84H98M62 128H98M62 172H98" stroke="#E7A23C" stroke-width="16" />
+  </g>
+  <path
+    d="M98 56H158L194 92V200H98Z"
+    fill="#111820"
+    stroke="#E7A23C"
+    stroke-width="16"
+    stroke-linejoin="round"
+  />
+  <path d="M158 56V92H194" fill="none" stroke="#E7A23C" stroke-width="16" stroke-linejoin="round" />
+  <g fill="none" stroke-linecap="round">
+    <path d="M120 118H164" stroke="#EDF2F7" stroke-width="7" />
+    <path d="M120 140H170" stroke="#6EE7D8" stroke-width="7" />
+    <path d="M120 162H150" stroke="#8EA0B5" stroke-width="7" />
+  </g>
+  <g>
+    <circle cx="62" cy="84" r="23" fill="#0C1116" />
+    <circle cx="62" cy="84" r="13" fill="#6EE7D8" />
+    <circle cx="62" cy="128" r="23" fill="#0C1116" />
+    <circle cx="62" cy="128" r="13" fill="#6EE7D8" />
+    <circle cx="62" cy="172" r="23" fill="#0C1116" />
+    <circle cx="62" cy="172" r="13" fill="#6EE7D8" />
+  </g>
+</svg>

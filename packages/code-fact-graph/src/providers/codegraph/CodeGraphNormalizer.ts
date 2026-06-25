@@ -21,8 +21,9 @@ export function normalizeCodeGraphSnapshot(input: {
   fallback: CodeGraphFallbackResult;
   provider: CodeFactProviderInfo;
 }): CodeFactGraphSnapshot {
+  const repositoryFilePaths = new Set(input.repository.files.map((file) => normalizeRepositoryPath(file.path)));
   const indexedFiles = mergeIndexedFiles(input.index.files, input.repository.files);
-  const indexedNodes = mergeIndexedNodes(input.index.nodes, input.fallback.nodes);
+  const indexedNodes = mergeIndexedNodes(input.index.nodes, input.fallback.nodes, repositoryFilePaths);
   const indexedEdges = mergeIndexedEdges(input.index.edges, input.fallback.edges);
   const scannerFilesByPath = new Map(input.repository.files.map((file) => [normalizeRepositoryPath(file.path), file]));
   const indexedFilesByPath = new Map(indexedFiles.map((file) => [file.path, file]));
@@ -96,15 +97,32 @@ function mergeIndexedFiles(indexFiles: CodeGraphIndexedFile[], scannerFiles: Sou
       size: file.sizeBytes
     });
   }
-  for (const file of indexFiles) files.set(normalizeRepositoryPath(file.path), { ...file, path: normalizeRepositoryPath(file.path) });
+  for (const file of indexFiles) {
+    const filePath = normalizeRepositoryPath(file.path);
+    const existing = files.get(filePath);
+    if (!existing) continue;
+    files.set(filePath, { ...existing, ...file, path: filePath });
+  }
   return Array.from(files.values());
 }
 
-function mergeIndexedNodes(indexNodes: CodeGraphIndexedNode[], fallbackNodes: CodeGraphIndexedNode[]): CodeGraphIndexedNode[] {
+function mergeIndexedNodes(
+  indexNodes: CodeGraphIndexedNode[],
+  fallbackNodes: CodeGraphIndexedNode[],
+  repositoryFilePaths: Set<string>
+): CodeGraphIndexedNode[] {
   const nodes = new Map<string, CodeGraphIndexedNode>();
-  for (const node of indexNodes) nodes.set(node.id, { ...node, filePath: normalizeRepositoryPath(node.filePath) });
+  for (const node of indexNodes) {
+    const filePath = normalizeRepositoryPath(node.filePath);
+    if (!repositoryFilePaths.has(filePath)) continue;
+    nodes.set(node.id, { ...node, filePath });
+  }
   if (nodes.size === 0) {
-    for (const node of fallbackNodes) nodes.set(node.id, { ...node, filePath: normalizeRepositoryPath(node.filePath) });
+    for (const node of fallbackNodes) {
+      const filePath = normalizeRepositoryPath(node.filePath);
+      if (!repositoryFilePaths.has(filePath)) continue;
+      nodes.set(node.id, { ...node, filePath });
+    }
   }
   return Array.from(nodes.values());
 }

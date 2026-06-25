@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Praxis Studio memory document graph app icon</title>
+  <desc id="desc">A dark app icon containing governed graph nodes feeding a project memory document.</desc>
+  <rect width="512" height="512" rx="96" fill="#0C1116" />
+  <rect x="52" y="52" width="408" height="408" rx="72" fill="#111820" stroke="#263241" stroke-width="10" />
+  <g transform="translate(96 96) scale(1.25)">
+    <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M62 84H98M62 128H98M62 172H98" stroke="#0C1116" stroke-width="32" />
+      <path d="M62 84H98M62 128H98M62 172H98" stroke="#E7A23C" stroke-width="16" />
+    </g>
+    <path
+      d="M98 56H158L194 92V200H98Z"
+      fill="#111820"
+      stroke="#E7A23C"
+      stroke-width="16"
+      stroke-linejoin="round"
+    />
+    <path d="M158 56V92H194" fill="none" stroke="#E7A23C" stroke-width="16" stroke-linejoin="round" />
+    <g fill="none" stroke-linecap="round">
+      <path d="M120 118H164" stroke="#EDF2F7" stroke-width="7" />
+      <path d="M120 140H170" stroke="#6EE7D8" stroke-width="7" />
+      <path d="M120 162H150" stroke="#8EA0B5" stroke-width="7" />
+    </g>
+    <g>
+      <circle cx="62" cy="84" r="23" fill="#0C1116" />
+      <circle cx="62" cy="84" r="13" fill="#6EE7D8" />
+      <circle cx="62" cy="128" r="23" fill="#0C1116" />
+      <circle cx="62" cy="128" r="13" fill="#6EE7D8" />
+      <circle cx="62" cy="172" r="23" fill="#0C1116" />
+      <circle cx="62" cy="172" r="13" fill="#6EE7D8" />
+    </g>
+  </g>
+</svg>

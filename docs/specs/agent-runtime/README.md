@@ -13,8 +13,8 @@ The target is:
 ```text
 Claude Code-like runtime quality
 Praxis-native object model
-Memory-first, graph-projected interaction
-Project Memory as the durable authority
+Documented-memory-first, graph-projected interaction
+Docs-backed Project Memory as the durable authority
 Controlled external coding agents as workers
 ```
 
@@ -49,10 +49,10 @@ Tool Runtime
   governed capabilities that can read, plan, write memory, invalidate projections, generate tasks or call external workers
 
 Project Memory
-  durable knowledge produced from facts, inferences and user confirmations
+  normalized project documents plus Git timeline, updated from facts, inferences and user confirmations
 
 Graph Projection
-  derived live views over memory, models, specs, plans, tasks and trace
+  derived live views over docs, parsed models, plans, tasks and trace
 
 Trace
   low-level execution audit record, not the chat itself
@@ -61,7 +61,7 @@ Trace
 Praxis does not copy Claude Code's product center. Claude Code is file, command, patch and test centered. Praxis is:
 
 ```text
-memory events
+documented memory events
 models
 specifications
 graph projection views
@@ -94,7 +94,7 @@ docs/AGENT_RUNTIME_SPEC.md
   earlier runtime notes and v0.1 boundary
 
 docs/DEVELOPMENT_GRAPH_SPEC.md
-  earlier graph object model; superseded by memory-first graph projection rules where conflicts exist
+  earlier graph object model; superseded by documented-memory-first graph projection rules where conflicts exist
 
 docs/specs/13-live-projection-loop.md
   canonical live projection loop for agent construction
@@ -115,7 +115,7 @@ docs/prompts/
   prompt procedures that execute playbooks without scattering prompt logic in UI components
 
 docs/LOCAL_KNOWLEDGE_SPEC.md
-  .distinction and project memory model
+  .distinction migration/runtime state and docs-backed project memory model
 
 docs/CODING_AGENT_ADAPTER_SPEC.md
   external coding agent adapter boundary

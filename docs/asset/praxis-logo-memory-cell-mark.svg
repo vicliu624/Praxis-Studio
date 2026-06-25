@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">Praxis Studio memory cell mark</title>
+  <desc id="desc">A minimal amber control cell with three cyan governance memory nodes.</desc>
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M88 58H174C190 58 198 66 198 82V174C198 190 190 198 174 198H88" stroke="#0C1116" stroke-width="42" />
+    <path d="M88 58H174C190 58 198 66 198 82V174C198 190 190 198 174 198H88" stroke="#E7A23C" stroke-width="26" />
+  </g>
+  <g>
+    <circle cx="68" cy="76" r="25" fill="#0C1116" />
+    <circle cx="68" cy="76" r="14" fill="#6EE7D8" />
+    <circle cx="68" cy="128" r="25" fill="#0C1116" />
+    <circle cx="68" cy="128" r="14" fill="#6EE7D8" />
+    <circle cx="68" cy="180" r="25" fill="#0C1116" />
+    <circle cx="68" cy="180" r="14" fill="#6EE7D8" />
+  </g>
+</svg>

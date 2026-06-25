@@ -1,10 +1,16 @@
-# Structured Project Memory Specification
+# Documented Project Memory and Structured Mirror Specification
 
 ## 1. Purpose
 
-Structured Project Memory is the authoritative knowledge layer of Praxis Studio.
+Documented Project Memory is the authoritative knowledge layer of Praxis Studio.
 
-It records facts, inferences, candidates, confirmations, decisions, incidents, traces and constraints.
+```text
+Project Memory = normalized project documents + Git version timeline
+```
+
+Structured records are useful as parsed indexes, validation targets, agent context and migration mirrors. They are not the final authority when they live only under `.distinction`.
+
+Facts, inferences, candidates, confirmations, decisions, incidents, traces and constraints must ultimately have a durable document home. `.distinction/memory/**` may mirror or cache those records during v0.1 migration, but it must not be the only place where project memory exists.
 
 ## 2. MemoryRecord
 
@@ -60,7 +66,29 @@ export interface Evidence {
 }
 ```
 
-## 4. Memory files
+## 4. Documented memory files
+
+Project memory should be maintained in normalized docs such as:
+
+```text
+docs/PRODUCT_SPEC.md
+docs/ARCHITECTURE.md
+docs/design/**/*.md
+docs/design/**/*.html
+docs/decisions/**/*.md
+docs/requirements/**/*.md
+docs/risks/**/*.md
+docs/tasks/**/*.md
+adr/**/*.md
+rfcs/**/*.md
+project-defined normalized documents
+```
+
+The Git timeline for these documents is part of the memory because it records when requirements, designs, decisions and explanations changed.
+
+## 5. Legacy structured mirror files
+
+The following files are allowed as v0.1 transition/runtime mirrors:
 
 ```text
 .distinction/memory/facts.jsonl
@@ -74,27 +102,37 @@ export interface Evidence {
 .distinction/memory/do-not-repeat.jsonl
 ```
 
-## 5. Source-of-truth rule
+They must be treated as parsed indexes, trace-adjacent records, migration compatibility or runtime acceleration. Any long-lived knowledge that exists only in these files is migration debt.
 
-The source of truth is memory, not graph cache.
+## 6. Source-of-truth rule
+
+The source of truth is documented project memory, not graph cache and not `.distinction`.
 
 ```text
 Authoritative:
-  memory/*.jsonl
-  models/*.json
-  rules/*.md
-  rules/playbooks/**/*.md
-  confirmed specs
+  docs/**/*.md
+  adr/**/*.md
+  rfcs/**/*.md
+  architecture/**/*.md
+  design/**/*.md
+  project-defined normalized documents
+  Git history for those documents
 
-Derived:
-  views/**/*.json
-  views/**/*.mmd
-  reports/*.md
+Transition / derived:
+  .distinction/memory/*.jsonl
+  .distinction/models/*.json
+  .distinction/rules/**/*.md
+  .distinction/specs/**/*.md
+  .distinction/views/**/*.json
+  .distinction/views/**/*.mmd
+  .distinction/reports/*.md
 ```
 
-## 6. Confirmation rule
+## 7. Confirmation rule
 
 Agent output must not be written as CONFIRMED unless the user explicitly confirms it.
+
+Confirmed knowledge must be written into normalized project documents. Writing only a `.distinction/memory/*.jsonl` record is not enough for durable project memory.
 
 Valid confirmation actions:
 
@@ -107,38 +145,38 @@ Approve plan action
 Import verified external task result
 ```
 
-## 7. Staleness rule
+## 8. Staleness rule
 
-If repository facts change, related inferences, candidates, projections and specs must be marked stale or regenerated.
+If repository facts change, related docs, inferences, candidates, projections and structured mirrors must be marked stale or regenerated.
 
-## 8. Patch rule
+## 9. Patch rule
 
-AI-assisted code reading must write structured patches, not confirmed memory and not view cache.
+AI-assisted code reading must write document/model patches, not confirmed memory and not view cache.
 
 ```text
 static_analysis
-  may produce FACT memory when evidence is deterministic
+  may produce FACT evidence when evidence is deterministic
 
 agent_code_reading
-  may produce INFERENCE or CANDIDATE memory
+  may produce INFERENCE or CANDIDATE document patches
 
 user_confirmation
-  may produce CONFIRMED memory
+  may produce CONFIRMED documented memory
 ```
 
-Patch-derived memory must preserve evidence and source paths.
+Patch-derived documented memory must preserve evidence and source paths.
 
-## 9. Finding memory rule
+## 10. Finding memory rule
 
-Anti-pattern findings are memory records. They must preserve affected memory/model/spec/task/source/trace links and evidence.
+Anti-pattern findings are documented project knowledge. They must preserve affected document/model/spec/task/source/trace links and evidence.
 
 Rule-based detectors may produce FACT or high-confidence INFERENCE findings when evidence is deterministic.
 
 AI-assisted detectors may produce CANDIDATE or INFERENCE findings.
 
-Only user confirmation may produce CONFIRMED quality memory.
+Only user confirmation may produce CONFIRMED quality memory, and that confirmation must have a document home.
 
-## 10. Governance recommendation rule
+## 11. Governance recommendation rule
 
 Governance playbooks and prompt procedures may recommend remediation, but recommendations are not confirmed memory by themselves.
 
@@ -147,7 +185,7 @@ playbook-selected recommendation
   writes trace and candidate plan actions
 
 user-approved remediation
-  may write confirmed decision memory or approved plan state
+  may write confirmed decision docs or approved plan state
 
 user-overridden recommendation
   must record the override reason when provided

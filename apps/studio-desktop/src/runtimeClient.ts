@@ -394,6 +394,210 @@ export interface RecentProject {
   lastOpenedAt: string;
 }
 
+export interface RuntimeStartupContext {
+  projectRoot?: string;
+  route?: string;
+}
+
+export type RuntimeProjectChangePlanStatus = "draft" | "ready_for_review" | "approved" | "in_development" | "completed";
+export type RuntimeProjectChangePlanItemStatus = "candidate" | "approved" | "in_progress" | "done" | "blocked";
+export type RuntimeProjectChangePlanTaskStatus = "todo" | "doing" | "done" | "blocked";
+export type RuntimeProjectChangePlanBump = "major" | "minor" | "patch" | "none";
+export type RuntimeProjectChangeSourceExplorer = "model" | "design" | "engineering" | "architecture" | "project" | "review";
+
+export interface RuntimeProjectChangePlanChecklistItem {
+  id: string;
+  text: string;
+  status: RuntimeProjectChangePlanTaskStatus;
+  source?: string;
+}
+
+export interface RuntimeProjectChangePlanItem {
+  id: string;
+  title: string;
+  summary: string;
+  sourceExplorer: RuntimeProjectChangeSourceExplorer;
+  sourceDocuments: string[];
+  status: RuntimeProjectChangePlanItemStatus;
+  checklist: RuntimeProjectChangePlanChecklistItem[];
+  burnDown: {
+    total: number;
+    done: number;
+    percent: number;
+  };
+  linkedDesignDocs: string[];
+  linkedEngineeringDocs: string[];
+  linkedArchitectureDocs: string[];
+  linkedReviewFindingIds: string[];
+  linkedReviewDocs: string[];
+  resolutionEvidence: string[];
+}
+
+export interface RuntimeProjectDevelopmentPlanTask {
+  id: string;
+  title: string;
+  summary: string;
+  phase: "docs" | "plan" | "code" | "test" | "review" | "release";
+  status: RuntimeProjectChangePlanTaskStatus;
+  progress: number;
+  start?: string;
+  end?: string;
+  dependencies: string[];
+  changeItemIds: string[];
+  deliverables: string[];
+  acceptance: string[];
+  implementationBrief: {
+    objective: string;
+    currentBehavior: string;
+    targetBehavior: string;
+    approach: string;
+    constraints: string[];
+    nonGoals: string[];
+    rollbackPlan: string;
+  };
+  workset: {
+    readFiles: string[];
+    writeFiles: string[];
+    relatedDocs: string[];
+    testCommands: string[];
+    traceLinks: string[];
+    contextNotes: string[];
+  };
+  acceptanceEvidence: Array<{
+    id: string;
+    description: string;
+    command?: string;
+    expectedResult: string;
+    status: RuntimeProjectChangePlanTaskStatus;
+    evidence?: string;
+  }>;
+}
+
+export interface RuntimeProjectExpectedChangelog {
+  version: string;
+  date: string;
+  summary: string;
+  added: string[];
+  changed: string[];
+  fixed: string[];
+  risks: string[];
+}
+
+export interface RuntimeProjectChangePlanModel {
+  schemaVersion: "praxis.projectChangePlan.v1";
+  root: string;
+  generatedAt: string;
+  status: RuntimeProjectChangePlanStatus;
+  currentVersion: string;
+  nextVersion: string;
+  bump: RuntimeProjectChangePlanBump;
+  versionReason: string;
+  git: {
+    branch: string;
+    commit: string;
+    shortCommit: string;
+    dirty: boolean;
+  };
+  sourceFingerprint: string;
+  changeItems: RuntimeProjectChangePlanItem[];
+  developmentPlan: RuntimeProjectDevelopmentPlanTask[];
+  expectedChangelog: RuntimeProjectExpectedChangelog;
+  agentProgress: Array<{
+    timestamp: string;
+    taskId: string;
+    status: RuntimeProjectChangePlanTaskStatus;
+    summary: string;
+  }>;
+  questions: string[];
+}
+
+export interface RuntimeProjectChangePlanReadResult {
+  ok: boolean;
+  root: string;
+  exists: boolean;
+  stale: boolean;
+  skipped?: boolean;
+  reason?: string;
+  staleBefore?: boolean;
+  agentError?: string;
+  model?: RuntimeProjectChangePlanModel;
+  markdownPath: string;
+  htmlPath: string;
+  markdownRelativePath: string;
+  htmlRelativePath: string;
+  latestSourceUpdatedAt?: string;
+}
+
+export interface RuntimeReviewFindingChangePlanResult extends RuntimeProjectChangePlanReadResult {
+  findingId: string;
+  changeItemId: string;
+  message: string;
+}
+
+export interface RuntimeReviewFindingDiscussionResult {
+  ok: boolean;
+  root: string;
+  findingId: string;
+  changeItemId?: string;
+  intent:
+    | "explain_review_finding"
+    | "create_project_change"
+    | "mark_finding_false_positive"
+    | "clarify_review_scope"
+    | "out_of_scope"
+    | "needs_selection"
+    | string;
+  answer: string;
+  guidance: string;
+  referencedDocuments: string[];
+  planAction: {
+    shouldCreateOrUpdate: boolean;
+    reason: string;
+    expectedChangeSummary: string;
+  };
+  statusDecision?: {
+    shouldUpdate: boolean;
+    status: Extract<RuntimeReviewFinding["status"], "false_positive" | "needs_more_evidence">;
+    reason: string;
+    evidenceSummary: string;
+    updatedSuggestedAction: string;
+  };
+  regressionAction?: {
+    shouldCreate: boolean;
+    reason: string;
+    correctedUnderstanding: string;
+    affectedCategories: RuntimeReviewCategory[];
+    affectedFindingIds: string[];
+    recommendedReviewScope: string;
+  };
+  statusUpdate?: {
+    findingId: string;
+    status: RuntimeReviewFinding["status"];
+    reason: string;
+    regressionMarkdownPath?: string;
+    regressionHtmlPath?: string;
+  };
+  risks: string[];
+  questions: string[];
+  documentEdits: RuntimeDiagramDocumentEditResult[];
+  artifactPaths: string[];
+  provider?: Record<string, unknown>;
+}
+
+export interface RuntimeProjectChangePlanDiscussionResult {
+  ok: boolean;
+  root: string;
+  intent: "project_change_plan_discussion" | string;
+  answer: string;
+  guidance: string;
+  documentEdits: RuntimeDiagramDocumentEditResult[];
+  artifactPaths: string[];
+  markdownRelativePath: string;
+  htmlRelativePath: string;
+  model?: RuntimeProjectChangePlanModel;
+  provider?: Record<string, unknown>;
+}
+
 export interface NewProjectPlan {
   projectName: string;
   productIdea: string;
@@ -419,6 +623,31 @@ export interface RuntimeReviewQueueResult {
   };
   qualityReview?: RuntimeQualityReviewSummary;
   reviewFindings: RuntimeReviewFinding[];
+  reviewDocuments?: {
+    exists: boolean;
+    rootDocPath: string;
+    rootHtmlPath: string;
+    categoryDocuments: Array<{
+      category: RuntimeReviewCategory;
+      title: string;
+      status: string;
+      summary: string;
+      evaluatorSummary: string;
+      findingIds: string[];
+      unresolvedFindingIds: string[];
+      docPath: string;
+      htmlPath: string;
+    }>;
+    issueDocuments: Array<{
+      findingId: string;
+      category: RuntimeReviewCategory;
+      title: string;
+      severity: RuntimeReviewSeverity;
+      status: string;
+      docPath: string;
+      htmlPath: string;
+    }>;
+  };
   foundation?: RuntimeFoundationReviewStatus;
   memorySuggestions: RuntimeMemorySuggestionReviewItem[];
   findingStatusPatches: RuntimeFindingStatusReviewItem[];
@@ -499,7 +728,7 @@ export interface RuntimeReviewEvaluatorRef {
   name: string;
   category: RuntimeReviewCategory;
   prompt: string;
-  source: "praxis-heuristic" | "pi-agent" | "hybrid";
+  source: "agent" | "praxis-heuristic" | "pi-agent" | "hybrid";
 }
 
 export interface RuntimeReviewFinding {
@@ -541,7 +770,7 @@ export interface RuntimeReviewRun {
   id: string;
   root: string;
   generatedAt: string;
-  source: "praxis-heuristic" | "pi-agent" | "hybrid";
+  source: "agent" | "praxis-heuristic" | "pi-agent" | "hybrid";
   status: "completed" | "partial" | "failed";
   categories: RuntimeReviewCategory[];
   findingIds: string[];
@@ -565,6 +794,10 @@ export interface RuntimeReviewRunResult {
     run: string;
     findings: string;
     candidateMemory: string;
+    reviewDoc?: string;
+    reviewHtml?: string;
+    categories?: string[];
+    issues?: string[];
   };
 }
 
@@ -572,7 +805,7 @@ export interface RuntimeReviewProgress {
   schemaVersion: "praxis.reviewProgress.v1";
   runId: string;
   root: string;
-  source: "pi-agent" | "praxis-heuristic";
+  source: "agent" | "pi-agent" | "praxis-heuristic";
   scope?: "full" | "category";
   retryCategory?: RuntimeReviewCategory;
   retryOfRunId?: string;
@@ -777,6 +1010,13 @@ export interface RuntimeFindingAuditTraceEntry {
 export type RuntimeProjectedGraphViewKind =
   | "architecture_dependency"
   | "architecture_component"
+  | "design_use_case_list"
+  | "design_use_case"
+  | "design_activity"
+  | "design_sequence"
+  | "design_state_machine"
+  | "design_class_collaboration"
+  | "design_pattern_map"
   | "code_fact"
   | "finding"
   | "context"
@@ -792,6 +1032,15 @@ export interface RuntimeGraphAnchor {
     | "code_fact_edge"
     | "architecture_module"
     | "architecture_dependency"
+    | "design_context"
+    | "design_actor"
+    | "design_external_system"
+    | "design_use_case"
+    | "design_activity"
+    | "design_sequence"
+    | "design_state_machine"
+    | "design_class_collaboration"
+    | "design_pattern"
     | "finding"
     | "task"
     | "trace"
@@ -901,6 +1150,176 @@ export interface RuntimeProjectionViewsResult {
   skippedPaths: string[];
 }
 
+export interface RuntimeDesignStoryIntakeResult {
+  ok: boolean;
+  root: string;
+  intent: "new_story" | "insufficient_story" | "not_new_story" | string;
+  accepted: boolean;
+  updated: boolean;
+  summary: string;
+  reason: string;
+  guidance: string;
+  missingParts: string[];
+  questions: string[];
+  addedUseCaseIds: string[];
+  designMapDocPath?: string;
+  designMapHtmlPath?: string;
+  modelPath?: string;
+  manifestPath?: string;
+  useCaseListViewPath?: string;
+  useCaseViewPaths: string[];
+  mermaidPaths: string[];
+  contexts: number;
+  actors: number;
+  externalSystems: number;
+  useCases: number;
+  relations: number;
+  versionDecision?: RuntimeDesignVersionDecision;
+  provider?: Record<string, unknown>;
+  versionProvider?: Record<string, unknown>;
+}
+
+export interface RuntimeDesignDiscoveryProgress {
+  schemaVersion: "praxis.designDiscoveryProgress.v1";
+  root: string;
+  runId: string;
+  updatedAt: string;
+  status: "running" | "complete" | "failed" | string;
+  stage: string;
+  title: string;
+  detail: string;
+  events?: RuntimeAgentConversationEvent[];
+  steps: {
+    id: string;
+    title: string;
+    detail: string;
+    status: "pending" | "running" | "done" | "failed" | string;
+  }[];
+}
+
+export interface RuntimeAgentConversationEvent {
+  id: string;
+  kind: string;
+  stage?: string;
+  status?: string;
+  title?: string;
+  content?: string;
+  detail?: string;
+  command?: string;
+  path?: string;
+  metadata?: string[];
+  timestamp?: string;
+}
+
+export interface RuntimeScopedAgentHistoryEntry {
+  id: string;
+  role: "user" | "assistant" | "system";
+  text: string;
+  timestamp: string;
+  scopeId: string;
+  scopeTitle: string;
+  scopeKind?: "design" | "engineering" | "architecture" | "plan" | "general" | string;
+  contextTitle?: string;
+  contextPath?: string;
+  intent?: string;
+  status?: "done" | "failed" | "running" | string;
+}
+
+export interface RuntimeDesignVersionDecision {
+  schemaVersion: "praxis.designVersionDecision.v1";
+  bump: "major" | "minor" | "patch" | "none" | string;
+  currentVersion: string;
+  nextVersion: string;
+  reason: string;
+  semverRule: string;
+  atomicCommitScope: string;
+  commitSummary: string;
+  affectedArtifacts: string[];
+  breaking: boolean;
+  confidence: "low" | "medium" | "high" | string;
+  questions: string[];
+}
+
+export interface RuntimeDesignDiagramDiscussionResult {
+  ok: boolean;
+  root: string;
+  diagramId: string;
+  currentUml?: RuntimeDesignCurrentUmlContext;
+  intent: "explain" | "operate" | "propose_patch" | "out_of_scope" | "needs_selection" | string;
+  answer: string;
+  guidance: string;
+  referencedAnchors: string[];
+  suggestedOperations: string[];
+  affectedDocuments: RuntimeDesignAffectedDocument[];
+  documentEdits: RuntimeDiagramDocumentEditResult[];
+  risks: string[];
+  questions: string[];
+  provider?: Record<string, unknown>;
+}
+
+export interface RuntimeDesignAffectedDocument {
+  path: string;
+  kind: string;
+  reason: string;
+  update: "must_update" | "review" | "no_change" | string;
+}
+
+export interface RuntimeDesignCurrentUmlContext {
+  id: string;
+  kind: string;
+  title: string;
+  summary?: string;
+  htmlPath: string;
+  markdownPath?: string;
+  status?: string;
+  confidence?: string;
+  coverage?: unknown;
+  currentDocumentHtmlExcerpt?: string;
+  currentDocumentMarkdownExcerpt?: string;
+}
+
+export interface RuntimeDiagramDocumentEditResult {
+  path: string;
+  operation: "replace_text" | "replace_between_markers" | "append_section" | "replace_document" | string;
+  status: "applied" | "skipped" | "rejected" | "failed" | string;
+  changed: boolean;
+  message: string;
+  reason?: string;
+  bytesWritten?: number;
+}
+
+export interface RuntimeEngineeringDiagramDiscussionResult {
+  ok: boolean;
+  root: string;
+  documentPath: string;
+  intent: "explain" | "drilldown" | "governance" | "out_of_scope" | "needs_selection" | string;
+  answer: string;
+  guidance: string;
+  technicalPerspective: string;
+  referencedAnchors: string[];
+  suggestedDrilldowns: string[];
+  documentEdits: RuntimeDiagramDocumentEditResult[];
+  risks: string[];
+  questions: string[];
+  provider?: Record<string, unknown>;
+}
+
+export interface RuntimeArchitectureDiagramDiscussionResult {
+  ok: boolean;
+  root: string;
+  documentPath: string;
+  intent: "explain" | "drilldown" | "boundary" | "out_of_scope" | "needs_selection" | string;
+  answer: string;
+  guidance: string;
+  architecturePerspective: string;
+  referencedAnchors: string[];
+  suggestedDrilldowns: string[];
+  documentEdits: RuntimeDiagramDocumentEditResult[];
+  risks: string[];
+  questions: string[];
+  provider?: Record<string, unknown>;
+}
+
 export interface RuntimeContextPacketSummary {
   schemaVersion: "praxis.contextPacket.v1";
   id: string;
@@ -952,6 +1371,8 @@ export interface ModelSettings {
   baseUrl: string;
   apiKey: string;
   intakeModel: string;
+  designDiscoveryModel: string;
+  designDiscoveryTimeoutMs: number;
   nodeExplainModel: string;
   edgeExplainModel: string;
   edgePlanModel: string;
@@ -969,11 +1390,29 @@ export interface ModelSettings {
   reviewPiTimeoutMs: number;
 }
 
+export const legacyDefaultPiTools = "read,grep,find,ls,codegraph_query,codegraph_context,codegraph_relations,bash,edit,write";
+export const defaultPiTools = [
+  "praxis_status",
+  "praxis_context_packet",
+  "praxis_projection_views",
+  "praxis_code_facts",
+  "praxis_findings",
+  "read",
+  "grep",
+  "find",
+  "ls",
+  "bash",
+  "edit",
+  "write"
+].join(",");
+
 export const defaultModelSettings: ModelSettings = {
   defaultProvider: "deepseek",
   baseUrl: "https://api.deepseek.com",
   apiKey: "",
   intakeModel: "deepseek-v4-pro",
+  designDiscoveryModel: "deepseek-v4-pro",
+  designDiscoveryTimeoutMs: 0,
   nodeExplainModel: "deepseek-v4-flash",
   edgeExplainModel: "deepseek-v4-pro",
   edgePlanModel: "deepseek-v4-pro",
@@ -981,14 +1420,14 @@ export const defaultModelSettings: ModelSettings = {
   piProvider: "deepseek",
   piModel: "deepseek-v4-pro",
   piThinking: "high",
-  piTools: "read,grep,find,ls,codegraph_query,codegraph_context,codegraph_relations,bash,edit,write",
+  piTools: defaultPiTools,
   piCodeGraph: true,
   piAllowRead: true,
   piAllowShell: true,
   piAllowWrite: true,
   piTimeoutMs: 300000,
   reviewPiThinking: "high",
-  reviewPiTimeoutMs: 300000
+  reviewPiTimeoutMs: 0
 };
 
 const modelSettingsStorageKey = "praxis-studio:model-settings";
@@ -1066,9 +1505,11 @@ export async function startAgentRunAsync(
   instruction: string,
   sessionId: string,
   onMessages: (messages: RuntimeChatMessage[]) => void,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  conversationHistory?: RuntimeScopedAgentHistoryEntry[]
 ): Promise<RuntimeAgentRunResult> {
   const args = ["--project-root", root, "--session", sessionId, "--mode", mode, "--instruction", instruction, ...chatTargetArgs(target)];
+  if (conversationHistory?.length) args.push("--conversation-history", JSON.stringify(conversationHistory));
   
   // Start agent in background
   const spawnResult = JSON.parse(await runRuntimeCommandAsync("agent-run", args));
@@ -1146,9 +1587,11 @@ export async function startAgentRun(
   target: RuntimeChatTarget,
   mode: "explain" | "plan",
   instruction: string,
-  sessionId: string
+  sessionId: string,
+  conversationHistory?: RuntimeScopedAgentHistoryEntry[]
 ): Promise<RuntimeAgentRunResult> {
   const args = ["--project-root", root, "--session", sessionId, "--mode", mode, "--instruction", instruction, ...chatTargetArgs(target)];
+  if (conversationHistory?.length) args.push("--conversation-history", JSON.stringify(conversationHistory));
   // Async spawn: process starts in background, returns immediately with { ok: true, pid: ... }
   await runRuntimeCommandAsync("agent-run", args);
   // Agent runs independently — frontend polls readChatSession for results
@@ -1285,11 +1728,8 @@ export async function startQualityReview(root: string, locale?: string, category
 
 export async function readQualityReviewProgress(root: string): Promise<RuntimeReviewProgress | null> {
   try {
-    const content = await invoke<string>("read_project_distinction_file", {
-      projectRoot: root,
-      relativePath: ".distinction/reviews/progress/latest.json"
-    });
-    return JSON.parse(content) as RuntimeReviewProgress;
+    const stdout = await runRuntimeCommand("review-progress", ["--root", root]);
+    return JSON.parse(stdout) as RuntimeReviewProgress | null;
   } catch {
     return null;
   }
@@ -1313,6 +1753,217 @@ async function readDistinctionJson<T>(root: string, relativePath: string): Promi
     relativePath
   });
   return JSON.parse(content) as T;
+}
+
+export async function readDistinctionFile(root: string, relativePath: string): Promise<string> {
+  return await invoke<string>("read_project_distinction_file", {
+    projectRoot: root,
+    relativePath
+  });
+}
+
+export async function readProjectFile(root: string, relativePath: string): Promise<string> {
+  return await invoke<string>("read_project_file", {
+    projectRoot: root,
+    relativePath
+  });
+}
+
+export type ProjectFileOpener = "notepad" | "vscode";
+
+export async function openProjectFileWith(
+  root: string,
+  relativePath: string,
+  opener: ProjectFileOpener,
+  line?: number
+): Promise<void> {
+  await invoke("open_project_file_with", {
+    projectRoot: root,
+    relativePath,
+    opener,
+    line
+  });
+}
+
+export async function readDesignSemanticHtml(root: string): Promise<string | undefined> {
+  try {
+    return await readProjectFile(root, "docs/design/use-case-diagrams-maps.html");
+  } catch {
+    return undefined;
+  }
+}
+
+export async function readEngineeringSemanticHtml(root: string): Promise<string | undefined> {
+  try {
+    return await readProjectFile(root, "docs/engineering/engineering-maps.html");
+  } catch {
+    try {
+      return await readProjectFile(root, "docs/engineering/technical-complexity-maps.html");
+    } catch {
+      return undefined;
+    }
+  }
+}
+
+export async function readEngineeringMapMarkdown(root: string): Promise<string | undefined> {
+  try {
+    return await readProjectFile(root, "docs/engineering/engineering-maps.md");
+  } catch {
+    try {
+      return await readProjectFile(root, "docs/engineering/technical-complexity-maps.md");
+    } catch {
+      return undefined;
+    }
+  }
+}
+
+export async function readArchitectureSemanticHtml(root: string): Promise<string | undefined> {
+  try {
+    return await readProjectFile(root, "docs/architecture/c4/c4-model-maps.html");
+  } catch {
+    return undefined;
+  }
+}
+
+export async function readArchitectureMapMarkdown(root: string): Promise<string | undefined> {
+  try {
+    return await readProjectFile(root, "docs/architecture/c4/c4-model-maps.md");
+  } catch {
+    return undefined;
+  }
+}
+
+export async function readArchitectureDocumentHtml(root: string, relativePath: string): Promise<string | undefined> {
+  try {
+    return await readProjectFile(root, relativePath);
+  } catch {
+    return undefined;
+  }
+}
+
+export async function readArchitectureDocumentMarkdown(root: string, relativePath: string): Promise<string | undefined> {
+  try {
+    return await readProjectFile(root, relativePath);
+  } catch {
+    return undefined;
+  }
+}
+
+export async function readModelSemanticHtml(root: string): Promise<string | undefined> {
+  try {
+    return await readProjectFile(root, "docs/models/models-map.html");
+  } catch {
+    return undefined;
+  }
+}
+
+export async function readModelMapMarkdown(root: string): Promise<string | undefined> {
+  try {
+    return await readProjectFile(root, "docs/models/models-map.md");
+  } catch {
+    return undefined;
+  }
+}
+
+export async function readModelDocumentHtml(root: string, relativePath: string): Promise<string | undefined> {
+  for (const candidate of modelDocumentPathCandidates(relativePath, "html")) {
+    try {
+      return await readProjectFile(root, candidate);
+    } catch {
+      // Try the next compatibility path.
+    }
+  }
+  return undefined;
+}
+
+export async function readModelDocumentMarkdown(root: string, relativePath: string): Promise<string | undefined> {
+  for (const candidate of modelDocumentPathCandidates(relativePath, "md")) {
+    try {
+      return await readProjectFile(root, candidate);
+    } catch {
+      // Try the next compatibility path.
+    }
+  }
+  return undefined;
+}
+
+function modelDocumentPathCandidates(relativePath: string, extension: "html" | "md"): string[] {
+  const normalized = relativePath.replace(/\\/g, "/");
+  const withRequestedExtension = normalized.replace(/\.(html|md)$/i, `.${extension}`);
+  const candidates = [withRequestedExtension];
+  const withoutUseCasePrefix = withRequestedExtension.replace(
+    /docs\/design\/use-case-diagrams\/use-case-([^/]+)/,
+    "docs/design/use-case-diagrams/$1"
+  );
+  candidates.push(withoutUseCasePrefix);
+
+  const designDrilldown = withoutUseCasePrefix.match(/^docs\/design\/use-case-diagrams\/([^/]+)\/([^/]+)\.(html|md)$/i);
+  if (designDrilldown?.[1] && designDrilldown[2]) {
+    const useCaseSlug = designDrilldown[1];
+    const leaf = designDrilldown[2].replace(/_/g, "-");
+    const base = `docs/design/use-case-diagrams/${useCaseSlug}`;
+    if (leaf === "activity") candidates.push(`${base}/activity.${extension}`);
+    if (leaf === "sequence" || leaf.startsWith("sequence-")) {
+      candidates.push(`${base}/sequences/${leaf}.${extension}`);
+      candidates.push(`${base}/sequences/sequence-${useCaseSlug}-sequence.${extension}`);
+      candidates.push(`${base}/sequence.${extension}`);
+    }
+    if (leaf === "class-collaboration" || leaf === "class-collaboration-diagram" || leaf === "class") {
+      candidates.push(`${base}/realization/class-collaboration.${extension}`);
+      candidates.push(`${base}/class-collaboration.${extension}`);
+      candidates.push(`${base}/class_collaboration.${extension}`);
+    }
+    if (leaf === "state-machine" || leaf === "state") {
+      candidates.push(`${base}/states/state-machine.${extension}`);
+      candidates.push(`${base}/state-machine.${extension}`);
+    }
+  }
+
+  return [...new Set(candidates)];
+}
+
+export async function readEngineeringDocumentHtml(root: string, relativePath: string): Promise<string | undefined> {
+  try {
+    return await readProjectFile(root, relativePath);
+  } catch {
+    return undefined;
+  }
+}
+
+export async function readEngineeringDocumentMarkdown(root: string, relativePath: string): Promise<string | undefined> {
+  try {
+    return await readProjectFile(root, relativePath);
+  } catch {
+    return undefined;
+  }
+}
+
+export async function readDesignUseCaseSemanticHtml(root: string, useCaseId: string): Promise<string | undefined> {
+  try {
+    return await readProjectFile(root, designUseCaseHtmlRelativePath(useCaseId));
+  } catch {
+    return undefined;
+  }
+}
+
+export function designUseCaseHtmlRelativePath(useCaseId: string): string {
+  return `docs/design/use-case-diagrams/${designUseCaseDocumentSlug(useCaseId)}.html`;
+}
+
+function designUseCaseDocumentSlug(useCaseId: string): string {
+  return safeFilePart(useCaseId.replace(/^use-case:/, "")).toLowerCase();
+}
+
+function safeFilePart(value: string): string {
+  return value.replace(/[^A-Za-z0-9_.-]+/g, "-").replace(/^-|-$/g, "") || "TASK-result";
+}
+
+export async function readDesignMapMarkdown(root: string): Promise<string | undefined> {
+  try {
+    return await readProjectFile(root, "docs/design/use-case-diagrams-maps.md");
+  } catch {
+    return undefined;
+  }
 }
 
 export async function readProjectionManifest(root: string): Promise<RuntimeProjectionManifest | null> {
@@ -1446,7 +2097,277 @@ export async function refreshProjectedGraphViews(root: string): Promise<RuntimeP
   for (const target of targets) {
     await runRuntimeCommand("project:view", [target, "--root", root]);
   }
+  await runRuntimeCommand("project:view", ["design", "--root", root]).catch(() => undefined);
   return await readProjectedGraphViews(root);
+}
+
+export async function refreshDesignViews(root: string): Promise<RuntimeProjectionViewsResult> {
+  await runRuntimeCommand("project:view", ["design", "--root", root]);
+  return await readProjectedGraphViews(root);
+}
+
+export async function runDesignDiscovery(root: string): Promise<RuntimeProjectionViewsResult> {
+  await runRuntimeCommand("design:discover", ["--root", root]);
+  return await readProjectedGraphViews(root);
+}
+
+export async function runEngineeringDiscovery(root: string): Promise<{
+  ok: boolean;
+  engineeringMapDocPath: string;
+  engineeringMapHtmlPath: string;
+  compatibilityMapDocPath?: string;
+  compatibilityMapHtmlPath?: string;
+  diagramDocumentCount?: number;
+  summary: {
+    packageCount: number;
+    componentCount: number;
+    runtimeFlowCount: number;
+    deploymentNodeCount: number;
+    hotspotCount: number;
+  };
+}> {
+  const stdout = await runRuntimeCommand("engineering:discover", ["--root", root]);
+  return JSON.parse(stdout) as {
+    ok: boolean;
+    engineeringMapDocPath: string;
+    engineeringMapHtmlPath: string;
+    compatibilityMapDocPath?: string;
+    compatibilityMapHtmlPath?: string;
+    diagramDocumentCount?: number;
+    summary: {
+      packageCount: number;
+      componentCount: number;
+      runtimeFlowCount: number;
+      deploymentNodeCount: number;
+      hotspotCount: number;
+    };
+  };
+}
+
+export async function runModelDiscovery(root: string): Promise<{
+  ok: boolean;
+  modelRegistryDocPath: string;
+  modelRegistryHtmlPath: string;
+  summary: {
+    modelCount: number;
+    packageCount: number;
+    diagramCount: number;
+    traceCount: number;
+  };
+}> {
+  const stdout = await runRuntimeCommand("models:discover", ["--root", root]);
+  return JSON.parse(stdout) as {
+    ok: boolean;
+    modelRegistryDocPath: string;
+    modelRegistryHtmlPath: string;
+    summary: {
+      modelCount: number;
+      packageCount: number;
+      diagramCount: number;
+      traceCount: number;
+    };
+  };
+}
+
+export async function runArchitectureDiscovery(root: string): Promise<{
+  ok: boolean;
+  architectureMapDocPath: string;
+  architectureMapHtmlPath: string;
+  diagramDocumentCount?: number;
+  summary: {
+    systemContextCount: number;
+    containerCount: number;
+    componentViewCount: number;
+    codeViewCount: number;
+  };
+}> {
+  const stdout = await runRuntimeCommand("architecture:discover", ["--root", root]);
+  return JSON.parse(stdout) as {
+    ok: boolean;
+    architectureMapDocPath: string;
+    architectureMapHtmlPath: string;
+    diagramDocumentCount?: number;
+    summary: {
+      systemContextCount: number;
+      containerCount: number;
+      componentViewCount: number;
+      codeViewCount: number;
+    };
+  };
+}
+
+export async function runProjectOverviewGeneration(root: string, options?: { force?: boolean }): Promise<{
+  ok: boolean;
+  skipped?: boolean;
+  reason?: string;
+  overviewPath: string;
+  timelinePath: string;
+  overviewRelativePath?: string;
+  timelineRelativePath?: string;
+  sourceDocuments?: string[];
+  timelineItems?: number;
+  progressItems?: number;
+  risks?: number;
+}> {
+  const args = ["--root", root];
+  if (options?.force) args.push("--force");
+  const stdout = await runRuntimeCommand("project:overview", args);
+  return JSON.parse(stdout) as {
+    ok: boolean;
+    skipped?: boolean;
+    reason?: string;
+    overviewPath: string;
+    timelinePath: string;
+    overviewRelativePath?: string;
+    timelineRelativePath?: string;
+    sourceDocuments?: string[];
+    timelineItems?: number;
+    progressItems?: number;
+    risks?: number;
+  };
+}
+
+export async function readProjectChangePlan(root: string): Promise<RuntimeProjectChangePlanReadResult> {
+  const stdout = await runRuntimeCommand("project:change-plan", ["--root", root, "--read-only"]);
+  return JSON.parse(stdout) as RuntimeProjectChangePlanReadResult;
+}
+
+export async function runProjectChangePlanGeneration(root: string, options?: { force?: boolean }): Promise<RuntimeProjectChangePlanReadResult> {
+  const args = ["--root", root];
+  if (options?.force) args.push("--force");
+  const stdout = await runRuntimeCommand("project:change-plan", args);
+  return JSON.parse(stdout) as RuntimeProjectChangePlanReadResult;
+}
+
+export async function approveProjectChangePlan(root: string): Promise<RuntimeProjectChangePlanReadResult> {
+  const stdout = await runRuntimeCommand("project:change-plan:approve", ["--root", root]);
+  return JSON.parse(stdout) as RuntimeProjectChangePlanReadResult;
+}
+
+export async function discussProjectChangePlan(
+  root: string,
+  message: string,
+  conversationHistory?: RuntimeScopedAgentHistoryEntry[]
+): Promise<RuntimeProjectChangePlanDiscussionResult> {
+  const args = ["--root", root, "--message", message];
+  if (conversationHistory?.length) args.push("--conversation-history", JSON.stringify(conversationHistory));
+  const stdout = await runRuntimeCommand("project:change-plan-discuss", args);
+  return JSON.parse(stdout) as RuntimeProjectChangePlanDiscussionResult;
+}
+
+export async function createReviewFindingChangeItem(root: string, findingId: string): Promise<RuntimeReviewFindingChangePlanResult> {
+  const stdout = await runRuntimeCommand("review-finding-plan", ["--root", root, "--finding", findingId]);
+  return JSON.parse(stdout) as RuntimeReviewFindingChangePlanResult;
+}
+
+export async function discussReviewFinding(
+  root: string,
+  findingId: string,
+  message: string,
+  conversationHistory?: RuntimeScopedAgentHistoryEntry[]
+): Promise<RuntimeReviewFindingDiscussionResult> {
+  const args = ["--root", root, "--finding", findingId, "--message", message];
+  if (conversationHistory?.length) args.push("--conversation-history", JSON.stringify(conversationHistory));
+  const stdout = await runRuntimeCommand("review:finding-discuss", args);
+  return JSON.parse(stdout) as RuntimeReviewFindingDiscussionResult;
+}
+
+export async function runDesignDiscoveryWithProgress(
+  root: string,
+  onProgress: (progress: RuntimeDesignDiscoveryProgress) => void
+): Promise<RuntimeProjectionViewsResult> {
+  const runId = `design-discovery:${Date.now()}`;
+  const spawnResult = JSON.parse(await runRuntimeCommandAsync("design:discover", ["--root", root, "--run-id", runId])) as { ok?: boolean; pid?: number };
+  if (!spawnResult.ok) throw new Error("Design Discovery failed to start.");
+
+  const startedAt = Date.now();
+  let seenCurrentRun = false;
+  let lastProgressKey = "";
+  while (true) {
+    await new Promise((resolve) => window.setTimeout(resolve, 800));
+    const progress = await readDesignDiscoveryProgress(root).catch(() => null);
+    if (!progress || progress.runId !== runId) {
+      if (!seenCurrentRun && Date.now() - startedAt > 30_000) {
+        throw new Error("Design Discovery started, but no progress log was published within 30 seconds.");
+      }
+      continue;
+    }
+
+    seenCurrentRun = true;
+    const progressKey = `${progress.updatedAt}:${progress.stage}:${progress.status}:${progress.events?.length ?? 0}`;
+    if (progressKey !== lastProgressKey) {
+      onProgress(progress);
+      lastProgressKey = progressKey;
+    }
+
+    if (progress.status === "complete") return await readProjectedGraphViews(root);
+    if (progress.status === "failed") throw new Error(progress.detail || "Design Discovery failed.");
+  }
+}
+
+export async function readDesignDiscoveryProgress(root: string): Promise<RuntimeDesignDiscoveryProgress | null> {
+  try {
+    const content = await invoke<string>("read_project_distinction_file", {
+      projectRoot: root,
+      relativePath: ".distinction/runtime/design-discovery-progress.json"
+    });
+    return JSON.parse(content) as RuntimeDesignDiscoveryProgress;
+  } catch {
+    return null;
+  }
+}
+
+export async function submitDesignStoryIntake(root: string, message: string): Promise<RuntimeDesignStoryIntakeResult> {
+  const stdout = await runRuntimeCommand("design:story-intake", ["--root", root, "--message", message]);
+  return JSON.parse(stdout) as RuntimeDesignStoryIntakeResult;
+}
+
+export async function discussDesignDiagram(
+  root: string,
+  useCaseId: string,
+  message: string,
+  context?: {
+    selectedAnchor?: unknown;
+    currentUml?: RuntimeDesignCurrentUmlContext;
+    conversationHistory?: RuntimeScopedAgentHistoryEntry[];
+  }
+): Promise<RuntimeDesignDiagramDiscussionResult> {
+  const args = ["--root", root, "--use-case-id", useCaseId, "--message", message];
+  if (context?.selectedAnchor) args.push("--selected-anchor", JSON.stringify(context.selectedAnchor));
+  if (context?.currentUml) args.push("--current-uml", JSON.stringify(context.currentUml));
+  if (context?.conversationHistory?.length) args.push("--conversation-history", JSON.stringify(context.conversationHistory));
+  const stdout = await runRuntimeCommand("design:diagram-discuss", args);
+  return JSON.parse(stdout) as RuntimeDesignDiagramDiscussionResult;
+}
+
+export async function discussEngineeringDiagram(
+  root: string,
+  documentPath: string,
+  documentTitle: string,
+  message: string,
+  selectedAnchor?: unknown,
+  conversationHistory?: RuntimeScopedAgentHistoryEntry[]
+): Promise<RuntimeEngineeringDiagramDiscussionResult> {
+  const args = ["--root", root, "--document-path", documentPath, "--document-title", documentTitle, "--message", message];
+  if (selectedAnchor) args.push("--selected-anchor", JSON.stringify(selectedAnchor));
+  if (conversationHistory?.length) args.push("--conversation-history", JSON.stringify(conversationHistory));
+  const stdout = await runRuntimeCommand("engineering:diagram-discuss", args);
+  return JSON.parse(stdout) as RuntimeEngineeringDiagramDiscussionResult;
+}
+
+export async function discussArchitectureDiagram(
+  root: string,
+  documentPath: string,
+  documentTitle: string,
+  message: string,
+  selectedAnchor?: unknown,
+  conversationHistory?: RuntimeScopedAgentHistoryEntry[]
+): Promise<RuntimeArchitectureDiagramDiscussionResult> {
+  const args = ["--root", root, "--document-path", documentPath, "--document-title", documentTitle, "--message", message];
+  if (selectedAnchor) args.push("--selected-anchor", JSON.stringify(selectedAnchor));
+  if (conversationHistory?.length) args.push("--conversation-history", JSON.stringify(conversationHistory));
+  const stdout = await runRuntimeCommand("architecture:diagram-discuss", args);
+  return JSON.parse(stdout) as RuntimeArchitectureDiagramDiscussionResult;
 }
 
 export async function buildContextPacketForAnchor(
@@ -1495,12 +2416,77 @@ export async function writeDistinctionFile(root: string, relativePath: string, c
 
 export async function readRecentProjects(): Promise<RecentProject[]> {
   const stdout = await invoke<string>("read_recent_projects");
-  return JSON.parse(stdout) as RecentProject[];
+  return normalizeRecentProjects(JSON.parse(stdout));
+}
+
+export async function readStartupContext(): Promise<RuntimeStartupContext | null> {
+  try {
+    const stdout = await invoke<string>("read_startup_context");
+    const value = JSON.parse(stdout) as RuntimeStartupContext;
+    return normalizeStartupContext(value);
+  } catch {
+    return readStartupContextFromUrl();
+  }
 }
 
 export async function recordRecentProject(root: string): Promise<RecentProject[]> {
   const stdout = await invoke<string>("write_recent_project", { projectRoot: root });
-  return JSON.parse(stdout) as RecentProject[];
+  return normalizeRecentProjects(JSON.parse(stdout));
+}
+
+function normalizeStartupContext(value: RuntimeStartupContext | null | undefined): RuntimeStartupContext | null {
+  if (!value || typeof value !== "object") return null;
+  const projectRoot = typeof value.projectRoot === "string" ? normalizeProjectRootForUi(value.projectRoot.trim()) : "";
+  const route = typeof value.route === "string" ? value.route.trim() : "";
+  if (!projectRoot && !route) return null;
+  return {
+    ...(projectRoot ? { projectRoot } : {}),
+    ...(route ? { route } : {})
+  };
+}
+
+function readStartupContextFromUrl(): RuntimeStartupContext | null {
+  if (typeof window === "undefined") return null;
+  const params = new URLSearchParams(window.location.search);
+  return normalizeStartupContext({
+    projectRoot: params.get("projectRoot") ?? undefined,
+    route: params.get("route") ?? undefined
+  });
+}
+
+function normalizeRecentProjects(value: unknown): RecentProject[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const projects: RecentProject[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object") continue;
+    const record = item as Partial<RecentProject>;
+    const root = normalizeProjectRootForUi(typeof record.root === "string" ? record.root.trim() : "");
+    if (!root || seen.has(normalizeRootKey(root))) continue;
+    seen.add(normalizeRootKey(root));
+    projects.push({
+      root,
+      name: typeof record.name === "string" && record.name.trim() ? record.name.trim() : projectNameFromRoot(root),
+      lastOpenedAt: typeof record.lastOpenedAt === "string" && record.lastOpenedAt.trim() ? record.lastOpenedAt : ""
+    });
+  }
+  return projects;
+}
+
+function normalizeRootKey(root: string): string {
+  return normalizeProjectRootForUi(root).replace(/[\\/]+$/, "").toLowerCase();
+}
+
+function projectNameFromRoot(root: string): string {
+  const normalized = normalizeProjectRootForUi(root).replace(/[\\/]+$/, "");
+  const parts = normalized.split(/[\\/]/).filter(Boolean);
+  return parts[parts.length - 1] ?? "Project";
+}
+
+function normalizeProjectRootForUi(root: string): string {
+  if (root.startsWith("\\\\?\\UNC\\")) return `\\\\${root.slice("\\\\?\\UNC\\".length)}`;
+  if (root.startsWith("\\\\?\\")) return root.slice("\\\\?\\".length);
+  return root;
 }
 
 export async function readGraph(root: string): Promise<RuntimeGraph> {
@@ -1891,6 +2877,13 @@ export function renderRuntimeRoutePreview(settings: ModelSettings): string {
     "    reasoning: true",
     "    reasoning_effort: medium",
     "",
+    "  design.discovery.use_cases:",
+    "    provider: deepseek",
+    `    model: ${settings.designDiscoveryModel}`,
+    "    reasoning: true",
+    "    reasoning_effort: high",
+    `    timeout_ms: ${settings.designDiscoveryTimeoutMs > 0 ? settings.designDiscoveryTimeoutMs : "no_timeout"}`,
+    "",
     "  graph.node.explain:",
     "    provider: deepseek",
     `    model: ${settings.nodeExplainModel}`,
@@ -1918,15 +2911,15 @@ export function renderRuntimeRoutePreview(settings: ModelSettings): string {
     `  provider: ${settings.piProvider}`,
     `  model: ${settings.piModel}`,
     `  thinking: ${settings.piThinking}`,
-    `  codegraph: ${settings.piCodeGraph ? "enabled" : "disabled"}`,
-    `  tools: ${settings.piTools}`,
+    `  repository_evidence: ${settings.piCodeGraph ? "enabled" : "disabled"}`,
+    `  tools: ${settings.piTools.split(",").map((tool) => tool.trim()).filter((tool) => tool && !tool.startsWith("codegraph_")).join(",")}`,
     "  permissions:",
     `    read: ${settings.piAllowRead ? "enabled" : "disabled"}`,
     `    shell: ${settings.piAllowShell ? "enabled" : "disabled"}`,
     `    write: ${settings.piAllowWrite ? "enabled" : "disabled"}`,
-    `  timeout_ms: ${settings.piTimeoutMs}`,
+    `  timeout_ms: ${settings.piTimeoutMs > 0 ? settings.piTimeoutMs : "no_timeout"}`,
     `  review_thinking: ${settings.reviewPiThinking}`,
-    `  review_timeout_ms: ${settings.reviewPiTimeoutMs}`,
+    `  review_timeout_ms: ${settings.reviewPiTimeoutMs > 0 ? settings.reviewPiTimeoutMs : "no_timeout"}`,
     ""
   ].join("\n");
 }
@@ -1986,11 +2979,28 @@ type StoredModelSettings = Partial<ModelSettings> & { apiKeyEnv?: string };
 function normalizeModelSettings(saved: StoredModelSettings): ModelSettings {
   const { apiKeyEnv: legacyApiKeyEnv, ...savedSettings } = saved;
   const apiKey = saved.apiKey || (legacyApiKeyEnv && looksLikeApiKey(legacyApiKeyEnv) ? legacyApiKeyEnv : "");
+  const piTools = saved.piTools === legacyDefaultPiTools ? defaultPiTools : sanitizeVisiblePiTools(saved.piTools);
   return {
     ...defaultModelSettings,
     ...savedSettings,
+    piTools: piTools ?? defaultModelSettings.piTools,
+    reviewPiTimeoutMs: normalizeReviewPiTimeout(saved.reviewPiTimeoutMs),
     apiKey
   };
+}
+
+function normalizeReviewPiTimeout(value: number | undefined): number {
+  if (value === undefined || value === 300000) return defaultModelSettings.reviewPiTimeoutMs;
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+function sanitizeVisiblePiTools(value: string | undefined): string | undefined {
+  if (!value) return value;
+  const tools = value
+    .split(",")
+    .map((tool) => tool.trim())
+    .filter((tool) => tool && !tool.startsWith("codegraph_"));
+  return tools.length ? tools.join(",") : defaultPiTools;
 }
 
 function modelSettingsEqual(saved: Partial<ModelSettings>, normalized: ModelSettings): boolean {

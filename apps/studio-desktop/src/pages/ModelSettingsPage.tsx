@@ -1,6 +1,12 @@
 import { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { confirm } from "@tauri-apps/plugin-dialog";
+import { relaunch } from "@tauri-apps/plugin-process";
+import { check, type DownloadEvent, type Update } from "@tauri-apps/plugin-updater";
 import {
   defaultModelSettings,
+  defaultPiTools,
+  legacyDefaultPiTools,
   readAppModelSettings,
   readAppModelSettingsPath,
   renderRuntimeRoutePreview,
@@ -89,6 +95,24 @@ export function ModelSettingsPage({ projectRoot }: ModelSettingsPageProps) {
           <label htmlFor="intake-model">{t("settings.intakeModel")}</label>
           <input id="intake-model" className="path-input" value={settings.intakeModel} onChange={(event) => update("intakeModel", event.target.value)} />
 
+          <label htmlFor="design-discovery-model">{t("settings.designDiscoveryModel")}</label>
+          <input id="design-discovery-model" className="path-input" value={settings.designDiscoveryModel} onChange={(event) => update("designDiscoveryModel", event.target.value)} />
+
+          <label htmlFor="design-discovery-timeout">{t("settings.designDiscoveryTimeout")}</label>
+          <input
+            id="design-discovery-timeout"
+            className="path-input"
+            type="number"
+            min={0}
+            value={settings.designDiscoveryTimeoutMs}
+            onChange={(event) => {
+              const value = Number(event.target.value);
+              update("designDiscoveryTimeoutMs", Number.isFinite(value) && value >= 0 ? value : defaultModelSettings.designDiscoveryTimeoutMs);
+            }}
+          />
+          <div />
+          <p className="settings-inline-note">{t("settings.designDiscoveryTimeoutCopy")}</p>
+
           <label htmlFor="node-explain-model">{t("settings.nodeExplainModel")}</label>
           <input id="node-explain-model" className="path-input" value={settings.nodeExplainModel} onChange={(event) => update("nodeExplainModel", event.target.value)} />
 
@@ -131,19 +155,25 @@ export function ModelSettingsPage({ projectRoot }: ModelSettingsPageProps) {
             <input id="pi-tools" className="path-input" value={settings.piTools} onChange={(event) => update("piTools", event.target.value)} />
             <div />
             <p className="settings-inline-note">
-              常用值：read,grep,find,ls,codegraph_query,codegraph_context,codegraph_relations,bash,edit,write
+              常用值：praxis_status,praxis_context_packet,praxis_projection_views,praxis_code_facts,praxis_findings,read,grep,find,ls,bash,edit,write
             </p>
 
             <label htmlFor="pi-timeout">Pi Timeout (ms)</label>
-            <input id="pi-timeout" className="path-input" type="number" min={1000} value={settings.piTimeoutMs} onChange={(event) => update("piTimeoutMs", Number(event.target.value) || defaultModelSettings.piTimeoutMs)} />
+            <input id="pi-timeout" className="path-input" type="number" min={0} value={settings.piTimeoutMs} onChange={(event) => {
+              const value = Number(event.target.value);
+              update("piTimeoutMs", Number.isFinite(value) && value >= 0 ? value : defaultModelSettings.piTimeoutMs);
+            }} />
 
             <label htmlFor="review-pi-timeout">Review Timeout (ms)</label>
-            <input id="review-pi-timeout" className="path-input" type="number" min={1000} value={settings.reviewPiTimeoutMs} onChange={(event) => update("reviewPiTimeoutMs", Number(event.target.value) || defaultModelSettings.reviewPiTimeoutMs)} />
+            <input id="review-pi-timeout" className="path-input" type="number" min={0} value={settings.reviewPiTimeoutMs} onChange={(event) => {
+              const value = Number(event.target.value);
+              update("reviewPiTimeoutMs", Number.isFinite(value) && value >= 0 ? value : defaultModelSettings.reviewPiTimeoutMs);
+            }} />
           </div>
           <div className="settings-toggle-grid">
             <label>
               <input type="checkbox" checked={settings.piCodeGraph} onChange={(event) => update("piCodeGraph", event.target.checked)} />
-              <span>启用 CodeGraph 工具</span>
+              <span>启用仓库分析工具</span>
             </label>
             <label>
               <input type="checkbox" checked={settings.piAllowRead} onChange={(event) => update("piAllowRead", event.target.checked)} />
@@ -181,7 +211,194 @@ export function ModelSettingsPage({ projectRoot }: ModelSettingsPageProps) {
           <code>{projectRoot ? `${projectRoot}\\.distinction\\runs\\runs.jsonl` : t("settings.noProjectRoot")}</code>
           <code>{projectRoot ? `${projectRoot}\\.distinction\\memory\\traces.jsonl` : t("settings.noProjectRoot")}</code>
         </div>
+        <AppUpdatePanel />
       </section>
+    </section>
+  );
+}
+
+type AppUpdateState =
+  | { kind: "idle"; currentVersion?: string; message: string }
+  | { kind: "checking"; currentVersion?: string; message: string }
+  | { kind: "latest"; currentVersion: string; message: string }
+  | { kind: "available"; currentVersion: string; updateVersion: string; date?: string; notes?: string; message: string }
+  | { kind: "installing"; currentVersion?: string; updateVersion: string; downloadedBytes: number; totalBytes?: number; message: string }
+  | { kind: "installed"; currentVersion?: string; updateVersion: string; message: string }
+  | { kind: "unavailable"; currentVersion?: string; message: string }
+  | { kind: "error"; currentVersion?: string; message: string };
+
+function AppUpdatePanel() {
+  const { t } = useI18n();
+  const [state, setState] = useState<AppUpdateState>({ kind: "idle", message: "" });
+  const [pendingUpdate, setPendingUpdate] = useState<Update | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    if (!hasTauriRuntime()) {
+      setState({ kind: "unavailable", message: t("settings.updateUnavailable") });
+      return () => {
+        active = false;
+      };
+    }
+
+    void readDesktopAppVersion()
+      .then((currentVersion) => {
+        if (active) setState({ kind: "idle", currentVersion, message: "" });
+      })
+      .catch((caught) => {
+        if (active) setState({ kind: "error", message: errorMessage(caught) });
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [t]);
+
+  async function checkForUpdates() {
+    if (!hasTauriRuntime()) {
+      setState({ kind: "unavailable", message: t("settings.updateUnavailable") });
+      return;
+    }
+
+    setPendingUpdate(null);
+    setState((current) => ({
+      kind: "checking",
+      currentVersion: "currentVersion" in current ? current.currentVersion : undefined,
+      message: t("settings.updateChecking")
+    }));
+
+    try {
+      const currentVersion = await readDesktopAppVersion();
+      const update = await check({ timeout: 30000 });
+      if (!update) {
+        setState({ kind: "latest", currentVersion, message: t("settings.updateLatest") });
+        return;
+      }
+
+      setPendingUpdate(update);
+      setState({
+        kind: "available",
+        currentVersion: update.currentVersion || currentVersion,
+        updateVersion: update.version,
+        date: update.date,
+        notes: update.body,
+        message: t("settings.updateAvailable", { version: update.version })
+      });
+    } catch (caught) {
+      setState((current) => ({
+        kind: "error",
+        currentVersion: "currentVersion" in current ? current.currentVersion : undefined,
+        message: errorMessage(caught)
+      }));
+    }
+  }
+
+  async function installUpdate() {
+    if (!pendingUpdate || state.kind !== "available") return;
+    const agreed = await confirm(t("settings.updateConfirmCopy", { version: pendingUpdate.version }), {
+      title: t("settings.updateConfirmTitle"),
+      kind: "info",
+      okLabel: t("settings.updateConfirmOk"),
+      cancelLabel: t("settings.updateConfirmCancel")
+    });
+    if (!agreed) return;
+
+    let downloadedBytes = 0;
+    let totalBytes: number | undefined;
+    setState({
+      kind: "installing",
+      currentVersion: pendingUpdate.currentVersion,
+      updateVersion: pendingUpdate.version,
+      downloadedBytes,
+      totalBytes,
+      message: t("settings.updateInstalling", { version: pendingUpdate.version })
+    });
+
+    try {
+      await pendingUpdate.downloadAndInstall((event: DownloadEvent) => {
+        if (event.event === "Started") {
+          downloadedBytes = 0;
+          totalBytes = event.data.contentLength;
+        } else if (event.event === "Progress") {
+          downloadedBytes += event.data.chunkLength;
+        }
+
+        setState({
+          kind: "installing",
+          currentVersion: pendingUpdate.currentVersion,
+          updateVersion: pendingUpdate.version,
+          downloadedBytes,
+          totalBytes,
+          message: event.event === "Finished" ? t("settings.updateInstallFinalizing") : t("settings.updateInstalling", { version: pendingUpdate.version })
+        });
+      });
+
+      setState({
+        kind: "installed",
+        currentVersion: pendingUpdate.currentVersion,
+        updateVersion: pendingUpdate.version,
+        message: t("settings.updateInstalled")
+      });
+      await relaunch();
+    } catch (caught) {
+      setState({
+        kind: "error",
+        currentVersion: pendingUpdate.currentVersion,
+        message: errorMessage(caught)
+      });
+    }
+  }
+
+  const isChecking = state.kind === "checking";
+  const isInstalling = state.kind === "installing";
+  const currentVersion = "currentVersion" in state ? state.currentVersion : undefined;
+  const updateVersion = "updateVersion" in state ? state.updateVersion : undefined;
+  const releaseNotes = "notes" in state ? state.notes : undefined;
+  const releaseDate = "date" in state ? state.date : undefined;
+  const progress = state.kind === "installing" && state.totalBytes ? Math.min(100, Math.round((state.downloadedBytes / state.totalBytes) * 100)) : 0;
+
+  return (
+    <section className="settings-update-panel" aria-labelledby="app-update-title">
+      <div className="panel-heading">
+        <div>
+          <h3 id="app-update-title">{t("settings.updateTitle")}</h3>
+          <p>{t("settings.updateCopy")}</p>
+        </div>
+        <span className={state.kind === "latest" ? "pill success" : "pill"}>{updateVersion ?? currentVersion ?? "v0.1"}</span>
+      </div>
+      <dl className="settings-update-meta">
+        <div>
+          <dt>{t("settings.updateCurrentVersion")}</dt>
+          <dd>{currentVersion ?? t("settings.updateUnknownVersion")}</dd>
+        </div>
+        <div>
+          <dt>{t("settings.updateReleaseSource")}</dt>
+          <dd>{t("settings.updateReleaseSourceValue")}</dd>
+        </div>
+      </dl>
+      {state.message ? <p className={state.kind === "error" ? "error-text" : "status-text"}>{state.message}</p> : null}
+      {state.kind === "installing" ? (
+        <div className="settings-update-progress" aria-label={t("settings.updateProgress")}>
+          <span style={{ width: `${progress}%` }} />
+          <strong>{state.totalBytes ? `${progress}%` : formatBytes(state.downloadedBytes)}</strong>
+        </div>
+      ) : null}
+      {state.kind === "available" ? (
+        <div className="settings-update-release">
+          <strong>{t("settings.updateReleaseNotes")}</strong>
+          {releaseDate ? <span>{releaseDate}</span> : null}
+          <p>{releaseNotes?.trim() || t("settings.updateNoReleaseNotes")}</p>
+        </div>
+      ) : null}
+      <div className="action-row">
+        <button className="secondary-action" type="button" onClick={checkForUpdates} disabled={isChecking || isInstalling}>
+          {isChecking ? t("settings.updateChecking") : t("settings.updateCheck")}
+        </button>
+        <button className="primary-action" type="button" onClick={installUpdate} disabled={!pendingUpdate || state.kind !== "available" || isInstalling}>
+          {isInstalling ? t("settings.updateInstallingShort") : t("settings.updateInstall")}
+        </button>
+      </div>
+      <p className="settings-inline-note">{t("settings.updateEndpointHelp")}</p>
     </section>
   );
 }
@@ -191,13 +408,42 @@ type SavedModelSettings = Partial<ModelSettings> & { apiKeyEnv?: string };
 function normalizeSavedSettings(saved: SavedModelSettings): ModelSettings {
   const { apiKeyEnv: legacyApiKeyEnv, ...savedSettings } = saved;
   const apiKey = saved.apiKey || (legacyApiKeyEnv && looksLikeApiKey(legacyApiKeyEnv) ? legacyApiKeyEnv : "");
+  const piTools = saved.piTools === legacyDefaultPiTools ? defaultPiTools : sanitizeVisiblePiTools(saved.piTools);
   return {
     ...defaultModelSettings,
     ...savedSettings,
+    piTools: piTools ?? defaultModelSettings.piTools,
     apiKey
   };
 }
 
+function sanitizeVisiblePiTools(value: string | undefined): string | undefined {
+  if (!value) return value;
+  const tools = value
+    .split(",")
+    .map((tool) => tool.trim())
+    .filter((tool) => tool && !tool.startsWith("codegraph_"));
+  return tools.length ? tools.join(",") : defaultPiTools;
+}
+
 function looksLikeApiKey(value: string): boolean {
   return value.startsWith("sk-") || value.startsWith("sk_");
+}
+
+async function readDesktopAppVersion(): Promise<string> {
+  return await invoke<string>("app_version");
+}
+
+function hasTauriRuntime(): boolean {
+  return typeof window !== "undefined" && ("__TAURI_INTERNALS__" in window || "__TAURI__" in window);
+}
+
+function errorMessage(caught: unknown): string {
+  return caught instanceof Error ? caught.message : String(caught);
+}
+
+function formatBytes(value: number): string {
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
 }

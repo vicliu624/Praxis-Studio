@@ -318,7 +318,7 @@ It only means the current provider did not observe or normalize it.
 
 ## 7. Mapping Boundary
 
-`CodeFactGraphSnapshot` does not persist directly into durable memory.
+`CodeFactGraphSnapshot` does not persist directly into durable Project Memory.
 
 The correct write chain is:
 
@@ -326,7 +326,8 @@ The correct write chain is:
 CodeFactGraphSnapshot
   -> RepositoryUnderstandingPatch
   -> explicit acceptance
-  -> .distinction/memory/facts.jsonl
+  -> docs-backed Project Memory
+  -> optional .distinction/memory/facts.jsonl legacy mirror
 ```
 
 The initial repository-understanding phase may choose to persist only a subset of fact families.

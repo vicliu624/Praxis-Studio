@@ -60,7 +60,7 @@ export const ReviewEvaluatorRefSchema: z.ZodType<ReviewEvaluatorRef> = z.object(
   name: z.string().min(1),
   category: ReviewCategorySchema,
   prompt: z.string().min(1),
-  source: z.enum(["praxis-heuristic", "pi-agent", "hybrid"])
+  source: z.enum(["praxis-heuristic", "agent", "pi-agent", "hybrid"])
 });
 
 export const ReviewFindingSchema: z.ZodType<ReviewFinding> = z.object({
@@ -90,7 +90,7 @@ export const ReviewRunSchema: z.ZodType<ReviewRun> = z.object({
   id: z.string().min(1),
   root: z.string().min(1),
   generatedAt: z.string().min(1),
-  source: z.enum(["praxis-heuristic", "pi-agent", "hybrid"]),
+  source: z.enum(["praxis-heuristic", "agent", "pi-agent", "hybrid"]),
   status: z.enum(["completed", "partial", "failed"]),
   categories: z.array(ReviewCategorySchema),
   findingIds: z.array(z.string().min(1)),

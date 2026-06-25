@@ -1,0 +1,88 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 420" role="img" aria-labelledby="title desc">
+  <title id="title">Praxis Studio broad logo directions</title>
+  <desc id="desc">Three non-letter logo directions exploring governed flow, project memory and development graph semantics.</desc>
+  <rect width="1080" height="420" fill="#0C1116" />
+  <g font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" letter-spacing="0">
+    <text x="70" y="332" fill="#EDF2F7" font-size="28" font-weight="720">A. Flow Core</text>
+    <text x="70" y="362" fill="#8EA0B5" font-size="17">governed path around memory</text>
+    <text x="406" y="332" fill="#EDF2F7" font-size="28" font-weight="720">B. Memory Gate</text>
+    <text x="406" y="362" fill="#8EA0B5" font-size="17">docs-first authority with checkpoints</text>
+    <text x="742" y="332" fill="#EDF2F7" font-size="28" font-weight="720">C. Graph Weave</text>
+    <text x="742" y="362" fill="#8EA0B5" font-size="17">facts projected into development graph</text>
+  </g>
+  <g transform="translate(46 44)">
+    <rect x="0" y="0" width="264" height="264" rx="36" fill="#111820" stroke="#263241" stroke-width="2" />
+    <g transform="translate(4 8)">
+      <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+        <path
+          d="M58 166C69 107 101 70 140 63C180 56 207 88 199 126C191 164 153 187 106 178C85 174 69 170 58 166"
+          stroke="#0C1116"
+          stroke-width="44"
+        />
+        <path
+          d="M58 166C69 107 101 70 140 63C180 56 207 88 199 126C191 164 153 187 106 178C85 174 69 170 58 166"
+          stroke="#E7A23C"
+          stroke-width="28"
+        />
+      </g>
+      <path d="M101 88H151L182 121L151 154H101L70 121Z" fill="#111820" stroke="#263241" stroke-width="8" stroke-linejoin="round" />
+      <g fill="none" stroke-linecap="round">
+        <path d="M95 111H145" stroke="#EDF2F7" stroke-width="7" />
+        <path d="M102 124H160" stroke="#6EE7D8" stroke-width="7" />
+        <path d="M95 137H137" stroke="#8EA0B5" stroke-width="7" />
+      </g>
+      <circle cx="140" cy="63" r="24" fill="#0C1116" />
+      <circle cx="140" cy="63" r="13" fill="#6EE7D8" />
+      <circle cx="199" cy="126" r="24" fill="#0C1116" />
+      <circle cx="199" cy="126" r="13" fill="#6EE7D8" />
+      <circle cx="58" cy="166" r="24" fill="#0C1116" />
+      <circle cx="58" cy="166" r="13" fill="#6EE7D8" />
+      <circle cx="106" cy="178" r="15" fill="#0C1116" />
+      <circle cx="106" cy="178" r="8" fill="#E7A23C" />
+    </g>
+  </g>
+  <g transform="translate(382 44)">
+    <rect x="0" y="0" width="264" height="264" rx="36" fill="#111820" stroke="#263241" stroke-width="2" />
+    <g transform="translate(22 24)">
+      <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M42 170C50 99 91 58 152 64C200 69 225 105 209 150C193 197 132 218 70 188" stroke="#0C1116" stroke-width="42" />
+        <path d="M42 170C50 99 91 58 152 64C200 69 225 105 209 150C193 197 132 218 70 188" stroke="#E7A23C" stroke-width="26" />
+      </g>
+      <rect x="78" y="82" width="98" height="104" rx="16" fill="#111820" stroke="#263241" stroke-width="8" />
+      <path d="M98 108H154" stroke="#EDF2F7" stroke-width="7" stroke-linecap="round" />
+      <path d="M98 128H150" stroke="#6EE7D8" stroke-width="7" stroke-linecap="round" />
+      <path d="M98 148H137" stroke="#8EA0B5" stroke-width="7" stroke-linecap="round" />
+      <path d="M68 98L78 88V176L68 186" fill="none" stroke="#6EE7D8" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" />
+      <path d="M186 88L176 98V186L186 176" fill="none" stroke="#6EE7D8" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" />
+      <circle cx="42" cy="170" r="23" fill="#0C1116" />
+      <circle cx="42" cy="170" r="13" fill="#6EE7D8" />
+      <circle cx="152" cy="64" r="23" fill="#0C1116" />
+      <circle cx="152" cy="64" r="13" fill="#6EE7D8" />
+      <circle cx="209" cy="150" r="23" fill="#0C1116" />
+      <circle cx="209" cy="150" r="13" fill="#6EE7D8" />
+      <circle cx="70" cy="188" r="15" fill="#0C1116" />
+      <circle cx="70" cy="188" r="8" fill="#E7A23C" />
+    </g>
+  </g>
+  <g transform="translate(718 44)">
+    <rect x="0" y="0" width="264" height="264" rx="36" fill="#111820" stroke="#263241" stroke-width="2" />
+    <g transform="translate(24 30)">
+      <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M42 176L111 62L196 150L126 200Z" stroke="#0C1116" stroke-width="42" />
+        <path d="M42 176L111 62L196 150L126 200Z" stroke="#E7A23C" stroke-width="26" />
+        <path d="M42 176L126 200" stroke="#E7A23C" stroke-width="26" />
+      </g>
+      <path d="M92 114H147L177 145L147 176H92L62 145Z" fill="#111820" stroke="#263241" stroke-width="8" stroke-linejoin="round" />
+      <path d="M88 145H150" stroke="#6EE7D8" stroke-width="8" stroke-linecap="round" />
+      <path d="M111 62L119 145L196 150" stroke="#263241" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" />
+      <circle cx="111" cy="62" r="24" fill="#0C1116" />
+      <circle cx="111" cy="62" r="13" fill="#6EE7D8" />
+      <circle cx="196" cy="150" r="24" fill="#0C1116" />
+      <circle cx="196" cy="150" r="13" fill="#6EE7D8" />
+      <circle cx="42" cy="176" r="24" fill="#0C1116" />
+      <circle cx="42" cy="176" r="13" fill="#6EE7D8" />
+      <circle cx="126" cy="200" r="15" fill="#0C1116" />
+      <circle cx="126" cy="200" r="8" fill="#E7A23C" />
+    </g>
+  </g>
+</svg>

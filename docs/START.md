@@ -538,7 +538,33 @@ praxis_record_external_result
 
 这些工具会读取 `.distinction` 中的 cache / views / memory，并通过 `@praxis/schema` 校验输入和输出。治理类工具会写入 `.distinction/cache`、`.distinction/tasks`、`.distinction/reports` 或 `.distinction/memory/traces.jsonl`，但不会直接修改用户源码。
 
-### 5.1 接受外部 Agent 结果
+### 5.1 Pi Agent Engine 的 Praxis 工具桥
+
+Praxis 内置 Pi Agent Engine 会在启动 Pi 时加载 Praxis MCP bridge extension。这个 extension 不让 Pi 绕过 Praxis 治理；它只是把已经 schema 校验过的 Praxis 项目智能暴露成低 token 工具，让 Pi 在读仓库前先读取项目记忆、图锚点、投影视图、代码事实和评审发现。
+
+默认开放给 Pi 的高价值只读工具是：
+
+```text
+praxis_status
+praxis_context_packet
+praxis_projection_views
+praxis_code_facts
+praxis_findings
+```
+
+Pi 仍然可以使用 `read`、`grep`、`find`、`ls`、`codegraph_*`、`bash`、`edit`、`write`，但系统提示要求它在任务有 graph / memory / finding / design anchor 时优先使用 `praxis_*` 工具收敛上下文。`praxis_context_packet` 在 Pi 中使用更小的默认 limit，避免一次工具调用把完整记忆和代码事实倒入模型上下文。
+
+下列 governed artifact 写入工具已注册到 extension，但不在默认白名单中：
+
+```text
+praxis_plan_from_finding
+praxis_generate_task
+praxis_record_external_result
+```
+
+只有当模型设置显式把它们加入 `Pi Tools` 且写权限开启时，Pi 才能调用它们。它们仍然只写 `.distinction` 治理产物，不直接确认 memory，也不修改用户源码。
+
+### 5.2 接受外部 Agent 结果
 
 外部 Agent 通过 MCP 写入 `ExternalAgentResult` 后，Praxis 仍然不会自动确认 memory 或 finding 状态。需要显式接受结果进入治理 review 边界：
 
@@ -593,7 +619,7 @@ node apps/runtime-cli/dist/index.js accept-finding-status --root . --patch <find
 用新的 detector 结果和已接受状态做 reconciliation
 ```
 
-### 5.2 MCP 客户端配置示例
+### 5.3 MCP 客户端配置示例
 
 不同 MCP 客户端的配置文件格式不同，但核心都是 command + args。
 
@@ -912,6 +938,75 @@ Get-ChildItem apps/studio-desktop/src-tauri/target -Recurse -File -Include *.exe
 Rust toolchain 是否安装
 Tauri 系统依赖是否安装
 Windows WebView2 Runtime 是否可用
+```
+
+### 6.7 发布在线更新
+
+Praxis Studio Desktop 使用 Tauri updater 从 GitHub Release 检查更新。
+
+客户端检查地址配置在：
+
+```text
+apps/studio-desktop/src-tauri/tauri.conf.json
+```
+
+当前 endpoint 是：
+
+```text
+https://github.com/vicliu624/Praxis-Studio/releases/latest/download/latest.json
+```
+
+Settings / 模型设置页面包含 `App updates / 应用更新` 区域。点击 `Check for updates / 检查更新` 后：
+
+```text
+1. Desktop 读取当前 Tauri app version。
+2. Tauri updater 请求 GitHub Release 的 latest.json。
+3. 如果没有更高版本，页面提示已经是最新版本。
+4. 如果发现新版本，页面展示版本号和 release notes。
+5. 用户确认安装后，Tauri updater 下载、校验签名、安装并重启应用。
+```
+
+注意：浏览器预览 `npm run dev:desktop` 没有完整 Tauri bridge，不能执行在线更新。
+
+Tauri updater 必须使用签名。公钥已经写入 Tauri 配置；私钥不能提交到仓库。
+
+本机开发密钥可以这样生成：
+
+```powershell
+New-Item -ItemType Directory -Force "$env:USERPROFILE\.praxis-studio" | Out-Null
+npx tauri signer generate --ci -w "$env:USERPROFILE\.praxis-studio\updater.key"
+```
+
+本地打包并生成 updater 签名产物时，在同一个 PowerShell 会话中设置：
+
+```powershell
+$env:TAURI_SIGNING_PRIVATE_KEY_PATH="$env:USERPROFILE\.praxis-studio\updater.key"
+$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
+npm run package:desktop:windows
+```
+
+发布到 GitHub Release 推荐使用：
+
+```text
+.github/workflows/publish-desktop.yml
+```
+
+这个 workflow 会在 `app-v*` tag push 或手动触发时构建 Windows 桌面 release，并上传安装包、签名和 `latest.json`。在仓库 Settings → Secrets and variables → Actions 中配置：
+
+```text
+TAURI_SIGNING_PRIVATE_KEY
+TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+```
+
+`TAURI_SIGNING_PRIVATE_KEY` 可以是私钥文件内容；如果私钥没有密码，`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` 可以为空。生产发布建议使用带密码的私钥，并把私钥安全备份到团队认可的位置。
+
+版本发布时要保持这些版本一致：
+
+```text
+package.json
+apps/studio-desktop/package.json
+apps/studio-desktop/src-tauri/Cargo.toml
+apps/studio-desktop/src-tauri/tauri.conf.json
 ```
 
 ---

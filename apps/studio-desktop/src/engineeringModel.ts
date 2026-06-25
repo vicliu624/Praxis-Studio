@@ -731,7 +731,7 @@ function derivePlanItems(
         `${module.sourceFiles} 个源码文件`,
         `${module.symbols} 个代码符号`,
         `${module.testFiles} 个测试文件`,
-        module.source === "architecture_model" ? "来自架构模型补丁" : module.source === "project_profile" ? "来自项目画像" : "来自代码事实图"
+        module.source === "architecture_model" ? "来自架构模型补丁" : module.source === "project_profile" ? "来自项目画像" : "来自本地代码事实"
       ]
     };
   }).sort((left, right) => left.stage - right.stage || left.path.localeCompare(right.path));
@@ -791,7 +791,7 @@ function deriveSpecGaps(
 ): string[] {
   const gaps: string[] = [];
   if (!sourceData?.profile) gaps.push("缺少 Project Profile：无法确认项目类型、语言、框架和模块候选。");
-  if (!sourceData?.codeFacts) gaps.push("缺少 Code Fact Graph：UML/C4 不能证明来自真实代码。");
+  if (!sourceData?.codeFacts) gaps.push("缺少本地代码事实：UML/C4 不能证明来自真实代码。");
   if (!modules.length) gaps.push("缺少可用模块边界：无法构造 C4 Container / UML Package。");
   if (!sourceData?.architecture?.modules?.length) gaps.push("缺少 Architecture Model：当前只能从项目画像或代码路径做临时架构表达。");
   if (!requirements.length) gaps.push("缺少需求/规格：甘特图只能显示模块依赖顺序，不能判断真实完成度。");
@@ -1289,13 +1289,13 @@ function inferExternalSystems(model: EngineeringModel): { id: string; label: str
     .join(" ")}`.toLowerCase();
   const result: { id: string; label: string; detail: string }[] = [];
   if (haystack.includes("deepseek") || haystack.includes("openai") || haystack.includes("model-router")) {
-    result.push({ id: "external:model-provider", label: "模型提供方", detail: "从模型/Provider 代码事实中检测到。" });
+    result.push({ id: "external:model-provider", label: "模型提供方", detail: "从模型/Provider 仓库证据中检测到。" });
   }
   if (haystack.includes("pi") || haystack.includes("coding-agent")) {
     result.push({ id: "external:coding-worker", label: "外部 Coding Worker", detail: "从 Coding Worker / Pi 集成代码中检测到。" });
   }
   if (haystack.includes("codegraph")) {
-    result.push({ id: "external:codegraph", label: "Codegraph", detail: "从 codegraph provider 集成中检测到。" });
+    result.push({ id: "external:repository-analysis", label: "仓库分析能力", detail: "从仓库分析 provider 集成中检测到。" });
   }
   return result;
 }

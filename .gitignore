@@ -13,6 +13,7 @@ target-*/
 apps/studio-desktop/src-tauri/gen/
 
 # Desktop packaging artifacts when copied outside the ignored target directory
+artifacts/
 *.msi
 *.dmg
 *.AppImage

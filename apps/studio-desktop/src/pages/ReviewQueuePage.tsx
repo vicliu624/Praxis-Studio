@@ -2,32 +2,34 @@ import { type ReactNode, useEffect, useState } from "react";
 import {
   acceptFindingStatus,
   acceptMemorySuggestion,
+  createReviewFindingChangeItem,
+  discussReviewFinding,
   openProjectDialog,
   readFindingAudit,
   readQualityReviewProgress,
   readReviewQueue,
   refreshReviewFinding,
   startQualityReview,
-  type RuntimeGraphAnchor,
   type RuntimeFindingAuditItem,
   type RuntimeFindingAuditResult,
   type RuntimeFindingStatusReviewItem,
   type RuntimeMemorySuggestionReviewItem,
   type RuntimeReviewCategory,
   type RuntimeReviewFinding,
+  type RuntimeReviewFindingDiscussionResult,
   type RuntimeReviewProgress,
   type RuntimeReviewQueueResult,
-  type RuntimeReviewSeverity
+  type RuntimeReviewSeverity,
+  type RuntimeScopedAgentHistoryEntry
 } from "../runtimeClient";
 import { useI18n } from "../i18n";
+import { ScopedAgentPanel, type ScopedAgentSubmitResult } from "../chat/ScopedAgentPanel";
 
 interface ReviewQueuePageProps {
   projectRoot: string;
   onProjectRootChange: (root: string) => void;
   focusFindingId?: string;
   focusToken?: number;
-  onOpenProjectionAnchor?: (anchor: RuntimeGraphAnchor) => void;
-  onOpenAssistantDraft?: (draft: string, mode?: "explain" | "plan") => void;
 }
 
 type ReviewItemKind = "memory" | "finding";
@@ -53,9 +55,7 @@ export function ReviewQueuePage({
   projectRoot,
   onProjectRootChange,
   focusFindingId,
-  focusToken,
-  onOpenProjectionAnchor,
-  onOpenAssistantDraft
+  focusToken
 }: ReviewQueuePageProps) {
   const { locale, t } = useI18n();
   const [queue, setQueue] = useState<RuntimeReviewQueueResult | null>(null);
@@ -69,9 +69,14 @@ export function ReviewQueuePage({
   const [reviewProgress, setReviewProgress] = useState<RuntimeReviewProgress | null>(null);
   const [retryingCategory, setRetryingCategory] = useState<RuntimeReviewCategory | null>(null);
   const [refreshingFindingId, setRefreshingFindingId] = useState<string | null>(null);
+  const [planningFindingId, setPlanningFindingId] = useState<string | null>(null);
   const [auditFilter, setAuditFilter] = useState<AuditFilter>("all");
   const [selectedAuditFindingId, setSelectedAuditFindingId] = useState<string | null>(null);
   const [activeReviewCategory, setActiveReviewCategory] = useState<RuntimeReviewCategory>("architecture_boundaries");
+  const [selectedReviewFindingId, setSelectedReviewFindingId] = useState<string | null>(null);
+  const [problemBoardCollapsed, setProblemBoardCollapsed] = useState(false);
+  const [governanceCollapsed, setGovernanceCollapsed] = useState(true);
+  const [auditCollapsed, setAuditCollapsed] = useState(true);
 
   useEffect(() => {
     let cancelled = false;
@@ -280,9 +285,23 @@ export function ReviewQueuePage({
     }
   }
 
-  function openFindingInAssistant(finding: RuntimeReviewFinding) {
-    onOpenAssistantDraft?.(buildFindingCodingDraft(finding, categoryLabel(t, finding.category)), "plan");
-    setStatus(t("review.codingDraftPrepared"));
+  async function createPlanFromFinding(finding: RuntimeReviewFinding) {
+    if (!projectRoot || planningFindingId) return null;
+    setPlanningFindingId(finding.id);
+    setSelectedReviewFindingId(finding.id);
+    setError("");
+    setStatus(t("review.creatingPlanItem", { title: finding.title }));
+    try {
+      const result = await createReviewFindingChangeItem(projectRoot, finding.id);
+      setStatus(t("review.planItemCreated", { id: result.changeItemId }));
+      return result;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setStatus("");
+      return null;
+    } finally {
+      setPlanningFindingId(null);
+    }
   }
 
   async function refreshFinding(finding: RuntimeReviewFinding) {
@@ -305,6 +324,15 @@ export function ReviewQueuePage({
   const reviewFindings = queue?.reviewFindings ?? [];
   const displayReviewFindings = reviewFindings.map(normalizeReviewFindingDisplayCategory);
   const activeCategoryFindings = sortFindingsForDisplay(displayReviewFindings.filter((finding) => finding.category === activeReviewCategory));
+  const reviewFindingIdsKey = displayReviewFindings.map((finding) => finding.id).join("|");
+  const selectedReviewFinding =
+    displayReviewFindings.find((finding) => finding.id === selectedReviewFindingId)
+    ?? activeCategoryFindings[0]
+    ?? displayReviewFindings[0]
+    ?? null;
+  const selectedReviewIssueDocument = selectedReviewFinding
+    ? queue?.reviewDocuments?.issueDocuments.find((issue) => issue.findingId === selectedReviewFinding.id)
+    : undefined;
   const activeEvaluator = evaluatorForCategory(queue, activeReviewCategory);
   const categoryStates = buildCategoryStates(reviewProgress, queue, displayReviewFindings);
   const activeCategoryState = categoryStates[activeReviewCategory];
@@ -323,192 +351,293 @@ export function ReviewQueuePage({
         ? t("review.reviewStalePill")
         : reviewProgress?.status === "failed"
         ? t("review.reviewFailedPill")
-        : reviewFindings.length
+        : queue?.reviewDocuments?.exists
           ? t("review.memoryBacked")
           : t("review.noMemoryBacked");
 
+  useEffect(() => {
+    if (!displayReviewFindings.length) {
+      if (selectedReviewFindingId) setSelectedReviewFindingId(null);
+      return;
+    }
+    if (selectedReviewFindingId && displayReviewFindings.some((finding) => finding.id === selectedReviewFindingId)) return;
+    const next = activeCategoryFindings[0] ?? displayReviewFindings[0];
+    setSelectedReviewFindingId(next.id);
+  }, [reviewFindingIdsKey, activeReviewCategory, selectedReviewFindingId]);
+
+  async function submitReviewAgent(
+    message: string,
+    conversationHistory: RuntimeScopedAgentHistoryEntry[]
+  ): Promise<ScopedAgentSubmitResult> {
+    if (!selectedReviewFinding) {
+      return {
+        text: "当前没有选中的评审问题。请先运行工程评审，或在列表中选择一个待解决问题。",
+        intent: "needs_selection",
+        status: "failed"
+      };
+    }
+    const result = await discussReviewFinding(projectRoot, selectedReviewFinding.id, message, conversationHistory);
+    if (result.changeItemId) setStatus(t("review.planItemCreated", { id: result.changeItemId }));
+    if (result.statusUpdate) {
+      setStatus(`评审状态已由 agent 更新：${stateLabel(result.statusUpdate.status)}`);
+      await loadQueue();
+    }
+    return {
+      text: formatReviewFindingDiscussionText(result),
+      intent: result.intent,
+      status: "done",
+      artifactPaths: result.artifactPaths,
+      documentEdits: result.documentEdits,
+      provider: result.provider
+    };
+  }
+
   return (
     <section className="review-queue-layout" aria-labelledby="review-queue-title">
-      <section className="panel review-queue-hero">
-        <p className="eyebrow">{t("review.eyebrow")}</p>
-        <h1 id="review-queue-title">{t("review.title")}</h1>
-        <p className="muted-copy">{t("review.copy")}</p>
-        <div className="review-project-row">
-          <input
-            className="path-input"
-            value={projectRoot}
-            placeholder={t("review.projectRootPlaceholder")}
-            onChange={(event) => onProjectRootChange(event.target.value)}
-          />
-          <button className="secondary-action" type="button" onClick={chooseProjectRoot}>
-            {t("review.browse")}
-          </button>
-          <button className="primary-action" type="button" disabled={!projectRoot || effectiveRunningReview} onClick={() => void runReview()}>
-            {effectiveRunningReview ? t("review.running") : t("review.runEngineeringReview")}
-          </button>
-          <button className="secondary-action" type="button" disabled={!projectRoot || effectiveRunningReview} onClick={() => void loadQueue()}>
-            {t("review.refresh")}
-          </button>
-        </div>
-        <label className="checkbox-row">
-          <input type="checkbox" checked={includeAccepted} onChange={(event) => setIncludeAccepted(event.target.checked)} />
-          <span>{t("review.includeAccepted")}</span>
-        </label>
-        <div className="review-boundary-note">
-          <div>
-            <strong>{t("review.memoryFirst")}</strong>
-            <span>{t("review.memoryFirstCopy")}</span>
-          </div>
-          <div>
-            <strong>{t("review.candidateBoundary")}</strong>
-            <span>{t("review.candidateBoundaryCopy")}</span>
-          </div>
-        </div>
-        {effectiveRunningReview || reviewProgress ? <ReviewProgressStrip progress={reviewProgress} stale={staleReviewProgress} /> : null}
-        {status ? <p className="status-text">{status}</p> : null}
-        {error ? <p className="error-text">{error}</p> : null}
-      </section>
-
-      <section className="panel review-problem-board" aria-labelledby="review-problem-title">
-        <div className="panel-heading">
-          <div>
-            <p className="eyebrow">{t("review.problemEyebrow")}</p>
-            <h2 id="review-problem-title">{t("review.problemTitle")}</h2>
-            <p className="muted-copy">{t("review.problemCopy")}</p>
-          </div>
-          <span className="pill">{reviewMemoryPill}</span>
-        </div>
-        {!projectRoot ? (
-          <EmptyQueue message={t("review.noProject")} />
-        ) : checkingReviewProgress || (reviewProgress?.status === "running" && !staleReviewProgress && !queue) ? (
-          <ReviewLockedPanel progress={reviewProgress} checking={checkingReviewProgress} />
-        ) : queue && !reviewFindings.length ? (
-          <ReviewCategoryPanel
-            category={activeReviewCategory}
-            evaluatorName={activeEvaluator?.evaluator.name}
-            evaluatorSummary={activeEvaluator?.summary}
-            categoryState={activeCategoryState}
-            findings={activeCategoryFindings}
-            allFindings={displayReviewFindings}
-            categoryStates={categoryStates}
-            onSelectCategory={setActiveReviewCategory}
-            onRetryCategory={(category) => void retryReviewCategory(category)}
-            retryingCategory={retryingCategory}
-            reviewIsInProgress={reviewIsInProgress}
-            onOpenProjectionAnchor={onOpenProjectionAnchor}
-            onOpenAssistantDraft={openFindingInAssistant}
-            onRefreshFinding={(finding) => void refreshFinding(finding)}
-            refreshingFindingId={refreshingFindingId}
-          />
-        ) : (
-          <ReviewCategoryPanel
-            category={activeReviewCategory}
-            evaluatorName={activeEvaluator?.evaluator.name}
-            evaluatorSummary={activeEvaluator?.summary}
-            categoryState={activeCategoryState}
-            findings={activeCategoryFindings}
-            allFindings={displayReviewFindings}
-            categoryStates={categoryStates}
-            onSelectCategory={setActiveReviewCategory}
-            onRetryCategory={(category) => void retryReviewCategory(category)}
-            retryingCategory={retryingCategory}
-            reviewIsInProgress={reviewIsInProgress}
-            onOpenProjectionAnchor={onOpenProjectionAnchor}
-            onOpenAssistantDraft={openFindingInAssistant}
-            onRefreshFinding={(finding) => void refreshFinding(finding)}
-            refreshingFindingId={refreshingFindingId}
-          />
-        )}
-      </section>
-
-      {externalItems ? <section className="panel review-governance-panel" aria-labelledby="review-governance-title">
-        <div className="panel-heading">
-          <div>
-            <h2 id="review-governance-title">{t("review.governanceTitle")}</h2>
-            <p className="muted-copy">{t("review.governanceCopy")}</p>
-          </div>
-          <span className="pill">{externalItems ? t("review.pendingGovernance") : t("review.noPendingGovernance")}</span>
-        </div>
-        <div className="review-governance-grid">
-          <section className="review-queue-column" aria-labelledby="review-memory-title">
-            <div className="panel-heading tight">
-              <div>
-                <h3 id="review-memory-title">{t("review.memorySuggestions")}</h3>
-                <p className="muted-copy">{t("review.memoryCopy")}</p>
-              </div>
-            </div>
-            <div className="review-card-list">
-              {queue?.memorySuggestions.map((item) => (
-                <MemorySuggestionCard
-                  key={item.id}
-                  item={item}
-                  accepting={accepting?.kind === "memory" && accepting.id === item.id}
-                  onAccept={() => void acceptMemory(item)}
-                />
-              ))}
-              {queue && !queue.memorySuggestions.length ? <EmptyQueue message={t("review.noMemorySuggestions")} /> : null}
-            </div>
-          </section>
-
-          <section className="review-queue-column" aria-labelledby="review-finding-title">
-            <div className="panel-heading tight">
-              <div>
-                <h3 id="review-finding-title">{t("review.findingStatusPatches")}</h3>
-                <p className="muted-copy">{t("review.findingCopy")}</p>
-              </div>
-            </div>
-            <div className="review-card-list">
-              {queue?.findingStatusPatches.map((item) => (
-                <FindingStatusCard
-                  key={item.id}
-                  item={item}
-                  accepting={accepting?.kind === "finding" && accepting.id === item.id}
-                  onAccept={() => void acceptFinding(item)}
-                />
-              ))}
-              {queue && !queue.findingStatusPatches.length ? <EmptyQueue message={t("review.noFindingPatches")} /> : null}
-            </div>
-          </section>
-        </div>
-      </section> : null}
-
-      {queue?.foundation && (queue.foundation.status !== "foundation_ready" || queue.foundation.nextActions.length)
-        ? <FoundationStatusStrip status={queue.foundation.status} nextActions={queue.foundation.nextActions} />
-        : null}
-
-      {audit?.counts.findings ? <section className="panel review-audit-panel" aria-labelledby="review-audit-title">
-        <div className="panel-heading">
-          <div>
-            <h2 id="review-audit-title">{t("review.auditTitle")}</h2>
-            <p className="muted-copy">{t("review.auditCopy")}</p>
-          </div>
-          <span className="pill">{audit?.counts.findings ? t("review.auditHasHistory") : t("review.auditNoHistory")}</span>
-        </div>
-        <div className="review-filter-row" aria-label={t("review.auditFilter")}>
-          {(["all", "detected", "reopened", "disappeared", "historical"] as AuditFilter[]).map((filter) => (
-            <button
-              key={filter}
-              className={auditFilter === filter ? "text-button active-filter" : "text-button"}
-              type="button"
-              onClick={() => setAuditFilter(filter)}
-            >
-              {t(auditFilterLabelKey(filter))}
-            </button>
-          ))}
-        </div>
-        <div className="review-audit-list">
-          {filteredAuditItems.map((item) => (
-            <FindingAuditCard
-              key={item.findingId}
-              item={item}
-              selected={selectedAuditFinding?.findingId === item.findingId}
-              onSelect={() => setSelectedAuditFindingId(item.findingId)}
+      <aside className="review-queue-side-column" aria-label="评审控制区">
+        <section className="panel review-queue-hero">
+          <p className="eyebrow">{t("review.eyebrow")}</p>
+          <h1 id="review-queue-title">{t("review.title")}</h1>
+          <p className="muted-copy">{t("review.copy")}</p>
+          <div className="review-project-row">
+            <input
+              className="path-input"
+              value={projectRoot}
+              placeholder={t("review.projectRootPlaceholder")}
+              onChange={(event) => onProjectRootChange(event.target.value)}
             />
-          ))}
-          {audit && !filteredAuditItems.length ? <EmptyQueue message={t("review.noAudit")} /> : null}
-        </div>
-        {selectedAuditFinding ? <FindingAuditDetail item={selectedAuditFinding} onOpenProjectionAnchor={onOpenProjectionAnchor} /> : null}
-      </section> : null}
+            <button className="secondary-action" type="button" onClick={chooseProjectRoot}>
+              {t("review.browse")}
+            </button>
+            <button className="primary-action" type="button" disabled={!projectRoot || effectiveRunningReview} onClick={() => void runReview()}>
+              {effectiveRunningReview ? t("review.running") : t("review.runEngineeringReview")}
+            </button>
+            <button className="secondary-action" type="button" disabled={!projectRoot || effectiveRunningReview} onClick={() => void loadQueue()}>
+              {t("review.refresh")}
+            </button>
+          </div>
+          <label className="checkbox-row">
+            <input type="checkbox" checked={includeAccepted} onChange={(event) => setIncludeAccepted(event.target.checked)} />
+            <span>{t("review.includeAccepted")}</span>
+          </label>
+          <div className="review-boundary-note">
+            <div>
+              <strong>{t("review.memoryFirst")}</strong>
+              <span>{t("review.memoryFirstCopy")}</span>
+            </div>
+            <div>
+              <strong>{t("review.candidateBoundary")}</strong>
+              <span>{t("review.candidateBoundaryCopy")}</span>
+            </div>
+          </div>
+          {effectiveRunningReview || reviewProgress ? <ReviewProgressStrip progress={reviewProgress} stale={staleReviewProgress} /> : null}
+          {status ? <p className="status-text">{status}</p> : null}
+          {error ? <p className="error-text">{error}</p> : null}
+        </section>
+
+        {queue?.foundation && (queue.foundation.status !== "foundation_ready" || queue.foundation.nextActions.length)
+          ? <FoundationStatusStrip status={queue.foundation.status} nextActions={queue.foundation.nextActions} />
+          : null}
+
+        {externalItems ? (
+          <section className={`panel review-governance-panel${governanceCollapsed ? " is-collapsed" : ""}`} aria-labelledby="review-governance-title">
+            <div className="panel-heading">
+              <div>
+                <h2 id="review-governance-title">{t("review.governanceTitle")}</h2>
+                <p className="muted-copy">{t("review.governanceCopy")}</p>
+              </div>
+              <div className="review-panel-actions">
+                <span className="pill">{externalItems ? t("review.pendingGovernance") : t("review.noPendingGovernance")}</span>
+                <button className="text-button review-collapse-button" type="button" onClick={() => setGovernanceCollapsed((value) => !value)}>
+                  {governanceCollapsed ? "展开" : "折叠"}
+                </button>
+              </div>
+            </div>
+            {!governanceCollapsed ? (
+              <div className="review-governance-grid">
+                <section className="review-queue-column" aria-labelledby="review-memory-title">
+                  <div className="panel-heading tight">
+                    <div>
+                      <h3 id="review-memory-title">{t("review.memorySuggestions")}</h3>
+                      <p className="muted-copy">{t("review.memoryCopy")}</p>
+                    </div>
+                  </div>
+                  <div className="review-card-list">
+                    {queue?.memorySuggestions.map((item) => (
+                      <MemorySuggestionCard
+                        key={item.id}
+                        item={item}
+                        accepting={accepting?.kind === "memory" && accepting.id === item.id}
+                        onAccept={() => void acceptMemory(item)}
+                      />
+                    ))}
+                    {queue && !queue.memorySuggestions.length ? <EmptyQueue message={t("review.noMemorySuggestions")} /> : null}
+                  </div>
+                </section>
+
+                <section className="review-queue-column" aria-labelledby="review-finding-title">
+                  <div className="panel-heading tight">
+                    <div>
+                      <h3 id="review-finding-title">{t("review.findingStatusPatches")}</h3>
+                      <p className="muted-copy">{t("review.findingCopy")}</p>
+                    </div>
+                  </div>
+                  <div className="review-card-list">
+                    {queue?.findingStatusPatches.map((item) => (
+                      <FindingStatusCard
+                        key={item.id}
+                        item={item}
+                        accepting={accepting?.kind === "finding" && accepting.id === item.id}
+                        onAccept={() => void acceptFinding(item)}
+                      />
+                    ))}
+                    {queue && !queue.findingStatusPatches.length ? <EmptyQueue message={t("review.noFindingPatches")} /> : null}
+                  </div>
+                </section>
+              </div>
+            ) : null}
+          </section>
+        ) : null}
+      </aside>
+
+      <main className="review-queue-main-column" aria-labelledby="review-problem-title">
+        <section className={`panel review-problem-board${problemBoardCollapsed ? " is-collapsed" : ""}`} aria-labelledby="review-problem-title">
+          <div className="panel-heading">
+            <div>
+              <p className="eyebrow">{t("review.problemEyebrow")}</p>
+              <h2 id="review-problem-title">{t("review.problemTitle")}</h2>
+              <p className="muted-copy">{t("review.problemCopy")}</p>
+            </div>
+            <div className="review-panel-actions">
+              <span className="pill">{reviewMemoryPill}</span>
+              <button className="text-button review-collapse-button" type="button" onClick={() => setProblemBoardCollapsed((value) => !value)}>
+                {problemBoardCollapsed ? "展开" : "折叠"}
+              </button>
+            </div>
+          </div>
+          {!problemBoardCollapsed ? (
+            <div className="review-problem-board-body">
+              {!projectRoot ? (
+                <EmptyQueue message={t("review.noProject")} />
+              ) : checkingReviewProgress || (reviewProgress?.status === "running" && !staleReviewProgress && !queue) ? (
+                <ReviewLockedPanel progress={reviewProgress} checking={checkingReviewProgress} />
+              ) : queue && !reviewFindings.length ? (
+                <ReviewCategoryPanel
+                  category={activeReviewCategory}
+                  evaluatorName={activeEvaluator?.evaluator.name}
+                  evaluatorSummary={activeEvaluator?.summary}
+                  categoryState={activeCategoryState}
+                  findings={activeCategoryFindings}
+                  allFindings={displayReviewFindings}
+                  categoryStates={categoryStates}
+                  onSelectCategory={setActiveReviewCategory}
+                  onRetryCategory={(category) => void retryReviewCategory(category)}
+                  retryingCategory={retryingCategory}
+                  reviewIsInProgress={reviewIsInProgress}
+                  selectedFindingId={selectedReviewFinding?.id ?? null}
+                  onSelectFinding={setSelectedReviewFindingId}
+                  onCreatePlanFromFinding={(finding) => void createPlanFromFinding(finding)}
+                  onRefreshFinding={(finding) => void refreshFinding(finding)}
+                  refreshingFindingId={refreshingFindingId}
+                  planningFindingId={planningFindingId}
+                />
+              ) : (
+                <ReviewCategoryPanel
+                  category={activeReviewCategory}
+                  evaluatorName={activeEvaluator?.evaluator.name}
+                  evaluatorSummary={activeEvaluator?.summary}
+                  categoryState={activeCategoryState}
+                  findings={activeCategoryFindings}
+                  allFindings={displayReviewFindings}
+                  categoryStates={categoryStates}
+                  onSelectCategory={setActiveReviewCategory}
+                  onRetryCategory={(category) => void retryReviewCategory(category)}
+                  retryingCategory={retryingCategory}
+                  reviewIsInProgress={reviewIsInProgress}
+                  selectedFindingId={selectedReviewFinding?.id ?? null}
+                  onSelectFinding={setSelectedReviewFindingId}
+                  onCreatePlanFromFinding={(finding) => void createPlanFromFinding(finding)}
+                  onRefreshFinding={(finding) => void refreshFinding(finding)}
+                  refreshingFindingId={refreshingFindingId}
+                  planningFindingId={planningFindingId}
+                />
+              )}
+            </div>
+          ) : null}
+        </section>
+
+        {audit?.counts.findings ? (
+          <section className={`panel review-audit-panel${auditCollapsed ? " is-collapsed" : ""}`} aria-labelledby="review-audit-title">
+            <div className="panel-heading">
+              <div>
+                <h2 id="review-audit-title">{t("review.auditTitle")}</h2>
+                <p className="muted-copy">{t("review.auditCopy")}</p>
+              </div>
+              <div className="review-panel-actions">
+                <span className="pill">{audit?.counts.findings ? t("review.auditHasHistory") : t("review.auditNoHistory")}</span>
+                <button className="text-button review-collapse-button" type="button" onClick={() => setAuditCollapsed((value) => !value)}>
+                  {auditCollapsed ? "展开" : "折叠"}
+                </button>
+              </div>
+            </div>
+            {!auditCollapsed ? (
+              <>
+                <div className="review-filter-row" aria-label={t("review.auditFilter")}>
+                  {(["all", "detected", "reopened", "disappeared", "historical"] as AuditFilter[]).map((filter) => (
+                    <button
+                      key={filter}
+                      className={auditFilter === filter ? "text-button active-filter" : "text-button"}
+                      type="button"
+                      onClick={() => setAuditFilter(filter)}
+                    >
+                      {t(auditFilterLabelKey(filter))}
+                    </button>
+                  ))}
+                </div>
+                <div className="review-audit-list">
+                  {filteredAuditItems.map((item) => (
+                    <FindingAuditCard
+                      key={item.findingId}
+                      item={item}
+                      selected={selectedAuditFinding?.findingId === item.findingId}
+                      onSelect={() => setSelectedAuditFindingId(item.findingId)}
+                    />
+                  ))}
+                  {audit && !filteredAuditItems.length ? <EmptyQueue message={t("review.noAudit")} /> : null}
+                </div>
+                {selectedAuditFinding ? <FindingAuditDetail item={selectedAuditFinding} /> : null}
+              </>
+            ) : null}
+          </section>
+        ) : null}
+      </main>
+
+      <ScopedAgentPanel
+        projectRoot={projectRoot}
+        className="panel review-agent-panel"
+        textareaId="review-agent-input"
+        ariaLabel={t("review.agentTitle")}
+        scope={{
+          id: "review-queue",
+          title: t("review.agentTitle"),
+          copy: t("review.agentCopy"),
+          modeLabel: t("review.agentMode"),
+          placeholder: t("review.agentPlaceholder"),
+          inputLabel: t("review.agentInputLabel"),
+          emptyTitle: t("review.agentEmptyTitle"),
+          emptyCopy: t("review.agentEmptyCopy"),
+          scopeKind: "review",
+          contextTitle: selectedReviewFinding?.title ?? t("review.noSelectedFinding"),
+          contextPath: selectedReviewIssueDocument?.docPath ?? "docs/review/quality-review.md",
+          metadata: [
+            selectedReviewFinding?.id ?? "",
+            selectedReviewFinding?.severity ?? "",
+            selectedReviewFinding ? categoryLabel(t, selectedReviewFinding.category) : ""
+          ].filter(Boolean)
+        }}
+        compactConversation
+        onSubmit={submitReviewAgent}
+      />
     </section>
   );
 }
@@ -587,9 +716,7 @@ function ReviewProgressStrip({ progress, stale = false }: { progress: RuntimeRev
       ? t("review.piAgentFailed")
       : progress?.status === "completed"
         ? t("review.piAgentCompleted")
-        : progress?.source === "pi-agent"
-          ? t("review.piAgentRunning")
-          : t("review.runningEngineeringReview");
+        : t("review.piAgentRunning");
   return (
     <div className="review-progress-strip">
       <div>
@@ -670,10 +797,12 @@ function ReviewCategoryPanel({
   onRetryCategory,
   retryingCategory,
   reviewIsInProgress,
-  onOpenProjectionAnchor,
-  onOpenAssistantDraft,
+  selectedFindingId,
+  onSelectFinding,
+  onCreatePlanFromFinding,
   onRefreshFinding,
-  refreshingFindingId
+  refreshingFindingId,
+  planningFindingId
 }: {
   category: RuntimeReviewCategory;
   evaluatorName?: string;
@@ -686,10 +815,12 @@ function ReviewCategoryPanel({
   onRetryCategory: (category: RuntimeReviewCategory) => void;
   retryingCategory: RuntimeReviewCategory | null;
   reviewIsInProgress: boolean;
-  onOpenProjectionAnchor?: (anchor: RuntimeGraphAnchor) => void;
-  onOpenAssistantDraft?: (finding: RuntimeReviewFinding) => void;
+  selectedFindingId: string | null;
+  onSelectFinding: (findingId: string) => void;
+  onCreatePlanFromFinding?: (finding: RuntimeReviewFinding) => void;
   onRefreshFinding?: (finding: RuntimeReviewFinding) => void;
   refreshingFindingId: string | null;
+  planningFindingId: string | null;
 }) {
   const { t } = useI18n();
   const retryingThisCategory = retryingCategory === category;
@@ -727,10 +858,12 @@ function ReviewCategoryPanel({
                   key={severity}
                   severity={severity}
                   findings={severityFindings}
-                  onOpenProjectionAnchor={onOpenProjectionAnchor}
-                  onOpenAssistantDraft={onOpenAssistantDraft}
+                  selectedFindingId={selectedFindingId}
+                  onSelectFinding={onSelectFinding}
+                  onCreatePlanFromFinding={onCreatePlanFromFinding}
                   onRefreshFinding={onRefreshFinding}
                   refreshingFindingId={refreshingFindingId}
+                  planningFindingId={planningFindingId}
                 />
               );
             })}
@@ -746,17 +879,21 @@ function ReviewCategoryPanel({
 function ReviewSeveritySection({
   severity,
   findings,
-  onOpenProjectionAnchor,
-  onOpenAssistantDraft,
+  selectedFindingId,
+  onSelectFinding,
+  onCreatePlanFromFinding,
   onRefreshFinding,
-  refreshingFindingId
+  refreshingFindingId,
+  planningFindingId
 }: {
   severity: RuntimeReviewSeverity;
   findings: RuntimeReviewFinding[];
-  onOpenProjectionAnchor?: (anchor: RuntimeGraphAnchor) => void;
-  onOpenAssistantDraft?: (finding: RuntimeReviewFinding) => void;
+  selectedFindingId: string | null;
+  onSelectFinding: (findingId: string) => void;
+  onCreatePlanFromFinding?: (finding: RuntimeReviewFinding) => void;
   onRefreshFinding?: (finding: RuntimeReviewFinding) => void;
   refreshingFindingId: string | null;
+  planningFindingId: string | null;
 }) {
   const { t } = useI18n();
   return (
@@ -772,10 +909,12 @@ function ReviewSeveritySection({
           <ReviewFindingCard
             key={finding.id}
             finding={finding}
-            onOpenProjectionAnchor={onOpenProjectionAnchor}
-            onOpenAssistantDraft={onOpenAssistantDraft}
+            selected={selectedFindingId === finding.id}
+            onSelectFinding={onSelectFinding}
+            onCreatePlanFromFinding={onCreatePlanFromFinding}
             onRefreshFinding={onRefreshFinding}
             refreshing={refreshingFindingId === finding.id}
+            planning={planningFindingId === finding.id}
           />
         ))}
         {!findings.length ? <EmptyQueue message={t("review.noSeverityFindings")} /> : null}
@@ -786,21 +925,33 @@ function ReviewSeveritySection({
 
 function ReviewFindingCard({
   finding,
-  onOpenProjectionAnchor,
-  onOpenAssistantDraft,
+  selected,
+  onSelectFinding,
+  onCreatePlanFromFinding,
   onRefreshFinding,
-  refreshing
+  refreshing,
+  planning
 }: {
   finding: RuntimeReviewFinding;
-  onOpenProjectionAnchor?: (anchor: RuntimeGraphAnchor) => void;
-  onOpenAssistantDraft?: (finding: RuntimeReviewFinding) => void;
+  selected: boolean;
+  onSelectFinding: (findingId: string) => void;
+  onCreatePlanFromFinding?: (finding: RuntimeReviewFinding) => void;
   onRefreshFinding?: (finding: RuntimeReviewFinding) => void;
   refreshing: boolean;
+  planning: boolean;
 }) {
   const { t } = useI18n();
-  const primaryAnchor = finding.affectedAnchors[0];
   return (
-    <article className={refreshing ? `review-finding-card severity-${finding.severity.toLowerCase()} is-refreshing` : `review-finding-card severity-${finding.severity.toLowerCase()}`} aria-busy={refreshing}>
+    <article
+      className={[
+        "review-finding-card",
+        `severity-${finding.severity.toLowerCase()}`,
+        refreshing ? "is-refreshing" : "",
+        selected ? "is-selected" : ""
+      ].filter(Boolean).join(" ")}
+      aria-busy={refreshing || planning}
+      onClick={() => onSelectFinding(finding.id)}
+    >
       <div className="review-finding-head">
         <div className="review-finding-badges">
           <span className="pill">{finding.severity}</span>
@@ -810,21 +961,24 @@ function ReviewFindingCard({
           <span className="pill">{finding.status}</span>
         </div>
         <div className="review-finding-actions">
-          <button className="text-button" type="button" disabled={refreshing || !onOpenAssistantDraft} onClick={() => onOpenAssistantDraft?.(finding)}>
-            {t("review.coding")}
+          <button className="text-button" type="button" disabled={refreshing || planning || !onCreatePlanFromFinding} onClick={(event) => {
+            event.stopPropagation();
+            onCreatePlanFromFinding?.(finding);
+          }}>
+            {planning ? t("review.creatingPlanShort") : t("review.createPlanItem")}
           </button>
-          <button className="text-button" type="button" disabled={refreshing || !onRefreshFinding} onClick={() => onRefreshFinding?.(finding)}>
+          <button className="text-button" type="button" disabled={refreshing || planning || !onRefreshFinding} onClick={(event) => {
+            event.stopPropagation();
+            onRefreshFinding?.(finding);
+          }}>
             {refreshing ? t("review.findingThinkingShort") : t("review.refreshFinding")}
-          </button>
-          <button className="text-button" type="button" disabled={refreshing || !primaryAnchor || !onOpenProjectionAnchor} onClick={() => primaryAnchor ? onOpenProjectionAnchor?.(primaryAnchor) : undefined}>
-            {t("review.openAnchor")}
           </button>
         </div>
       </div>
-      {refreshing ? (
+      {refreshing || planning ? (
         <div className="review-finding-thinking">
           <span className="spinner" />
-          <span>{t("review.findingThinking")}</span>
+          <span>{planning ? t("review.creatingPlanThinking") : t("review.findingThinking")}</span>
         </div>
       ) : null}
       <h4>{finding.title}</h4>
@@ -852,15 +1006,13 @@ function ReviewFindingCard({
         {finding.affectedAnchors.length ? (
           <div className="review-anchor-list">
             {finding.affectedAnchors.slice(0, 6).map((anchor) => (
-              <button
+              <span
                 key={`${anchor.kind}:${anchor.id}`}
                 className="review-anchor-chip"
-                type="button"
-                disabled={!onOpenProjectionAnchor || refreshing}
-                onClick={() => onOpenProjectionAnchor?.(anchor)}
+                title={`${anchor.kind}:${anchor.id}${anchor.path ? ` · ${anchor.path}` : ""}`}
               >
                 {anchor.path ?? anchor.id}
-              </button>
+              </span>
             ))}
           </div>
         ) : null}
@@ -1024,13 +1176,7 @@ function FindingAuditCard({
   );
 }
 
-function FindingAuditDetail({
-  item,
-  onOpenProjectionAnchor
-}: {
-  item: RuntimeFindingAuditItem;
-  onOpenProjectionAnchor?: (anchor: RuntimeGraphAnchor) => void;
-}) {
+function FindingAuditDetail({ item }: { item: RuntimeFindingAuditItem }) {
   const { t } = useI18n();
   return (
     <section className="review-audit-detail" aria-labelledby="review-audit-detail-title">
@@ -1039,18 +1185,7 @@ function FindingAuditDetail({
           <h2 id="review-audit-detail-title">{t("review.auditDetail")}</h2>
           <p className="muted-copy">{item.findingId}</p>
         </div>
-        <div className="action-row">
-          {onOpenProjectionAnchor ? (
-            <button
-              className="secondary-action"
-              type="button"
-              onClick={() => onOpenProjectionAnchor({ kind: "finding", id: item.findingId })}
-            >
-              {t("review.openInProjection")}
-            </button>
-          ) : null}
-          <span className="pill">{stateLabel(item.detectorState)}</span>
-        </div>
+        <span className="pill">{stateLabel(item.detectorState)}</span>
       </div>
       <div className="review-detail-grid">
         <DetailColumn title={t("review.auditPatchHistory")}>
@@ -1149,33 +1284,45 @@ function normalizeReviewFindingDisplayCategory(finding: RuntimeReviewFinding): R
   };
 }
 
-function buildFindingCodingDraft(finding: RuntimeReviewFinding, category: string): string {
-  const evidence = finding.evidence.slice(0, 5).map((item, index) => {
-    const path = item.path ? ` (${item.path})` : "";
-    return `${index + 1}. ${item.summary}${path}`;
-  });
-  const anchors = finding.affectedAnchors.slice(0, 8).map((anchor, index) => `${index + 1}. ${anchor.path ?? anchor.id}`);
+function formatReviewFindingDiscussionText(result: RuntimeReviewFindingDiscussionResult): string {
   return [
-    "请基于下面这条工程评审问题做整改。不要直接开始大范围重构，先确认问题是否仍存在，再给出最小修改计划。",
-    "",
-    `问题：${finding.title}`,
-    `分类：${category}`,
-    `严重程度：${finding.severity}`,
-    `当前状态：${finding.status}`,
-    "",
-    `问题描述：${finding.summary}`,
-    "",
-    `为什么重要：${finding.whyItMatters}`,
-    "",
-    `建议整改：${finding.suggestedAction}`,
-    evidence.length ? ["", "证据：", ...evidence].join("\n") : "",
-    anchors.length ? ["", "相关锚点：", ...anchors].join("\n") : "",
-    "",
-    "执行要求：",
-    "1. 先复查该问题是否仍存在，并说明证据。",
-    "2. 如果仍存在，给出最小可行整改计划。",
-    "3. 需要改代码时，说明将修改哪些文件、为什么改、如何验证。",
-    "4. 遵守 Praxis v0.1：Explain before Plan, Plan before Apply；不要自动提交。"
+    result.answer,
+    result.guidance ? ["", result.guidance].join("\n") : "",
+    result.changeItemId ? ["", `项目变更项：${result.changeItemId}`].join("\n") : "",
+    result.statusUpdate
+      ? [
+        "",
+        `评审状态更新：${stateLabel(result.statusUpdate.status)}`,
+        `理由：${result.statusUpdate.reason}`,
+        result.statusUpdate.regressionMarkdownPath ? `回归记录：${result.statusUpdate.regressionMarkdownPath}` : ""
+      ].filter(Boolean).join("\n")
+      : "",
+    result.planAction?.shouldCreateOrUpdate && result.planAction.expectedChangeSummary
+      ? ["", `计划摘要：${result.planAction.expectedChangeSummary}`].join("\n")
+      : "",
+    result.statusDecision?.shouldUpdate && result.statusDecision.evidenceSummary
+      ? ["", `证据摘要：${result.statusDecision.evidenceSummary}`].join("\n")
+      : "",
+    result.regressionAction?.shouldCreate
+      ? [
+        "",
+        "理解纠偏 / 回归：",
+        result.regressionAction.correctedUnderstanding ? `- 纠正理解：${result.regressionAction.correctedUnderstanding}` : "",
+        result.regressionAction.recommendedReviewScope ? `- 建议回归：${result.regressionAction.recommendedReviewScope}` : "",
+        result.regressionAction.affectedCategories.length
+          ? `- 影响评审项：${result.regressionAction.affectedCategories.join(", ")}`
+          : ""
+      ].filter(Boolean).join("\n")
+      : "",
+    result.referencedDocuments.length
+      ? ["", "关联文档：", ...result.referencedDocuments.map((item) => `- ${item}`)].join("\n")
+      : "",
+    result.risks.length
+      ? ["", "风险：", ...result.risks.map((item) => `- ${item}`)].join("\n")
+      : "",
+    result.questions.length
+      ? ["", "待确认：", ...result.questions.map((item) => `- ${item}`)].join("\n")
+      : ""
   ].filter(Boolean).join("\n");
 }
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { appendFile, mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
@@ -15,9 +15,12 @@ import {
   projectArchitectureDependencyView,
   projectCodeFactGraphView,
   projectContextGraphView,
+  projectDesignUseCaseGraphViews,
+  projectDesignUseCaseListView,
   projectFindingsGraphView,
   projectMemoryGraphView,
   readProjectedGraphViewRecords,
+  renderUseCaseDiagramMermaid,
   projectTaskPlanGraphView,
   projectTraceGraphView,
   type TaskProjectionRecord,
@@ -39,6 +42,7 @@ import {
   ContextPacketSchema,
   ExternalAgentResultSchema,
   FindingStatusPatchSchema,
+  InteractionModelCandidateSchema,
   MemorySuggestionPatchSchema,
   MemoryRecordSchema,
   ProjectedGraphViewSchema,
@@ -54,6 +58,7 @@ import {
   type ExternalAgentResult,
   type FindingStatusPatch,
   type GraphAnchor,
+  type InteractionModelCandidate,
   type MemoryRecord,
   type MemoryPatch,
   type MemorySuggestionPatch,
@@ -113,11 +118,95 @@ import { AgentLoop, persistRun, type AgentConversationMessage, type AgentRun, ty
 import { ToolRegistry } from "@praxis/tool-registry";
 import { registerAgentTools } from "@praxis/agent-loop/tools";
 import { startMcpServer } from "@praxis/mcp-server";
+import {
+  DESIGN_MAP_DOC_RELATIVE_PATH,
+  DESIGN_MAP_HTML_RELATIVE_PATH,
+  DESIGN_INTERACTION_MODEL_END,
+  DESIGN_INTERACTION_MODEL_START,
+  DESIGN_USE_CASE_DIAGRAMS_DIR_RELATIVE_PATH,
+  readProjectGitVersion,
+  readProjectSemanticVersion,
+  writeUseCaseDiagramDocuments,
+  writeUseCaseDiagramsMapDocument,
+  writeUseCaseDiagramsMapHtmlDocument,
+  type DesignVersionDecision
+} from "./design-documents.js";
+import {
+  designDrilldownIdPrefix,
+  designDrilldownKind,
+  emptyInteractionModelCandidate,
+  ensureUseCaseDrilldownDiagrams,
+  fallbackDrilldownMermaid,
+  normalizeInteractionModelCandidate,
+  normalizeUseCaseDrilldownCoverage,
+  normalizeUseCaseDrilldownExplanation,
+  parseInteractionModelCandidate
+} from "./interaction-model-normalizer.js";
+import { runDesignDiscoveryWorkflow } from "./design-discovery-workflow.js";
+import {
+  buildEngineeringComplexityModel,
+  ENGINEERING_ROOT_MAP_HTML_RELATIVE_PATH,
+  writeEngineeringComplexityDocuments
+} from "./engineering-documents.js";
+import {
+  ARCHITECTURE_C4_ROOT_MAP_HTML_RELATIVE_PATH,
+  buildArchitectureC4Model,
+  writeArchitectureC4Documents
+} from "./architecture-documents.js";
+import {
+  UML_MODEL_ROOT_HTML_RELATIVE_PATH,
+  buildUmlModelRegistry,
+  writeUmlModelRegistryDocuments
+} from "./model-documents.js";
+import {
+  buildCodeUnderstandingSpine,
+  codeUnderstandingSpineDigest,
+  writeCodeUnderstandingSpineDocuments
+} from "./code-understanding-spine.js";
+import {
+  PROJECT_OVERVIEW_DOC_RELATIVE_PATH,
+  PROJECT_TIMELINE_DOC_RELATIVE_PATH,
+  normalizeProjectOverviewDraft,
+  projectOverviewAgentPayload,
+  projectOverviewDocumentsExist,
+  readProjectOverviewSourceDocuments,
+  writeProjectOverviewDocuments
+} from "./project-overview-documents.js";
+import {
+  PROJECT_CHANGE_PLAN_DOC_RELATIVE_PATH,
+  PROJECT_CHANGE_PLAN_HTML_RELATIVE_PATH,
+  approveProjectChangePlan,
+  normalizeProjectChangePlanModel,
+  projectChangePlanAgentPayload,
+  readProjectChangePlan,
+  readProjectChangePlanSources,
+  reviewFindingChangeItemId,
+  upsertReviewFindingChangeItem,
+  writeProjectChangePlanDocuments
+} from "./project-change-plan-documents.js";
+import {
+  QUALITY_REVIEW_DOC_RELATIVE_PATH,
+  QUALITY_REVIEW_HTML_RELATIVE_PATH,
+  QUALITY_REVIEW_RUNTIME_LOG_DIR_RELATIVE_PATH,
+  QUALITY_REVIEW_RUNTIME_PROGRESS_RELATIVE_PATH,
+  isResolvedFindingStatus,
+  readQualityReviewDocumentModel,
+  writeQualityReviewDocuments
+} from "./quality-review-documents.js";
 
 type Args = Record<string, string | boolean>;
 type AgentEngineKind = "pi" | "legacy";
 type PiBuiltinToolName = "read" | "grep" | "find" | "ls" | "bash" | "edit" | "write";
 type PiThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+const DESIGN_DISCOVERY_PROGRESS_RELATIVE_PATH = ".distinction/runtime/design-discovery-progress.json";
+const MEMORY_RECORD_FILES = [
+  "facts.jsonl",
+  "inferences.jsonl",
+  "candidates.jsonl",
+  "confirmations.jsonl",
+  "decisions.jsonl",
+  "findings.jsonl"
+];
 
 interface JsonSchema<T> {
   parse(value: unknown): T;
@@ -136,6 +225,329 @@ interface CodingAgentResultInput {
   memorySuggestion?: string;
 }
 
+type DesignStoryIntakeIntent = "new_story" | "insufficient_story" | "not_new_story";
+type DesignDiagramDiscussionIntent = "explain" | "operate" | "propose_patch" | "out_of_scope" | "needs_selection";
+type EngineeringDiagramDiscussionIntent = "explain" | "drilldown" | "governance" | "out_of_scope" | "needs_selection";
+type ArchitectureDiagramDiscussionIntent = "explain" | "drilldown" | "boundary" | "out_of_scope" | "needs_selection";
+type ReviewFindingDiscussionIntent =
+  | "explain_review_finding"
+  | "create_project_change"
+  | "mark_finding_false_positive"
+  | "clarify_review_scope"
+  | "out_of_scope"
+  | "needs_selection";
+type DesignStoryRelationKind = Exclude<InteractionModelCandidate["relations"][number]["kind"], "actor_participates">;
+type UseCaseDrilldownDiagramKind = InteractionModelCandidate["useCaseDrilldowns"][number]["kind"];
+type UseCaseDrilldownCoverage = InteractionModelCandidate["useCaseDrilldowns"][number]["coverage"];
+type DesignVersionBump = "major" | "minor" | "patch" | "none";
+
+interface DesignStoryRelationInput {
+  kind: DesignStoryRelationKind;
+  targetTitle: string;
+  summary: string;
+}
+
+interface DesignStoryDrilldownDiagramInput {
+  kind: UseCaseDrilldownDiagramKind;
+  title: string;
+  summary: string;
+  coverage: UseCaseDrilldownCoverage;
+  explanation: InteractionModelCandidate["useCaseDrilldowns"][number]["explanation"];
+  mermaid?: string;
+  questions: string[];
+}
+
+interface DesignStoryCandidateInput {
+  title: string;
+  summary: string;
+  contextTitle: string;
+  contextSummary: string;
+  primaryActors: string[];
+  supportingActors: string[];
+  externalSystems: string[];
+  trigger?: string;
+  preconditions: string[];
+  mainSuccessScenario: string[];
+  alternativeFlows: string[];
+  failureFlows: string[];
+  postconditions: string[];
+  questions: string[];
+  relations: DesignStoryRelationInput[];
+  drilldownDiagrams: DesignStoryDrilldownDiagramInput[];
+}
+
+interface DesignStoryIntakeResult {
+  schemaVersion: "praxis.designStoryIntakeResult.v1";
+  intent: DesignStoryIntakeIntent;
+  accepted: boolean;
+  summary: string;
+  reason: string;
+  guidance: string;
+  missingParts: string[];
+  questions: string[];
+  stories: DesignStoryCandidateInput[];
+}
+
+interface DesignDiagramDiscussionResult {
+  schemaVersion: "praxis.designDiagramDiscussionResult.v1";
+  intent: DesignDiagramDiscussionIntent;
+  answer: string;
+  guidance: string;
+  referencedAnchors: string[];
+  suggestedOperations: string[];
+  affectedDocuments: DesignDiscussionAffectedDocument[];
+  documentEdits: DiagramDocumentEdit[];
+  risks: string[];
+  questions: string[];
+}
+
+interface DesignDiscussionAffectedDocument {
+  path: string;
+  kind: string;
+  reason: string;
+  update: "must_update" | "review" | "no_change";
+}
+
+interface EngineeringDiagramDiscussionResult {
+  schemaVersion: "praxis.engineeringDiagramDiscussionResult.v1";
+  intent: EngineeringDiagramDiscussionIntent;
+  answer: string;
+  guidance: string;
+  technicalPerspective: string;
+  referencedAnchors: string[];
+  suggestedDrilldowns: string[];
+  documentEdits: DiagramDocumentEdit[];
+  risks: string[];
+  questions: string[];
+}
+
+interface ArchitectureDiagramDiscussionResult {
+  schemaVersion: "praxis.architectureDiagramDiscussionResult.v1";
+  intent: ArchitectureDiagramDiscussionIntent;
+  answer: string;
+  guidance: string;
+  architecturePerspective: string;
+  referencedAnchors: string[];
+  suggestedDrilldowns: string[];
+  documentEdits: DiagramDocumentEdit[];
+  risks: string[];
+  questions: string[];
+}
+
+interface ReviewFindingDiscussionPlanAction {
+  shouldCreateOrUpdate: boolean;
+  reason: string;
+  expectedChangeSummary: string;
+}
+
+interface ReviewFindingStatusDecision {
+  shouldUpdate: boolean;
+  status: Extract<ReviewFinding["status"], "false_positive" | "needs_more_evidence">;
+  reason: string;
+  evidenceSummary: string;
+  updatedSuggestedAction: string;
+}
+
+interface ReviewFindingRegressionAction {
+  shouldCreate: boolean;
+  reason: string;
+  correctedUnderstanding: string;
+  affectedCategories: ReviewCategory[];
+  affectedFindingIds: string[];
+  recommendedReviewScope: string;
+}
+
+interface ReviewFindingDiscussionResult {
+  schemaVersion: "praxis.reviewFindingDiscussionResult.v1";
+  intent: ReviewFindingDiscussionIntent;
+  answer: string;
+  guidance: string;
+  referencedDocuments: string[];
+  planAction: ReviewFindingDiscussionPlanAction;
+  statusDecision: ReviewFindingStatusDecision;
+  regressionAction: ReviewFindingRegressionAction;
+  risks: string[];
+  questions: string[];
+}
+
+interface ReviewFindingDiscussionContext {
+  schemaVersion: "praxis.reviewFindingDiscussionContext.v1";
+  rootReviewPath: string;
+  rootReviewHtmlPath: string;
+  finding: ReviewFinding;
+  issueDocument?: {
+    docPath?: string;
+    htmlPath?: string;
+    excerpt: string;
+  };
+  categoryDocument?: {
+    category?: string;
+    docPath?: string;
+    htmlPath?: string;
+    excerpt: string;
+  };
+  rootReviewExcerpt: string;
+  projectChangePlan?: {
+    exists: boolean;
+    stale: boolean;
+    markdownRelativePath: string;
+    htmlRelativePath: string;
+    relatedChangeItemId: string;
+    relatedChangeItemStatus?: string;
+  };
+}
+
+type DiagramDocumentEditOperation = "replace_text" | "replace_between_markers" | "append_section" | "replace_document";
+type DiagramDocumentEditStatus = "applied" | "skipped" | "rejected" | "failed";
+
+interface DiagramDocumentEdit {
+  path: string;
+  operation: DiagramDocumentEditOperation;
+  reason: string;
+  oldText?: string;
+  newText?: string;
+  startMarker?: string;
+  endMarker?: string;
+  content?: string;
+  createIfMissing?: boolean;
+}
+
+interface DiagramDocumentEditResult {
+  path: string;
+  operation: DiagramDocumentEditOperation;
+  status: DiagramDocumentEditStatus;
+  changed: boolean;
+  message: string;
+  reason?: string;
+  bytesWritten?: number;
+}
+
+interface EngineeringDiagramDiscussionContext {
+  schemaVersion: "praxis.engineeringDiagramContext.v1";
+  rootMapPath: string;
+  currentDocumentPath: string;
+  currentDocumentTitle?: string;
+  currentDocumentHtmlExcerpt: string;
+  currentDocumentMarkdownExcerpt: string;
+  mapIndexExcerpt: string;
+  repositoryEvidence: DesignRepositoryEvidenceContext;
+  selectedAnchor?: unknown;
+}
+
+interface ArchitectureDiagramDiscussionContext {
+  schemaVersion: "praxis.architectureDiagramContext.v1";
+  rootMapPath: string;
+  currentDocumentPath: string;
+  currentDocumentTitle?: string;
+  currentDocumentHtmlExcerpt: string;
+  currentDocumentMarkdownExcerpt: string;
+  mapIndexExcerpt: string;
+  repositoryEvidence: DesignRepositoryEvidenceContext;
+  selectedAnchor?: unknown;
+}
+
+interface ScopedAgentConversationHistoryEntry {
+  id: string;
+  role: "user" | "assistant" | "system";
+  text: string;
+  timestamp: string;
+  scopeId: string;
+  scopeTitle: string;
+  scopeKind?: string;
+  contextTitle?: string;
+  contextPath?: string;
+  intent?: string;
+  status?: string;
+}
+
+interface DesignCurrentUmlContext {
+  id: string;
+  kind: string;
+  title: string;
+  summary?: string;
+  htmlPath: string;
+  markdownPath: string;
+  status?: string;
+  confidence?: string;
+  coverage?: unknown;
+  currentDocumentHtmlExcerpt: string;
+  currentDocumentMarkdownExcerpt: string;
+}
+
+interface DesignLinkedDocumentExcerpt {
+  path: string;
+  relationship: DesignLinkedDocumentContext["relationship"];
+  title: string;
+  kind: string;
+  markdownExcerpt: string;
+  htmlExcerpt: string;
+}
+
+interface DesignLinkedDocumentContext {
+  id: string;
+  kind: string;
+  title: string;
+  htmlPath?: string;
+  markdownPath?: string;
+  relationship: "current_uml" | "parent_use_case" | "sibling_uml" | "map_index";
+  updateReason: string;
+}
+
+interface DesignRepositoryEvidenceNode {
+  id: string;
+  kind: string;
+  name: string;
+  qualifiedName: string;
+  filePath: string;
+  range?: { startLine: number; endLine: number };
+  signature?: string;
+  docSummary?: string;
+  evidence: CodeFactEvidenceRef[];
+  matchReason: string;
+}
+
+interface DesignRepositoryEvidenceEdge {
+  id: string;
+  kind: string;
+  sourceId: string;
+  targetId: string;
+  filePath?: string;
+  evidence: CodeFactEvidenceRef[];
+}
+
+interface DesignRepositoryEvidenceFileExcerpt {
+  path: string;
+  reason: string;
+  excerpt: string;
+}
+
+interface DesignRepositoryEvidenceContext {
+  source: "local_code_facts" | "unavailable";
+  queryTerms: string[];
+  matchingNodes: DesignRepositoryEvidenceNode[];
+  relatedEdges: DesignRepositoryEvidenceEdge[];
+  fileExcerpts: DesignRepositoryEvidenceFileExcerpt[];
+  limitations: string[];
+}
+
+interface DesignDiagramDiscussionContext {
+  schemaVersion: "praxis.designDiagramContext.v1";
+  targetUseCase: InteractionModelCandidate["useCases"][number];
+  targetUseCaseDrilldowns: InteractionModelCandidate["useCaseDrilldowns"];
+  currentUml: DesignCurrentUmlContext;
+  linkedDocuments: DesignLinkedDocumentContext[];
+  linkedDocumentExcerpts: DesignLinkedDocumentExcerpt[];
+  repositoryEvidence: DesignRepositoryEvidenceContext;
+  context?: InteractionModelCandidate["contexts"][number];
+  contextUseCases: InteractionModelCandidate["useCases"];
+  actors: InteractionModelCandidate["actors"];
+  externalSystems: InteractionModelCandidate["externalSystems"];
+  relations: InteractionModelCandidate["relations"];
+  questions: InteractionModelCandidate["questions"];
+  selectedAnchor?: unknown;
+  sourceSpecPaths: string[];
+}
+
 async function main(argv: string[]): Promise<void> {
   const [command, ...rest] = argv;
   const args = parseArgs(rest);
@@ -145,13 +557,29 @@ async function main(argv: string[]): Promise<void> {
     if (command === "profile") return await commandProfile(args);
     if (command === "generate-graph") return await commandGenerateGraph(args);
     if (command === "intake") return await commandIntake(args);
+    if (command === "project:overview") return await commandProjectOverview(args);
+    if (command === "project:change-plan") return await commandProjectChangePlan(args);
+    if (command === "project:change-plan-discuss") return await commandProjectChangePlanDiscuss(args);
+    if (command === "project:change-plan:approve") return await commandProjectChangePlanApprove(args);
     if (command === "understand") return await commandUnderstand(args);
     if (command === "accept-understanding") return await commandAcceptUnderstanding(args);
     if (command === "model-architecture") return await commandModelArchitecture(args);
     if (command === "detect-findings") return await commandDetectFindings(args);
+    if (command === "code-understanding:spine") return await commandCodeUnderstandingSpine(args);
+    if (command === "design:discover") return await commandDesignDiscover(args);
+    if (command === "design:story-intake") return await commandDesignStoryIntake(args);
+    if (command === "design:diagram-discuss") return await commandDesignDiagramDiscuss(args);
+    if (command === "models:discover") return await commandModelsDiscover(args);
+    if (command === "engineering:discover") return await commandEngineeringDiscover(args);
+    if (command === "engineering:diagram-discuss") return await commandEngineeringDiagramDiscuss(args);
+    if (command === "architecture:discover") return await commandArchitectureDiscover(args);
+    if (command === "architecture:diagram-discuss") return await commandArchitectureDiagramDiscuss(args);
     if (command === "review-queue") return await commandReviewQueue(args);
+    if (command === "review-progress") return await commandReviewProgress(args);
     if (command === "review-run") return await commandReviewRun(args);
     if (command === "review-finding-refresh") return await commandReviewFindingRefresh(args);
+    if (command === "review-finding-plan") return await commandReviewFindingPlan(args);
+    if (command === "review:finding-discuss") return await commandReviewFindingDiscuss(args);
     if (command === "project-tree") return await commandProjectTree(args);
     if (command === "finding-audit") return await commandFindingAudit(args);
     if (command === "accept-external-result") return await commandAcceptExternalResult(args);
@@ -418,6 +846,7 @@ async function commandAgentRunLegacy(args: Args): Promise<void> {
   });
 
   const priorMessages = await readMessages(projectRoot, session.id);
+  const sharedConversationHistory = parseScopedAgentConversationHistory(stringArg(args, "conversation-history"));
 
   // Save user message to session first (so it appears in transcript)
   await appendMessage(projectRoot, {
@@ -440,7 +869,7 @@ async function commandAgentRunLegacy(args: Args): Promise<void> {
     instruction,
     graph,
     registry,
-    conversationHistory: chatHistoryForAgent(priorMessages),
+    conversationHistory: agentConversationHistoryForRuntime(sharedConversationHistory, priorMessages),
     maxToolCalls: mode === "explain" ? 18 : 24,
     onStep: async (step: AgentStep) => {
       if (step.kind === "tool_call") {
@@ -589,6 +1018,7 @@ async function commandAgentRunPi(args: Args): Promise<void> {
     mode: chatModeFromArgs(args)
   });
   const priorMessages = await readMessages(projectRoot, session.id);
+  const sharedConversationHistory = parseScopedAgentConversationHistory(stringArg(args, "conversation-history"));
 
   await appendMessage(projectRoot, {
     sessionId: session.id,
@@ -694,6 +1124,7 @@ async function commandAgentRunPi(args: Args): Promise<void> {
       mode,
       instruction,
       priorMessages,
+      sharedConversationHistory,
       args,
       traceId,
       onEvent: appendPiEvent
@@ -908,6 +1339,35 @@ function chatHistoryForAgent(messages: ChatMessage[]): AgentConversationMessage[
     .filter((message) => message.content.trim().length > 0);
 }
 
+function agentConversationHistoryForRuntime(
+  sharedHistory: ScopedAgentConversationHistoryEntry[],
+  sessionMessages: ChatMessage[]
+): AgentConversationMessage[] {
+  return [
+    ...scopedHistoryForAgent(sharedHistory),
+    ...chatHistoryForAgent(sessionMessages)
+  ].slice(-40);
+}
+
+function scopedHistoryForAgent(entries: ScopedAgentConversationHistoryEntry[]): AgentConversationMessage[] {
+  return entries.slice(-32).map((entry) => ({
+    role: entry.role,
+    content: scopedHistoryContent(entry)
+  })).filter((message) => message.content.trim().length > 0);
+}
+
+function scopedHistoryContent(entry: ScopedAgentConversationHistoryEntry): string {
+  const scope = [
+    entry.scopeKind ? `scope=${entry.scopeKind}` : "scope=global",
+    entry.scopeTitle,
+    entry.contextTitle,
+    entry.intent ? `intent=${entry.intent}` : undefined,
+    entry.status ? `status=${entry.status}` : undefined,
+    entry.contextPath ? `path=${entry.contextPath}` : undefined
+  ].filter(Boolean).join(" | ");
+  return [`[Shared Praxis agent history: ${scope}]`, entry.text].join("\n");
+}
+
 function chatHistoryContent(message: ChatMessage): string {
   const sections = [message.content];
   if (message.toolCall) {
@@ -935,6 +1395,7 @@ interface PiWorkerRunOptions {
   mode: "explain" | "plan";
   instruction: string;
   priorMessages: ChatMessage[];
+  sharedConversationHistory: ScopedAgentConversationHistoryEntry[];
   args: Args;
   traceId: string;
   onEvent?: (event: PiJsonEvent) => Promise<void> | void;
@@ -957,6 +1418,37 @@ interface PiWorkerRunResult {
 
 type PiJsonEvent = Record<string, unknown> & { type?: string };
 
+interface PiJsonWorkerLaunchOptions {
+  projectRoot: string;
+  args: Args;
+  mode: "explain" | "plan";
+  target: ChatTarget;
+  prompt: string;
+  thinking?: string;
+  timeoutMs: number;
+  tools?: string[];
+  onStart?: (metadata: {
+    route: { provider: string; model: string };
+    tools: string[];
+    diagnostics: string[];
+  }) => Promise<void> | void;
+  onJson?: (event: PiJsonEvent, assistantText?: string) => Promise<void> | void;
+}
+
+interface PiJsonWorkerLaunchResult {
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+  eventCount: number;
+  assistantText: string;
+  diagnostics: string[];
+  commandLine: string;
+  provider: string;
+  model: string;
+  modelRoute: string;
+  tools: string[];
+}
+
 interface PiRuntimeSettings {
   provider?: string;
   model?: string;
@@ -971,21 +1463,39 @@ interface PiRuntimeSettings {
   reviewTimeoutMs?: number;
 }
 
+const legacyDefaultPiTools = "read,grep,find,ls,codegraph_query,codegraph_context,codegraph_relations,bash,edit,write";
+const defaultPiTools = [
+  "praxis_status",
+  "praxis_context_packet",
+  "praxis_projection_views",
+  "praxis_code_facts",
+  "praxis_findings",
+  "read",
+  "grep",
+  "find",
+  "ls",
+  "bash",
+  "edit",
+  "write"
+].join(",");
+
 const defaultPiRuntimeSettings = {
   provider: "deepseek",
   model: "deepseek-v4-pro",
   thinking: "high",
-  tools: "read,grep,find,ls,codegraph_query,codegraph_context,codegraph_relations,bash,edit,write",
+  tools: defaultPiTools,
   codeGraph: true,
   allowRead: true,
   allowShell: true,
   allowWrite: true,
   timeoutMs: 300_000,
   reviewThinking: "high",
-  reviewTimeoutMs: 300_000
+  reviewTimeoutMs: 0
 } satisfies Required<PiRuntimeSettings>;
 
 const piCodeGraphTools = new Set(["codegraph_query", "codegraph_context", "codegraph_relations"]);
+const minimumPiNodeVersion = { major: 22, minor: 19, patch: 0 };
+const minimumPiNodeVersionLabel = `${minimumPiNodeVersion.major}.${minimumPiNodeVersion.minor}.${minimumPiNodeVersion.patch}`;
 
 interface PiReviewPromptRunInput {
   root: string;
@@ -1005,6 +1515,13 @@ interface ResolvedPiCli {
   diagnostics: string[];
 }
 
+interface ResolvedPiNode {
+  nodePath: string;
+  version: string;
+  source: string;
+  diagnostics: string[];
+}
+
 function resolveAgentEngineKind(args: Args): AgentEngineKind {
   const raw = String(args.engine ?? process.env.PRAXIS_AGENT_ENGINE ?? "pi").trim().toLowerCase();
   if (raw === "legacy" || raw === "praxis") return "legacy";
@@ -1013,13 +1530,53 @@ function resolveAgentEngineKind(args: Args): AgentEngineKind {
 }
 
 async function runPiWorker(options: PiWorkerRunOptions): Promise<PiWorkerRunResult> {
-  const piCli = await resolvePiCliPath(options.args);
-  const modelRoute = await resolvePiModelRoute(options.projectRoot, options.mode, options.target, options.args);
-  const tools = resolvePiToolAllowlist(options.args);
   const prompt = buildPiWorkerPrompt(options);
   const startedAt = Date.now();
-  const codeGraphExtension = isPiCodeGraphEnabled(options.args) ? resolvePiCodeGraphExtensionPath() : undefined;
-  let finalAssistantText = "";
+  const launched = await launchPiJsonWorker({
+    projectRoot: options.projectRoot,
+    args: options.args,
+    mode: options.mode,
+    target: options.target,
+    prompt,
+    timeoutMs: piTimeoutMsArg(options.args, ["pi-timeout-ms"], 180_000),
+    onJson: async (event) => {
+      await options.onEvent?.(event);
+    }
+  });
+
+  const cleanStdout = sanitizePiOutput(launched.assistantText);
+  const cleanStderr = sanitizePiOutput(launched.stderr);
+  if (launched.exitCode !== 0) {
+    const detail = [cleanStderr, cleanStdout, summarizeForRun(launched.stdout, 3000)].filter(Boolean).join("\n\n").trim();
+    throw new Error(formatPiFailureDetail(detail || `Pi exited with code ${launched.exitCode}.`, launched.diagnostics));
+  }
+  if (!cleanStdout.trim()) {
+    throw new Error(formatPiFailureDetail("Pi completed without producing an assistant response. The JSON event stream did not contain a final assistant message.", launched.diagnostics));
+  }
+
+  return {
+    stdout: cleanStdout,
+    stderr: cleanStderr,
+    exitCode: launched.exitCode,
+    durationMs: Date.now() - startedAt,
+    commandLine: launched.commandLine,
+    provider: launched.provider,
+    model: launched.model,
+    modelRoute: launched.modelRoute,
+    tools: launched.tools,
+    diagnostics: launched.diagnostics,
+    rawStdout: launched.stdout,
+    eventCount: launched.eventCount
+  };
+}
+
+async function launchPiJsonWorker(options: PiJsonWorkerLaunchOptions): Promise<PiJsonWorkerLaunchResult> {
+  const piCli = await resolvePiCliPath(options.args);
+  const piNode = await resolvePiNode(options.args);
+  const modelRoute = await resolvePiModelRoute(options.projectRoot, options.mode, options.target, options.args);
+  const tools = options.tools ?? resolvePiToolAllowlist(options.args);
+  const codeGraphExtension = shouldEnablePiCodeGraphExtension(options.args, tools) ? resolvePiCodeGraphExtensionPath() : undefined;
+  const praxisExtension = resolvePiPraxisExtensionPath();
   const piArgs = [
     piCli.cliPath,
     "--mode",
@@ -1029,62 +1586,54 @@ async function runPiWorker(options: PiWorkerRunOptions): Promise<PiWorkerRunResu
     "--model",
     modelRoute.model,
     "--thinking",
-    modelRoute.thinking,
+    options.thinking ?? modelRoute.thinking,
     "--system-prompt",
     piSystemPrompt(),
     "--no-session",
     "--no-extensions",
+    "--extension",
+    praxisExtension,
     ...(codeGraphExtension ? ["--extension", codeGraphExtension] : []),
     "--tools",
     tools.join(","),
     "-p",
-    prompt
+    options.prompt
   ];
 
   const env = await piWorkerEnv(options.projectRoot, modelRoute.provider);
   env.PRAXIS_PI_PROJECT_ROOT = options.projectRoot;
-  const diagnostics = piRuntimeDiagnostics(piCli, modelRoute, env);
-  let spawned: { stdout: string; stderr: string; exitCode: number; eventCount: number };
+  const diagnostics = piRuntimeDiagnostics(piCli, piNode, modelRoute, env);
+  await options.onStart?.({
+    route: modelRoute,
+    tools,
+    diagnostics
+  });
+  let assistantText = "";
   try {
-    spawned = await spawnStreamingJson(process.execPath, piArgs, {
+    const spawned = await spawnStreamingJson(piNode.nodePath, piArgs, {
       cwd: options.projectRoot,
       env,
-      timeoutMs: piTimeoutMsArg(options.args, ["pi-timeout-ms"], 180_000),
+      timeoutMs: options.timeoutMs,
       onJson: async (event) => {
         const eventAssistantText = piAssistantTextFromEvent(event);
-        if (eventAssistantText) finalAssistantText = eventAssistantText;
-        await options.onEvent?.(event);
+        if (eventAssistantText) assistantText = eventAssistantText;
+        await options.onJson?.(event, eventAssistantText);
       }
     });
+    return {
+      ...spawned,
+      assistantText,
+      diagnostics,
+      commandLine: renderCommandLine(piNode.nodePath, piArgs),
+      provider: modelRoute.provider,
+      model: modelRoute.model,
+      modelRoute: `${modelRoute.provider}/${modelRoute.model}`,
+      tools
+    };
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     throw new Error(formatPiFailureDetail(detail, diagnostics));
   }
-
-  const cleanStdout = sanitizePiOutput(finalAssistantText);
-  const cleanStderr = sanitizePiOutput(spawned.stderr);
-  if (spawned.exitCode !== 0) {
-    const detail = [cleanStderr, cleanStdout, summarizeForRun(spawned.stdout, 3000)].filter(Boolean).join("\n\n").trim();
-    throw new Error(formatPiFailureDetail(detail || `Pi exited with code ${spawned.exitCode}.`, diagnostics));
-  }
-  if (!cleanStdout.trim()) {
-    throw new Error(formatPiFailureDetail("Pi completed without producing an assistant response. The JSON event stream did not contain a final assistant message.", diagnostics));
-  }
-
-  return {
-    stdout: cleanStdout,
-    stderr: cleanStderr,
-    exitCode: spawned.exitCode,
-    durationMs: Date.now() - startedAt,
-    commandLine: renderCommandLine(process.execPath, piArgs),
-    provider: modelRoute.provider,
-    model: modelRoute.model,
-    modelRoute: `${modelRoute.provider}/${modelRoute.model}`,
-    tools,
-    diagnostics,
-    rawStdout: spawned.stdout,
-    eventCount: spawned.eventCount
-  };
 }
 
 async function resolvePiCliPath(args: Args): Promise<ResolvedPiCli> {
@@ -1131,6 +1680,130 @@ async function resolvePiCliPath(args: Args): Promise<ResolvedPiCli> {
   throw new Error(formatPiCliResolutionFailure(attempts));
 }
 
+async function resolvePiNode(args: Args): Promise<ResolvedPiNode> {
+  const argExplicit = stringArg(args, "pi-node");
+  if (argExplicit) {
+    return await resolveExplicitPiNode(argExplicit, "--pi-node");
+  }
+
+  const diagnostics: string[] = [];
+  const envExplicit = process.env.PRAXIS_PI_NODE_PATH ?? process.env.PRAXIS_RUNTIME_NODE_PATH;
+  if (envExplicit) {
+    const source = process.env.PRAXIS_PI_NODE_PATH ? "PRAXIS_PI_NODE_PATH" : "PRAXIS_RUNTIME_NODE_PATH";
+    const checked = await checkPiNodeCandidate(normalizeExecutableCandidate(envExplicit), source);
+    diagnostics.push(...checked.diagnostics);
+    if (checked.node) {
+      return {
+        ...checked.node,
+        diagnostics
+      };
+    }
+    diagnostics.push(`Pi Node environment candidate from ${source} was rejected; Praxis will continue with bundled/current runtime candidates.`);
+  }
+
+  for (const candidate of piNodeCandidatePaths()) {
+    const checked = await checkPiNodeCandidate(candidate, "bundled-runtime");
+    diagnostics.push(...checked.diagnostics);
+    if (checked.node) return { ...checked.node, diagnostics };
+  }
+
+  const current = await checkPiNodeCandidate(process.execPath, "current-runtime");
+  diagnostics.push(...current.diagnostics);
+  if (current.node) return { ...current.node, diagnostics };
+
+  throw new Error(formatPiNodeResolutionFailure(diagnostics));
+}
+
+async function resolveExplicitPiNode(raw: string, source: string): Promise<ResolvedPiNode> {
+  const nodePath = normalizeExecutableCandidate(raw);
+  const checked = await checkPiNodeCandidate(nodePath, source);
+  if (checked.node) {
+    return {
+      ...checked.node,
+      diagnostics: [`Pi Node resolved from ${source}: ${nodePath}`, ...checked.diagnostics]
+    };
+  }
+  throw new Error(formatPiNodeResolutionFailure([`Explicit Pi Node from ${source} is not usable: ${nodePath}`, ...checked.diagnostics]));
+}
+
+function piNodeCandidatePaths(): string[] {
+  const home = os.homedir();
+  const candidates = [
+    path.join(home, ".cache", "codex-runtimes", "codex-primary-runtime", "dependencies", "node", "bin", process.platform === "win32" ? "node.exe" : "node"),
+    path.join(home, ".cache", "codex-runtimes", "codex-primary-runtime", "dependencies", "node", process.platform === "win32" ? "node.exe" : "node")
+  ];
+  return Array.from(new Set(candidates));
+}
+
+async function checkPiNodeCandidate(nodePath: string, source: string): Promise<{ node?: ResolvedPiNode; diagnostics: string[] }> {
+  const diagnostics: string[] = [];
+  if (!isCommandName(nodePath) && !(await exists(nodePath))) {
+    diagnostics.push(`Pi Node candidate skipped (${source}): ${nodePath} does not exist.`);
+    return { diagnostics };
+  }
+  const version = nodeVersion(nodePath);
+  if (!version) {
+    diagnostics.push(`Pi Node candidate skipped (${source}): ${nodePath} could not report a Node version.`);
+    return { diagnostics };
+  }
+  if (!isPiNodeVersionCompatible(version)) {
+    diagnostics.push(`Pi Node candidate skipped (${source}): ${nodePath} reports ${version}, but Pi requires Node ${minimumPiNodeVersionLabel} or newer.`);
+    return { diagnostics };
+  }
+  diagnostics.push(`Pi Node candidate accepted (${source}): ${nodePath} (${version}).`);
+  return {
+    node: {
+      nodePath,
+      version,
+      source,
+      diagnostics: []
+    },
+    diagnostics
+  };
+}
+
+function normalizeExecutableCandidate(raw: string): string {
+  const trimmed = raw.trim();
+  if (isCommandName(trimmed)) return trimmed;
+  return path.resolve(trimmed);
+}
+
+function isCommandName(value: string): boolean {
+  return Boolean(value) && !path.isAbsolute(value) && !value.includes("/") && !value.includes("\\");
+}
+
+function nodeVersion(nodePath: string): string | undefined {
+  const result = spawnSync(nodePath, ["-v"], { encoding: "utf8", windowsHide: true });
+  if (result.error || result.status !== 0) return undefined;
+  const version = `${result.stdout ?? ""}${result.stderr ?? ""}`.trim().split(/\s+/)[0];
+  return /^v\d+\.\d+\.\d+$/.test(version) ? version : undefined;
+}
+
+function isPiNodeVersionCompatible(version: string): boolean {
+  const match = /^v(\d+)\.(\d+)\.(\d+)$/.exec(version);
+  if (!match) return false;
+  const major = Number(match[1]);
+  const minor = Number(match[2]);
+  const patch = Number(match[3]);
+  if (!Number.isFinite(major) || !Number.isFinite(minor) || !Number.isFinite(patch)) return false;
+  if (major !== minimumPiNodeVersion.major) return major > minimumPiNodeVersion.major;
+  if (minor !== minimumPiNodeVersion.minor) return minor > minimumPiNodeVersion.minor;
+  return patch >= minimumPiNodeVersion.patch;
+}
+
+function formatPiNodeResolutionFailure(diagnostics: string[]): string {
+  return [
+    "Pi engine is unavailable because Praxis could not find a compatible Node.js runtime for the Pi coding agent.",
+    "",
+    `The installed Pi dependency declares Node >=${minimumPiNodeVersionLabel}. Older Node versions can fail while loading Pi dependencies before the evaluator starts.`,
+    "",
+    "Diagnostics:",
+    ...diagnostics.map((line) => `- ${line}`),
+    "",
+    "Recovery: set PRAXIS_PI_NODE_PATH to a compatible node.exe, or install a newer Node.js runtime."
+  ].join("\n");
+}
+
 async function resolvePiModelRoute(projectRoot: string, mode: "explain" | "plan", target: ChatTarget, args: Args) {
   const settings = await loadPiRuntimeSettings();
   const provider = stringArg(args, "pi-provider") ?? process.env.PRAXIS_PI_PROVIDER ?? settings.provider ?? "deepseek";
@@ -1150,11 +1823,48 @@ async function resolvePiModelRoute(projectRoot: string, mode: "explain" | "plan"
 
 function resolvePiToolAllowlist(args: Args): string[] {
   const settings = loadPiRuntimeSettingsSync();
-  const raw = stringArg(args, "pi-tools") ?? process.env.PRAXIS_PI_TOOLS ?? settings.tools;
+  const raw = normalizePiToolsSetting(stringArg(args, "pi-tools") ?? process.env.PRAXIS_PI_TOOLS ?? settings.tools);
   const tools = normalizePiToolList(raw, isPiCodeGraphEnabled(args));
   const denied = deniedPiTools(tools, settings);
   if (denied.length) throw new Error(`Pi tool allowlist includes disabled tool(s): ${denied.join(", ")}. Enable the matching Pi permission in Model Settings first.`);
   return tools.length ? tools : normalizePiToolList(defaultPiRuntimeSettings.tools, false);
+}
+
+const reviewPiToolAllowlist = new Set([
+  "praxis_status",
+  "praxis_context_packet",
+  "praxis_projection_views",
+  "praxis_code_facts",
+  "praxis_findings",
+  "read",
+  "grep",
+  "find",
+  "ls",
+  "codegraph_query",
+  "codegraph_context",
+  "codegraph_relations"
+]);
+
+function resolvePiReviewToolAllowlist(args: Args): string[] {
+  const requested = resolvePiToolAllowlist(args).filter((tool) => reviewPiToolAllowlist.has(tool));
+  if (requested.length) return requested;
+  return normalizePiToolList(
+    [
+      "praxis_status",
+      "praxis_context_packet",
+      "praxis_code_facts",
+      "read",
+      "grep",
+      "find",
+      "ls",
+      "codegraph_context"
+    ].join(","),
+    isPiCodeGraphEnabled(args)
+  ).filter((tool) => reviewPiToolAllowlist.has(tool));
+}
+
+function shouldEnablePiCodeGraphExtension(args: Args, tools: string[]): boolean {
+  return isPiCodeGraphEnabled(args) && tools.some((tool) => piCodeGraphTools.has(tool));
 }
 
 function isPiCodeGraphEnabled(args: Args): boolean {
@@ -1168,6 +1878,10 @@ function resolvePiCodeGraphExtensionPath(): string {
   return path.join(path.dirname(fileURLToPath(import.meta.url)), "pi-codegraph-extension.js");
 }
 
+function resolvePiPraxisExtensionPath(): string {
+  return path.join(path.dirname(fileURLToPath(import.meta.url)), "pi-praxis-extension.js");
+}
+
 function piCliCandidatePaths(): string[] {
   const runtimeDir = path.dirname(fileURLToPath(import.meta.url));
   const cwd = process.cwd();
@@ -1179,17 +1893,22 @@ function piCliCandidatePaths(): string[] {
   return Array.from(new Set(candidates));
 }
 
-function piRuntimeDiagnostics(piCli: ResolvedPiCli, route: { provider: string; model: string }, env: NodeJS.ProcessEnv): string[] {
+function piRuntimeDiagnostics(piCli: ResolvedPiCli, piNode: ResolvedPiNode, route: { provider: string; model: string }, env: NodeJS.ProcessEnv): string[] {
   const provider = route.provider;
   const providerKey = provider.toUpperCase().replace(/[^A-Z0-9]+/g, "_");
   const providerEnv = `${providerKey}_API_KEY`;
   return [
     ...piCli.diagnostics,
+    ...piNode.diagnostics,
     `Pi CLI source: ${piCli.source}`,
+    `Pi Node source: ${piNode.source}`,
+    `Pi Node executable: ${piNode.nodePath}`,
+    `Pi Node version: ${piNode.version}`,
     `Pi provider: ${provider}`,
     `Pi model: ${route.model}`,
-    `Node executable: ${process.execPath}`,
-    `Node version: ${process.version}`,
+    `Pi Praxis MCP bridge: enabled`,
+    `Runtime Node executable: ${process.execPath}`,
+    `Runtime Node version: ${process.version}`,
     `${providerEnv}: ${env[providerEnv] ? "present" : "missing"}`,
     `PI_OFFLINE: ${env.PI_OFFLINE ?? "unset"}`,
     `PI_TELEMETRY: ${env.PI_TELEMETRY ?? "unset"}`
@@ -1227,7 +1946,9 @@ function piSystemPrompt(): string {
     "You are Pi running as Praxis Studio's Agent Engine / Coding Worker.",
     "",
     "Praxis owns project graph, project memory, trace, progress, and permissions.",
-    "Use the enabled tools to inspect the repository as needed. Do not pretend a tool was used.",
+    "Use enabled praxis_* tools first when a task is graph-, memory-, finding-, design-, or anchor-scoped; they provide compact Praxis-owned context.",
+    "Use repository tools such as read/grep/find/ls and repository evidence tools after Praxis context has narrowed the scope, or when Praxis context is missing.",
+    "Do not pretend a tool was used.",
     "Do not expose private chain-of-thought. User-visible progress should be observable actions, tool calls, and concise status.",
     "Answer in the user's language unless they explicitly request another language.",
     "Treat repository observations as FACT. Treat conclusions as CANDIDATE/INFERENCE until Praxis/user confirms them.",
@@ -1290,19 +2011,33 @@ function requireNodeFsReadFileSync(filePath: string): string {
 function normalizePiRuntimeSettings(settings: Record<string, unknown>): PiRuntimeSettings {
   const thinking = piThinkingSetting(settings.piThinking);
   const reviewThinking = piThinkingSetting(settings.reviewPiThinking);
+  const reviewTimeoutMs = reviewPiTimeoutSetting(settings.reviewPiTimeoutMs);
   return {
     provider: stringValue(settings.piProvider) ?? defaultPiRuntimeSettings.provider,
     model: stringValue(settings.piModel) ?? defaultPiRuntimeSettings.model,
     thinking: thinking ?? defaultPiRuntimeSettings.thinking,
-    tools: stringValue(settings.piTools) ?? defaultPiRuntimeSettings.tools,
+    tools: normalizePiToolsSetting(settings.piTools),
     codeGraph: booleanValue(settings.piCodeGraph) ?? defaultPiRuntimeSettings.codeGraph,
     allowRead: booleanValue(settings.piAllowRead) ?? defaultPiRuntimeSettings.allowRead,
     allowShell: booleanValue(settings.piAllowShell) ?? defaultPiRuntimeSettings.allowShell,
     allowWrite: booleanValue(settings.piAllowWrite) ?? defaultPiRuntimeSettings.allowWrite,
     timeoutMs: positiveNumberValue(settings.piTimeoutMs) ?? defaultPiRuntimeSettings.timeoutMs,
     reviewThinking: reviewThinking ?? defaultPiRuntimeSettings.reviewThinking,
-    reviewTimeoutMs: positiveNumberValue(settings.reviewPiTimeoutMs) ?? defaultPiRuntimeSettings.reviewTimeoutMs
+    reviewTimeoutMs
   };
+}
+
+function reviewPiTimeoutSetting(value: unknown): number {
+  const parsed = typeof value === "number" ? value : typeof value === "string" && value.trim() ? Number(value) : undefined;
+  if (parsed === undefined || !Number.isFinite(parsed)) return defaultPiRuntimeSettings.reviewTimeoutMs;
+  if (parsed === 300_000) return defaultPiRuntimeSettings.reviewTimeoutMs;
+  return parsed > 0 ? parsed : 0;
+}
+
+function normalizePiToolsSetting(value: unknown): string {
+  const raw = stringValue(value);
+  if (!raw) return defaultPiRuntimeSettings.tools;
+  return raw === legacyDefaultPiTools ? defaultPiRuntimeSettings.tools : raw;
 }
 
 function normalizePiToolList(raw: string | undefined, includeCodeGraph: boolean): string[] {
@@ -1318,6 +2053,11 @@ function normalizePiToolList(raw: string | undefined, includeCodeGraph: boolean)
     seen.add(tool);
     normalized.push(tool);
   }
+  if (includeCodeGraph) {
+    for (const tool of piCodeGraphTools) {
+      if (!seen.has(tool)) normalized.push(tool);
+    }
+  }
   return normalized;
 }
 
@@ -1325,9 +2065,30 @@ function deniedPiTools(tools: string[], settings: PiRuntimeSettings): string[] {
   const allowRead = settings.allowRead !== false;
   const allowShell = settings.allowShell === true;
   const allowWrite = settings.allowWrite === true;
-  const readTools = new Set(["read", "grep", "find", "ls", "codegraph_query", "codegraph_context", "codegraph_relations"]);
+  const readTools = new Set([
+    "read",
+    "grep",
+    "find",
+    "ls",
+    "codegraph_query",
+    "codegraph_context",
+    "codegraph_relations",
+    "praxis_status",
+    "praxis_project_profile",
+    "praxis_code_facts",
+    "praxis_callers",
+    "praxis_callees",
+    "praxis_impact",
+    "praxis_findings",
+    "praxis_finding_audit",
+    "praxis_projection_views",
+    "praxis_context_packet",
+    "praxis_explain_anchor"
+  ]);
+  const governedWriteTools = new Set(["praxis_plan_from_finding", "praxis_generate_task", "praxis_record_external_result"]);
   return tools.filter((tool) => {
     if (readTools.has(tool)) return !allowRead;
+    if (governedWriteTools.has(tool)) return !allowWrite;
     if (tool === "bash") return !allowShell;
     if (tool === "edit" || tool === "write") return !allowWrite;
     return false;
@@ -1369,6 +2130,7 @@ function piTimeoutMsArg(args: Args, keys: string[], fallbackMs: number): number 
   for (const key of keys) {
     const parsed = numberArg(args, key);
     if (parsed === undefined) continue;
+    if (parsed === 0) return 0;
     if (parsed < 1_000) throw new Error(`Invalid timeout for --${key}: ${parsed}. Timeout must be at least 1000ms.`);
     return parsed;
   }
@@ -1403,7 +2165,7 @@ async function piWorkerEnv(projectRoot: string, provider: string): Promise<NodeJ
 function buildPiWorkerPrompt(options: PiWorkerRunOptions): string {
   const targetSummary = describeChatTarget(options.graph, options.target);
   const graphSummary = summarizeGraphForWorker(options.graph, options.target);
-  const history = summarizeChatHistoryForWorker(options.priorMessages);
+  const history = summarizeAgentHistoryForWorker(options.sharedConversationHistory, options.priorMessages);
   const enabledTools = resolvePiToolAllowlist(options.args);
   const canShell = enabledTools.includes("bash");
   const canWrite = enabledTools.includes("edit") || enabledTools.includes("write");
@@ -1421,11 +2183,12 @@ function buildPiWorkerPrompt(options: PiWorkerRunOptions): string {
       : "- Do not write, edit, delete, move, or generate files in this run because write tools are not enabled.",
     canShell
       ? "- Shell is enabled by Praxis settings for this run. Use it when it is the right tool; keep commands scoped to the project and report important output."
-      : "- Do not run shell commands because bash is not enabled. Use only the enabled read/codegraph tools.",
+      : "- Do not run shell commands because bash is not enabled. Use only the enabled read and repository evidence tools.",
     "- Treat direct repository observations as FACT evidence. Treat your conclusions as CANDIDATE or INFERENCE until Praxis/user confirms them.",
     "- Existing source code must only be modified in response to an explicit user implementation/fix request and only through enabled tools.",
-    "- CodeGraph tools are optional read-only context tools. If CodeGraph reports an uninitialized index, fall back to read/grep/find.",
-    `- Enabled tools for this run: ${enabledTools.join(", ") || "(none)"}.`,
+    "- Prefer praxis_context_packet, praxis_projection_views, praxis_code_facts, and praxis_findings before broad read/grep when the selected target has an anchor or known Praxis memory.",
+    "- Repository evidence tools are optional read-only context tools. If the repository evidence index is unavailable, fall back to read/grep/find.",
+    `- Enabled repository tool families for this run: ${enabledTools.some((tool) => piCodeGraphTools.has(tool)) ? "Praxis context, file search, repository evidence" : "Praxis context, file search"}.`,
     "- Answer in the user's language.",
     "",
     "## Current Praxis Target",
@@ -1441,6 +2204,30 @@ function buildPiWorkerPrompt(options: PiWorkerRunOptions): string {
     "User instruction:",
     options.instruction
   ].filter(Boolean).join("\n");
+}
+
+function summarizeAgentHistoryForWorker(
+  sharedHistory: ScopedAgentConversationHistoryEntry[],
+  sessionMessages: ChatMessage[]
+): string {
+  const shared = sharedHistory
+    .slice(-24)
+    .map((entry) => `${entry.role} [${sharedHistoryLabel(entry)}]: ${entry.text.slice(0, 1200)}`);
+  const session = summarizeChatHistoryForWorker(sessionMessages);
+  return [
+    shared.length ? ["Shared global Praxis agent history:", ...shared].join("\n\n") : "",
+    session ? `Current Praxis Assistant session transcript:\n${session}` : ""
+  ].filter(Boolean).join("\n\n");
+}
+
+function sharedHistoryLabel(entry: ScopedAgentConversationHistoryEntry): string {
+  return [
+    entry.scopeKind || "global",
+    entry.scopeTitle,
+    entry.contextTitle,
+    entry.intent ? `intent=${entry.intent}` : undefined,
+    entry.status ? `status=${entry.status}` : undefined
+  ].filter(Boolean).join(" | ");
 }
 
 function describeChatTarget(graph: DevelopmentGraph, target: ChatTarget): string {
@@ -1493,7 +2280,7 @@ function summarizeGraphForWorker(graph: DevelopmentGraph, target: ChatTarget): s
     `Nodes: ${graph.nodes.length}; Edges: ${graph.edges.length}`,
     nodes.length ? ["Selected/nearby nodes:", ...nodes].join("\n") : undefined,
     edges.length ? ["Selected/nearby edges:", ...edges].join("\n") : undefined,
-    "This graph hint is not a complete context packet. Explore the repository yourself when needed."
+    "This graph hint is not a complete context packet. Use praxis_context_packet or other praxis_* tools first when a concrete anchor is available, then explore the repository only for missing evidence."
   ].filter(Boolean).join("\n");
 }
 
@@ -1598,11 +2385,13 @@ function spawnBuffered(
     let stdout = "";
     let stderr = "";
     let settled = false;
-    const timeout = setTimeout(() => {
-      settled = true;
-      child.kill();
-      reject(new Error(`Pi worker timed out after ${Math.round(options.timeoutMs / 1000)} seconds.`));
-    }, options.timeoutMs);
+    const timeout = options.timeoutMs > 0
+      ? setTimeout(() => {
+        settled = true;
+        child.kill();
+        reject(new Error(`Pi worker timed out after ${Math.round(options.timeoutMs / 1000)} seconds.`));
+      }, options.timeoutMs)
+      : undefined;
     child.stdout?.setEncoding("utf8");
     child.stderr?.setEncoding("utf8");
     child.stdout?.on("data", (chunk) => {
@@ -1614,13 +2403,13 @@ function spawnBuffered(
     child.on("error", (error) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timeout);
+      if (timeout) clearTimeout(timeout);
       reject(error);
     });
     child.on("close", (code) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timeout);
+      if (timeout) clearTimeout(timeout);
       resolve({ stdout, stderr, exitCode: code ?? 1 });
     });
   });
@@ -1644,11 +2433,13 @@ function spawnStreamingJson(
     let eventCount = 0;
     let callbackChain = Promise.resolve();
     let settled = false;
-    const timeout = setTimeout(() => {
-      settled = true;
-      child.kill();
-      reject(new Error(`Pi worker timed out after ${Math.round(options.timeoutMs / 1000)} seconds.`));
-    }, options.timeoutMs);
+    const timeout = options.timeoutMs > 0
+      ? setTimeout(() => {
+        settled = true;
+        child.kill();
+        reject(new Error(`Pi worker timed out after ${Math.round(options.timeoutMs / 1000)} seconds.`));
+      }, options.timeoutMs)
+      : undefined;
     const handleLine = (line: string) => {
       const trimmed = line.trim();
       if (!trimmed) return;
@@ -1676,13 +2467,13 @@ function spawnStreamingJson(
     child.on("error", (error) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timeout);
+      if (timeout) clearTimeout(timeout);
       reject(error);
     });
     child.on("close", (code) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timeout);
+      if (timeout) clearTimeout(timeout);
       if (lineBuffer.trim()) handleLine(lineBuffer);
       callbackChain
         .then(() => resolve({ stdout, stderr, exitCode: code ?? 1, eventCount }))
@@ -3060,7 +3851,18 @@ function slug(value: string): string {
 }
 
 function safeFilePart(value: string): string {
-  return value.replace(/[^A-Za-z0-9_.-]+/g, "-").replace(/^-|-$/g, "") || "TASK-result";
+  return value.replace(/[^A-Za-z0-9_.-]+/g, "-").replace(/^-|-$/g, "") || "candidate-finding";
+}
+
+function safeReviewIdPart(value: string): string {
+  return value
+    .trim()
+    .replace(/[<>:"/\\|?*\u0000-\u001f]+/g, "-")
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 96)
+    || "候选问题";
 }
 
 async function commandCreateProject(args: Args): Promise<void> {
@@ -3169,6 +3971,116 @@ async function callProjectCreationAgent(
   });
   const parsed = safeJson(response.content);
   return isRecord(parsed) ? parsed : undefined;
+}
+
+async function callProjectOverviewAgent(root: string, payload: Record<string, unknown>): Promise<Record<string, unknown> | undefined> {
+  const config = await loadModelConfig(root);
+  const route = resolveModelRoute(config, "project.overview.generate");
+  const providerConfig = config.providers[route.provider];
+  const provider = createProvider(route.provider, {
+    apiKey: providerConfig?.apiKey,
+    apiKeyEnv: providerConfig?.apiKeyEnv,
+    baseUrl: providerConfig?.baseUrl
+  });
+  const response = await provider.call({
+    route,
+    responseFormat: "json",
+    messages: [
+      { role: "system", content: getPrompt("project-overview-discovery", { overrideDirs: reviewPromptOverrideDirs(root) }).body },
+      { role: "user", content: JSON.stringify(payload, null, 2) }
+    ]
+  });
+  const parsed = safeJson(response.content);
+  return isRecord(parsed) ? parsed : undefined;
+}
+
+async function callProjectChangePlanAgent(root: string, payload: Record<string, unknown>): Promise<Record<string, unknown> | undefined> {
+  const config = await loadModelConfig(root);
+  const route = resolveModelRoute(config, "project.change_plan.generate");
+  const providerConfig = config.providers[route.provider];
+  const provider = createProvider(route.provider, {
+    apiKey: providerConfig?.apiKey,
+    apiKeyEnv: providerConfig?.apiKeyEnv,
+    baseUrl: providerConfig?.baseUrl
+  });
+  const response = await provider.call({
+    route,
+    responseFormat: "json",
+    messages: [
+      { role: "system", content: getPrompt("project-change-plan", { overrideDirs: reviewPromptOverrideDirs(root) }).body },
+      { role: "user", content: JSON.stringify(payload, null, 2) }
+    ]
+  });
+  const parsed = safeJson(response.content);
+  return isRecord(parsed) ? parsed : undefined;
+}
+
+function requireProjectChangePlanAgentOutput(output: Record<string, unknown> | undefined): Record<string, unknown> {
+  if (!output) {
+    throw new Error("Project Change Plan Agent did not return JSON; refusing to write a generated plan.");
+  }
+  const changeItems = Array.isArray(output.changeItems) ? output.changeItems.filter(isRecord) : [];
+  const developmentPlan = Array.isArray(output.developmentPlan) ? output.developmentPlan.filter(isRecord) : [];
+  if (!changeItems.length) {
+    throw new Error("Project Change Plan Agent returned no changeItems; refusing to write a fallback/mock plan.");
+  }
+  if (!developmentPlan.length) {
+    throw new Error("Project Change Plan Agent returned no developmentPlan; refusing to write a fallback/mock plan.");
+  }
+  if (!isRecord(output.expectedChangelog)) {
+    throw new Error("Project Change Plan Agent returned no expectedChangelog; refusing to write a fallback/mock plan.");
+  }
+  for (const task of developmentPlan) {
+    validateProjectChangePlanTaskPackage(task);
+  }
+  return output;
+}
+
+function validateProjectChangePlanTaskPackage(task: Record<string, unknown>): void {
+  const title = typeof task.title === "string" && task.title.trim() ? task.title.trim() : String(task.id ?? "unknown task");
+  if (!isRecord(task.implementationBrief)) {
+    throw new Error(`Project Change Plan task "${title}" has no implementationBrief; refusing to write a non-actionable plan.`);
+  }
+  if (!isRecord(task.workset)) {
+    throw new Error(`Project Change Plan task "${title}" has no workset; refusing to write a non-actionable plan.`);
+  }
+  const brief = task.implementationBrief;
+  const workset = task.workset;
+  for (const field of ["objective", "currentBehavior", "targetBehavior", "approach", "rollbackPlan"]) {
+    if (!nonEmptyPlanString(brief[field])) {
+      throw new Error(`Project Change Plan task "${title}" implementationBrief.${field} is empty.`);
+    }
+  }
+  for (const field of ["readFiles", "relatedDocs", "contextNotes"]) {
+    if (!nonEmptyPlanStringArray(workset[field])) {
+      throw new Error(`Project Change Plan task "${title}" workset.${field} is empty; task package is not enough for implementation.`);
+    }
+  }
+  const phase = typeof task.phase === "string" ? task.phase : "plan";
+  if ((phase === "code" || phase === "test" || phase === "review") && !nonEmptyPlanStringArray(task.acceptance)) {
+    throw new Error(`Project Change Plan task "${title}" has no concrete acceptance criteria.`);
+  }
+  if ((phase === "code" || phase === "test" || phase === "review") && !nonEmptyAcceptanceEvidence(task.acceptanceEvidence)) {
+    throw new Error(`Project Change Plan task "${title}" has no acceptanceEvidence.`);
+  }
+  if (phase === "code" && !nonEmptyPlanStringArray(workset.writeFiles)) {
+    throw new Error(`Project Change Plan code task "${title}" has no workset.writeFiles; refusing to write an unbounded implementation task.`);
+  }
+}
+
+function nonEmptyPlanString(value: unknown): boolean {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function nonEmptyPlanStringArray(value: unknown): boolean {
+  return Array.isArray(value) && value.some((item) => typeof item === "string" && item.trim().length > 0);
+}
+
+function nonEmptyAcceptanceEvidence(value: unknown): boolean {
+  return Array.isArray(value) && value.some((item) => {
+    if (!isRecord(item)) return false;
+    return nonEmptyPlanString(item.description) && nonEmptyPlanString(item.expectedResult);
+  });
 }
 
 function normalizeRequirements(value: unknown[], fallback: NewProjectPlan["requirements"]): NewProjectPlan["requirements"] {
@@ -3434,78 +4346,4320 @@ async function commandDetectFindings(args: Args): Promise<void> {
   });
 }
 
+async function buildAndWriteCodeUnderstandingSpineForCodeFacts(
+  root: string,
+  codeFacts: CodeFactGraphSnapshot,
+  generatedAt = new Date().toISOString()
+) {
+  const spine = buildCodeUnderstandingSpine(root, codeFacts, generatedAt);
+  const documents = await writeCodeUnderstandingSpineDocuments(root, spine);
+  return { spine, documents };
+}
+
+async function commandCodeUnderstandingSpine(args: Args): Promise<void> {
+  const root = path.resolve(required(args, "root"));
+  const generatedAt = new Date().toISOString();
+  const codeFacts = args["code-facts"]
+    ? await readJsonWithSchema(String(args["code-facts"]), CodeFactGraphSnapshotSchema)
+    : await readOrBuildCodeFacts(root, args);
+  const { spine, documents } = await buildAndWriteCodeUnderstandingSpineForCodeFacts(root, codeFacts, generatedAt);
+  outputJson({
+    ok: true,
+    root,
+    generatedAt,
+    markdownPath: projectRelativePath(root, documents.markdownPath),
+    jsonPath: projectRelativePath(root, documents.jsonPath),
+    summary: spine.summary,
+    source: spine.source
+  });
+}
+
+async function commandProjectOverview(args: Args): Promise<void> {
+  const root = path.resolve(required(args, "root"));
+  const generatedAt = new Date().toISOString();
+  const force = args.force === true;
+  const existsAlready = await projectOverviewDocumentsExist(root);
+  if (existsAlready && !force) {
+    outputJson({
+      ok: true,
+      root,
+      skipped: true,
+      reason: "Project overview documents already exist. Use --force to regenerate.",
+      overviewPath: path.join(root, PROJECT_OVERVIEW_DOC_RELATIVE_PATH),
+      timelinePath: path.join(root, PROJECT_TIMELINE_DOC_RELATIVE_PATH)
+    });
+    return;
+  }
+
+  const sources = await readProjectOverviewSourceDocuments(root);
+  const agentPayload = projectOverviewAgentPayload(root, generatedAt, sources);
+  const draftRaw = await callProjectOverviewAgent(root, agentPayload);
+  const draft = normalizeProjectOverviewDraft(draftRaw, root, generatedAt, sources);
+  const documents = await writeProjectOverviewDocuments(root, draft, generatedAt);
+
+  await appendChange(root, {
+    title: "Project overview documents generated",
+    summary: `Generated ${documents.overviewRelativePath} and ${documents.timelineRelativePath} from docs-backed project sources.`,
+    kind: "CANDIDATE"
+  }).catch(() => undefined);
+  await appendTrace(root, {
+    id: `trace-event:project-overview:${Date.now()}`,
+    traceId: `trace:project-overview:${Date.now()}`,
+    timestamp: generatedAt,
+    kind: "project.overview.generated",
+    target: { type: "project", id: "project:root" },
+    summary: "Project Overview Agent generated docs-backed project overview documents.",
+    data: {
+      overviewPath: documents.overviewRelativePath,
+      timelinePath: documents.timelineRelativePath,
+      sourceDocuments: draft.sourceDocuments
+    }
+  } satisfies TraceRecord).catch(() => undefined);
+
+  outputJson({
+    ok: true,
+    root,
+    skipped: false,
+    overviewPath: documents.overviewPath,
+    timelinePath: documents.timelinePath,
+    overviewRelativePath: documents.overviewRelativePath,
+    timelineRelativePath: documents.timelineRelativePath,
+    sourceDocuments: draft.sourceDocuments,
+    currentState: draft.currentState,
+    timelineItems: draft.timeline.length,
+    progressItems: draft.progress.length,
+    risks: draft.risks.length
+  });
+}
+
+async function commandProjectChangePlan(args: Args): Promise<void> {
+  const root = path.resolve(required(args, "root"));
+  const readOnly = args["read-only"] === true;
+  const force = args.force === true || args.refresh === true;
+  const existing = await readProjectChangePlan(root);
+  if (readOnly) {
+    outputJson({
+      ok: true,
+      root,
+      ...existing
+    });
+    return;
+  }
+  if (existing.exists && !existing.stale && !force) {
+    outputJson({
+      ok: true,
+      root,
+      skipped: true,
+      reason: "Project change plan already exists and source documents are not newer. Use --force to regenerate.",
+      ...existing
+    });
+    return;
+  }
+
+  const generatedAt = new Date().toISOString();
+  const [currentVersion, git, sources] = await Promise.all([
+    readProjectSemanticVersion(root).then((value) => value ?? "0.0.0"),
+    readProjectGitVersion(root),
+    readProjectChangePlanSources(root)
+  ]);
+  const payload = projectChangePlanAgentPayload(root, generatedAt, currentVersion, git, sources);
+  let agentError: string | undefined;
+  let agentOutput: Record<string, unknown> | undefined;
+  try {
+    agentOutput = await callProjectChangePlanAgent(root, payload);
+  } catch (error) {
+    agentError = error instanceof Error ? error.message : String(error);
+  }
+  if (agentError) {
+    throw new Error(`Project Change Plan Agent failed; no plan document was written. ${agentError}`);
+  }
+  const model = normalizeProjectChangePlanModel(
+    requireProjectChangePlanAgentOutput(agentOutput),
+    root,
+    generatedAt,
+    currentVersion,
+    git,
+    sources
+  );
+  const documents = await writeProjectChangePlanDocuments(root, model);
+
+  await appendChange(root, {
+    title: "Project change plan generated",
+    summary: `Generated ${PROJECT_CHANGE_PLAN_DOC_RELATIVE_PATH} for docs-first development workflow. Version decision: ${model.currentVersion} -> ${model.nextVersion} (${model.bump}).`,
+    kind: "CANDIDATE"
+  }).catch(() => undefined);
+  await appendTrace(root, {
+    id: `trace-event:project-change-plan:${Date.now()}`,
+    traceId: `trace:project-change-plan:${Date.now()}`,
+    timestamp: generatedAt,
+    kind: "project.change_plan.generated",
+    target: { type: "project", id: "project:root" },
+    summary: "Project Change Plan Agent generated docs-backed change items, development plan and expected changelog.",
+    data: {
+      markdownPath: documents.markdownRelativePath,
+      htmlPath: documents.htmlRelativePath,
+      status: model.status,
+      currentVersion: model.currentVersion,
+      nextVersion: model.nextVersion,
+      bump: model.bump,
+      sourceDocuments: sources.map((source) => source.path),
+      agentError
+    }
+  } satisfies TraceRecord).catch(() => undefined);
+
+  outputJson({
+    ok: true,
+    root,
+    skipped: false,
+    staleBefore: existing.stale,
+    agentError,
+    ...documents
+  });
+}
+
+async function commandProjectChangePlanDiscuss(args: Args): Promise<void> {
+  const root = path.resolve(required(args, "root"));
+  const message = required(args, "message").trim();
+  const generatedAt = new Date().toISOString();
+  const conversationHistory = parseScopedAgentConversationHistory(stringArg(args, "conversation-history"));
+  const [existing, currentVersion, git, sources] = await Promise.all([
+    readProjectChangePlan(root),
+    readProjectSemanticVersion(root).then((value) => value ?? "0.0.0"),
+    readProjectGitVersion(root),
+    readProjectChangePlanSources(root)
+  ]);
+  const basePayload = projectChangePlanAgentPayload(root, generatedAt, existing.model?.currentVersion ?? currentVersion, git, sources);
+  const payload = {
+    ...basePayload,
+    mode: "discuss_and_update_existing_project_change_plan",
+    userMessage: message,
+    existingProjectChangePlan: existing.model ?? null,
+    sharedConversationHistory: conversationHistory.slice(-40).map((entry) => ({
+      role: entry.role,
+      scope: entry.scopeKind,
+      title: entry.scopeTitle,
+      context: entry.contextTitle,
+      content: entry.text
+    })),
+    discussionRules: [
+      "用户正在计划 / 甘特图页面讨论项目变更、开发计划、语义版本、changelog 或开发执行顺序。",
+      "如果用户要求修改计划、拆分任务、调整版本或补充验收条件，必须直接反映到输出 JSON。",
+      "如果用户只是询问计划含义，也要保持现有计划结构，并在 questions 或 agentProgress 中记录本次解释性交流是否产生后续行动。",
+      "不要生成源码补丁；本命令只维护 docs/project/project-change-plan.md 和 HTML 投影。"
+    ]
+  };
+  let agentError: string | undefined;
+  let agentOutput: Record<string, unknown> | undefined;
+  try {
+    agentOutput = await callProjectChangePlanAgent(root, payload);
+  } catch (error) {
+    agentError = error instanceof Error ? error.message : String(error);
+  }
+  if (agentError) {
+    throw new Error(`Project Change Plan Agent discussion failed; no plan document was rewritten. ${agentError}`);
+  }
+  const requiredAgentOutput = requireProjectChangePlanAgentOutput(agentOutput);
+  const normalized = normalizeProjectChangePlanModel(
+    requiredAgentOutput,
+    root,
+    generatedAt,
+    existing.model?.currentVersion ?? currentVersion,
+    git,
+    sources
+  );
+  const nextModel = normalizeProjectChangePlanModel(
+    {
+      ...normalized,
+      status: existing.model?.status === "in_development" || existing.model?.status === "completed"
+        ? existing.model.status
+        : normalized.status,
+      agentProgress: [
+        ...(existing.model?.agentProgress ?? []),
+        ...normalized.agentProgress,
+        {
+          timestamp: generatedAt,
+          taskId: "plan-discussion",
+          status: "doing",
+          summary: `计划 Agent 已根据用户消息更新或复核项目变更计划：${truncateText(message, 160)}`
+        }
+      ]
+    },
+    root,
+    generatedAt,
+    existing.model?.currentVersion ?? currentVersion,
+    git,
+    sources
+  );
+  const documents = await writeProjectChangePlanDocuments(root, nextModel);
+  const documentEdits: DiagramDocumentEditResult[] = [
+    {
+      path: PROJECT_CHANGE_PLAN_DOC_RELATIVE_PATH,
+      operation: "replace_document",
+      status: "applied",
+      changed: true,
+      message: "已更新项目变更计划 Markdown。",
+      reason: "Plan / Gantt Agent discussion maintains the docs-backed project change plan."
+    },
+    {
+      path: PROJECT_CHANGE_PLAN_HTML_RELATIVE_PATH,
+      operation: "replace_document",
+      status: "applied",
+      changed: true,
+      message: "已更新项目变更计划 HTML 投影。",
+      reason: "Plan / Gantt view renders the HTML projection from docs/project."
+    }
+  ];
+
+  await appendTrace(root, {
+    id: `trace-event:project-change-plan-discussion:${Date.now()}`,
+    traceId: `trace:project-change-plan-discussion:${Date.now()}`,
+    timestamp: generatedAt,
+    kind: "project.change_plan.discussion_completed",
+    target: { type: "project", id: "project:root" },
+    summary: "Plan / Gantt Agent discussed and updated the docs-backed project change plan.",
+    data: {
+      markdownPath: documents.markdownRelativePath,
+      htmlPath: documents.htmlRelativePath,
+      currentVersion: nextModel.currentVersion,
+      nextVersion: nextModel.nextVersion,
+      bump: nextModel.bump,
+      status: nextModel.status,
+      agentError
+    }
+  } satisfies TraceRecord).catch(() => undefined);
+
+  outputJson({
+    ok: true,
+    root,
+    intent: "project_change_plan_discussion",
+    answer: `已根据当前计划文档和你的消息更新项目变更计划。当前版本决策：${nextModel.currentVersion} -> ${nextModel.nextVersion} (${nextModel.bump})。`,
+    guidance: "计划 / 甘特图页面会继续从 docs/project/project-change-plan.md 和 HTML 投影读取项目变更、开发计划、进度和预期 changelog。",
+    documentEdits,
+    artifactPaths: [PROJECT_CHANGE_PLAN_DOC_RELATIVE_PATH, PROJECT_CHANGE_PLAN_HTML_RELATIVE_PATH],
+    markdownRelativePath: documents.markdownRelativePath,
+    htmlRelativePath: documents.htmlRelativePath,
+    model: documents.model,
+    provider: {
+      taskType: "project.change_plan.discuss",
+      provider: "configured",
+      model: "project-change-plan-agent"
+    }
+  });
+}
+
+async function commandProjectChangePlanApprove(args: Args): Promise<void> {
+  const root = path.resolve(required(args, "root"));
+  const generatedAt = new Date().toISOString();
+  const documents = await approveProjectChangePlan(root);
+  await appendTrace(root, {
+    id: `trace-event:project-change-plan-approve:${Date.now()}`,
+    traceId: `trace:project-change-plan-approve:${Date.now()}`,
+    timestamp: generatedAt,
+    kind: "project.change_plan.approved",
+    target: { type: "project", id: "project:root" },
+    summary: "User verified project change items and moved the docs-first plan into development stage.",
+    data: {
+      markdownPath: documents.markdownRelativePath,
+      htmlPath: documents.htmlRelativePath,
+      status: documents.model?.status,
+      nextVersion: documents.model?.nextVersion
+    }
+  } satisfies TraceRecord).catch(() => undefined);
+  outputJson({
+    ok: true,
+    root,
+    ...documents
+  });
+}
+
+async function commandReviewFindingPlan(args: Args): Promise<void> {
+  const root = path.resolve(required(args, "root"));
+  const findingId = required(args, "finding");
+  const generatedAt = new Date().toISOString();
+  const reviewDocuments = await readQualityReviewDocumentModel(root);
+  if (!reviewDocuments) {
+    throw new Error(`Missing ${QUALITY_REVIEW_DOC_RELATIVE_PATH}. Run review-run before creating a project change item from a review finding.`);
+  }
+  const finding = reviewDocuments.findings.find((item) => item.id === findingId);
+  if (!finding) {
+    throw new Error(`Review finding not found: ${findingId}`);
+  }
+  const issue = reviewDocuments.documents.issues.find((item) => item.findingId === finding.id);
+  const category = reviewDocuments.documents.categories.find((item) => item.category === finding.category);
+  const documents = await upsertReviewFindingChangeItem({
+    root,
+    finding,
+    issueDocPath: issue?.docPath,
+    issueHtmlPath: issue?.htmlPath,
+    categoryDocPath: category?.docPath,
+    categoryHtmlPath: category?.htmlPath,
+    generatedAt
+  });
+  const changeItemId = reviewFindingChangeItemId(finding.id);
+  await appendTrace(root, {
+    id: `trace-event:review-finding-plan:${Date.now()}`,
+    traceId: `trace:review-finding-plan:${Date.now()}`,
+    timestamp: generatedAt,
+    kind: "review.finding.project_change_created",
+    target: { type: "finding", id: finding.id },
+    summary: "Review Queue finding was converted into a docs-backed project change plan item.",
+    data: {
+      findingId: finding.id,
+      changeItemId,
+      severity: finding.severity,
+      category: finding.category,
+      planMarkdownPath: documents.markdownRelativePath,
+      planHtmlPath: documents.htmlRelativePath,
+      issueDocPath: issue?.docPath
+    }
+  } satisfies TraceRecord).catch(() => undefined);
+  outputJson({
+    ok: true,
+    root,
+    findingId: finding.id,
+    changeItemId,
+    message: "Review finding linked into docs/project/project-change-plan.md.",
+    ...documents
+  });
+}
+
+async function commandReviewFindingDiscuss(args: Args): Promise<void> {
+  const root = path.resolve(required(args, "root"));
+  const findingId = required(args, "finding");
+  const message = required(args, "message").trim();
+  const generatedAt = new Date().toISOString();
+  const conversationHistory = parseScopedAgentConversationHistory(stringArg(args, "conversation-history"));
+  const reviewDocuments = await readQualityReviewDocumentModel(root);
+  if (!reviewDocuments) {
+    throw new Error(`Missing ${QUALITY_REVIEW_DOC_RELATIVE_PATH}. Run review-run before discussing a review finding.`);
+  }
+  const finding = reviewDocuments.findings.find((item) => item.id === findingId);
+  if (!finding) {
+    throw new Error(`Review finding not found: ${findingId}`);
+  }
+  const issue = reviewDocuments.documents.issues.find((item) => item.findingId === finding.id);
+  const category = reviewDocuments.documents.categories.find((item) => item.category === finding.category);
+  const context = await buildReviewFindingDiscussionContext(root, finding, issue, category);
+  const result = await callReviewFindingDiscussionAgent(root, message, context, generatedAt, conversationHistory);
+  const documentEdits: DiagramDocumentEditResult[] = [];
+  const artifactPaths = [
+    QUALITY_REVIEW_DOC_RELATIVE_PATH,
+    QUALITY_REVIEW_HTML_RELATIVE_PATH,
+    issue?.docPath,
+    issue?.htmlPath,
+    category?.docPath,
+    category?.htmlPath,
+    ...result.discussion.referencedDocuments
+  ].filter((item): item is string => Boolean(item)).map(normalizeProjectRelativePath);
+  let changeItemId: string | undefined;
+  let planDocuments: Awaited<ReturnType<typeof upsertReviewFindingChangeItem>> | undefined;
+  let statusUpdate: {
+    findingId: string;
+    status: ReviewFinding["status"];
+    reason: string;
+    regressionMarkdownPath?: string;
+    regressionHtmlPath?: string;
+  } | undefined;
+  const shouldCreatePlan =
+    result.discussion.intent === "create_project_change" ||
+    result.discussion.planAction.shouldCreateOrUpdate;
+  const shouldUpdateFindingStatus =
+    result.discussion.intent === "mark_finding_false_positive" ||
+    result.discussion.statusDecision.shouldUpdate;
+
+  if (shouldCreatePlan) {
+    planDocuments = await upsertReviewFindingChangeItem({
+      root,
+      finding,
+      issueDocPath: issue?.docPath,
+      issueHtmlPath: issue?.htmlPath,
+      categoryDocPath: category?.docPath,
+      categoryHtmlPath: category?.htmlPath,
+      generatedAt
+    });
+    changeItemId = reviewFindingChangeItemId(finding.id);
+    artifactPaths.push(planDocuments.markdownRelativePath, planDocuments.htmlRelativePath);
+    documentEdits.push(
+      {
+        path: planDocuments.markdownRelativePath,
+        operation: "replace_document",
+        status: "applied",
+        changed: true,
+        message: `已创建或更新项目变更项 ${changeItemId}。`,
+        reason: result.discussion.planAction.reason || "Review finding discussion requested a docs-backed project change item."
+      },
+      {
+        path: planDocuments.htmlRelativePath,
+        operation: "replace_document",
+        status: "applied",
+        changed: true,
+        message: "已同步更新计划 HTML 投影。",
+        reason: "Plan / Gantt view renders this document projection."
+      }
+    );
+  }
+
+  if (shouldUpdateFindingStatus) {
+    const decision = result.discussion.statusDecision;
+    if (decision.status === "false_positive" && (!decision.reason.trim() || !decision.evidenceSummary.trim())) {
+      throw new Error("Review Agent must provide reason and evidenceSummary before marking a finding as false_positive.");
+    }
+    const regressionDocs = result.discussion.regressionAction.shouldCreate
+      ? await writeReviewFindingRegressionRecord({
+        root,
+        finding,
+        decision,
+        regression: result.discussion.regressionAction,
+        generatedAt
+      })
+      : undefined;
+    const updatedFindings = reviewDocuments.findings.map((item): ReviewFinding => {
+      if (item.id !== finding.id) return item;
+      const decisionEvidence: ReviewEvidenceRef = {
+        source: "agent",
+        path: regressionDocs?.markdownPath ?? issue?.docPath ?? QUALITY_REVIEW_DOC_RELATIVE_PATH,
+        summary: decision.evidenceSummary || decision.reason
+      };
+      return ReviewFindingSchema.parse({
+        ...item,
+        status: decision.status,
+        confidence: decision.status === "false_positive" ? "high" : item.confidence,
+        suggestedAction: decision.updatedSuggestedAction || item.suggestedAction,
+        evidence: [...item.evidence, decisionEvidence],
+        traceIds: unique([...item.traceIds, `trace:review-finding-discussion:${finding.id}:${Date.now()}`]),
+        updatedAt: generatedAt
+      } satisfies ReviewFinding);
+    });
+    const updatedRun = ReviewRunSchema.parse({
+      ...reviewDocuments.run,
+      findingIds: updatedFindings.map((item) => item.id),
+      evaluatorResults: completeReviewEvaluatorResults(updatedFindings, reviewDocuments.run.evaluatorResults ?? [], undefined, root),
+      summary: buildReviewRunSummary(updatedFindings)
+    } satisfies ReviewRun);
+    const reviewDocs = await writeQualityReviewDocuments({
+      root,
+      run: updatedRun,
+      findings: updatedFindings,
+      categoryOrder: reviewDocuments.categoryOrder
+    });
+    artifactPaths.push(
+      reviewDocs.rootDocPath,
+      reviewDocs.rootHtmlPath,
+      ...reviewDocs.categoryDocuments.map((item) => item.docPath),
+      ...reviewDocs.categoryDocuments.map((item) => item.htmlPath),
+      ...reviewDocs.issueDocuments.map((item) => item.docPath),
+      ...reviewDocs.issueDocuments.map((item) => item.htmlPath)
+    );
+    if (regressionDocs) artifactPaths.push(regressionDocs.markdownPath, regressionDocs.htmlPath);
+    documentEdits.push(
+      {
+        path: QUALITY_REVIEW_DOC_RELATIVE_PATH,
+        operation: "replace_document",
+        status: "applied",
+        changed: true,
+        message: `已将 ${finding.id} 更新为 ${decision.status}。`,
+        reason: decision.reason
+      },
+      {
+        path: QUALITY_REVIEW_HTML_RELATIVE_PATH,
+        operation: "replace_document",
+        status: "applied",
+        changed: true,
+        message: "已同步更新评审 HTML 投影。",
+        reason: "Review Queue renders docs/review HTML projection."
+      }
+    );
+    if (regressionDocs) {
+      documentEdits.push(
+        {
+          path: regressionDocs.markdownPath,
+          operation: "replace_document",
+          status: "applied",
+          changed: true,
+          message: "已写入评审理解纠偏/回归记录。",
+          reason: result.discussion.regressionAction.reason
+        },
+        {
+          path: regressionDocs.htmlPath,
+          operation: "replace_document",
+          status: "applied",
+          changed: true,
+          message: "已同步写入评审回归 HTML 投影。",
+          reason: result.discussion.regressionAction.reason
+        }
+      );
+    }
+    statusUpdate = {
+      findingId: finding.id,
+      status: decision.status,
+      reason: decision.reason,
+      regressionMarkdownPath: regressionDocs?.markdownPath,
+      regressionHtmlPath: regressionDocs?.htmlPath
+    };
+  }
+
+  await appendTrace(root, {
+    id: `trace-event:review-finding-discussion:${Date.now()}`,
+    traceId: `trace:review-finding-discussion:${Date.now()}`,
+    timestamp: generatedAt,
+    kind: shouldCreatePlan
+      ? "review.finding.project_change_requested"
+      : statusUpdate
+        ? "review.finding.status_updated_by_agent"
+        : "review.finding.discussion.completed",
+    target: { type: "finding", id: finding.id },
+    summary: "Review Queue Agent handled a selected finding through the shared scoped agent runtime.",
+    data: {
+      findingId: finding.id,
+      category: finding.category,
+      severity: finding.severity,
+      intent: result.discussion.intent,
+      shouldCreatePlan,
+      changeItemId,
+      statusUpdate,
+      regressionAction: result.discussion.regressionAction,
+      issueDocPath: issue?.docPath,
+      planMarkdownPath: planDocuments?.markdownRelativePath,
+      planHtmlPath: planDocuments?.htmlRelativePath
+    }
+  } satisfies TraceRecord).catch(() => undefined);
+
+  outputJson({
+    ok: true,
+    root,
+    findingId: finding.id,
+    changeItemId,
+    intent: result.discussion.intent,
+    answer: result.discussion.answer,
+    guidance: result.discussion.guidance,
+    referencedDocuments: result.discussion.referencedDocuments,
+    planAction: result.discussion.planAction,
+    statusDecision: result.discussion.statusDecision,
+    regressionAction: result.discussion.regressionAction,
+    statusUpdate,
+    risks: result.discussion.risks,
+    questions: result.discussion.questions,
+    documentEdits,
+    artifactPaths: unique(artifactPaths),
+    provider: result.providerSummary
+  });
+}
+
+async function writeReviewFindingRegressionRecord(input: {
+  root: string;
+  finding: ReviewFinding;
+  decision: ReviewFindingStatusDecision;
+  regression: ReviewFindingRegressionAction;
+  generatedAt: string;
+}): Promise<{ markdownPath: string; htmlPath: string }> {
+  const fileBase = `${safeFilePart(input.finding.id)}-${safeFilePart(input.generatedAt)}`;
+  const markdownPath = `docs/review/regressions/${fileBase}.md`;
+  const htmlPath = `docs/review/regressions/${fileBase}.html`;
+  const affectedCategories = input.regression.affectedCategories.length
+    ? input.regression.affectedCategories
+    : [input.finding.category];
+  const affectedFindingIds = input.regression.affectedFindingIds.length
+    ? input.regression.affectedFindingIds
+    : [input.finding.id];
+  const markdown = [
+    `# 评审理解纠偏：${input.finding.title}`,
+    "",
+    "这份文档记录一次由 Review Agent 自主复核后产生的评审判伪/回归事件。它不是用户手工关闭问题，而是 agent 基于证据纠正项目理解后的文档化结论。",
+    "",
+    "## 判伪对象",
+    "",
+    `- Finding ID：${input.finding.id}`,
+    `- 原评审项：${input.finding.category}`,
+    `- 原严重级别：${input.finding.severity}`,
+    `- 新状态：${input.decision.status}`,
+    `- 更新时间：${input.generatedAt}`,
+    "",
+    "## 判定理由",
+    "",
+    input.decision.reason,
+    "",
+    "## 证据摘要",
+    "",
+    input.decision.evidenceSummary || "本次 agent 没有输出额外证据摘要。",
+    "",
+    "## 纠正后的项目理解",
+    "",
+    input.regression.correctedUnderstanding || "本次判定没有声明新的项目理解纠偏。",
+    "",
+    "## 回归影响面",
+    "",
+    `- 影响评审分类：${affectedCategories.join(", ")}`,
+    `- 可能受影响 finding：${affectedFindingIds.join(", ")}`,
+    `- 建议回归范围：${input.regression.recommendedReviewScope || "重新运行或复核同分类评审项。"}`,
+    "",
+    "## 后续建议动作",
+    "",
+    input.decision.updatedSuggestedAction || "该 finding 已由 agent 判定为不成立；后续应避免基于同一错误理解继续生成评审项。",
+    ""
+  ].join("\n");
+  const html = [
+    "<!doctype html>",
+    "<html lang=\"zh-CN\">",
+    "<head>",
+    "  <meta charset=\"utf-8\" />",
+    `  <title>${escapeReviewHtml(`评审理解纠偏：${input.finding.title}`)}</title>`,
+    "  <style>",
+    "    body { margin: 0; background: #0b1118; color: #d8e7f7; font: 14px/1.6 system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }",
+    "    main { padding: 24px; }",
+    "    section { border: 1px solid #24364a; border-radius: 8px; padding: 16px; margin: 0 0 14px; background: #101923; }",
+    "    h1, h2, p { margin: 0 0 8px; }",
+    "    code { background: #071019; border: 1px solid #26394d; border-radius: 6px; padding: 2px 5px; }",
+    "  </style>",
+    "</head>",
+    "<body>",
+    "<main>",
+    `<section><p>Praxis Review Regression</p><h1>${escapeReviewHtml(`评审理解纠偏：${input.finding.title}`)}</h1><p>由 Review Agent 基于证据复核后写入。</p></section>`,
+    `<section><h2>判伪对象</h2><p><code>${escapeReviewHtml(input.finding.id)}</code> · ${escapeReviewHtml(input.finding.category)} · ${escapeReviewHtml(input.finding.severity)} · ${escapeReviewHtml(input.decision.status)}</p></section>`,
+    `<section><h2>判定理由</h2><p>${escapeReviewHtml(input.decision.reason)}</p></section>`,
+    `<section><h2>证据摘要</h2><p>${escapeReviewHtml(input.decision.evidenceSummary || "本次 agent 没有输出额外证据摘要。")}</p></section>`,
+    `<section><h2>纠正后的项目理解</h2><p>${escapeReviewHtml(input.regression.correctedUnderstanding || "本次判定没有声明新的项目理解纠偏。")}</p></section>`,
+    `<section><h2>回归影响面</h2><p>影响评审分类：${escapeReviewHtml(affectedCategories.join(", "))}</p><p>可能受影响 finding：${escapeReviewHtml(affectedFindingIds.join(", "))}</p><p>建议回归范围：${escapeReviewHtml(input.regression.recommendedReviewScope || "重新运行或复核同分类评审项。")}</p></section>`,
+    `<section><h2>后续建议动作</h2><p>${escapeReviewHtml(input.decision.updatedSuggestedAction || "该 finding 已由 agent 判定为不成立；后续应避免基于同一错误理解继续生成评审项。")}</p></section>`,
+    "</main>",
+    "</body>",
+    "</html>"
+  ].join("\n");
+  await mkdir(path.join(input.root, "docs", "review", "regressions"), { recursive: true });
+  await writeFile(path.join(input.root, markdownPath), markdown, "utf8");
+  await writeFile(path.join(input.root, htmlPath), html, "utf8");
+  return { markdownPath, htmlPath };
+}
+
+function escapeReviewHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+async function commandDesignDiscover(args: Args): Promise<void> {
+  const root = path.resolve(required(args, "root"));
+  const candidatePath = typeof args.candidate === "string" ? args.candidate : undefined;
+  const progressRunId = typeof args["run-id"] === "string" && args["run-id"].trim()
+    ? args["run-id"].trim()
+    : `design-discovery:${Date.now()}`;
+  const generatedAt = new Date().toISOString();
+  const result = await runDesignDiscoveryWorkflow({
+    root,
+    args,
+    candidatePath,
+    progressRunId,
+    generatedAt
+  }, {
+    readJson,
+    readCodeFacts: (filePath) => readJsonWithSchema(filePath, CodeFactGraphSnapshotSchema),
+    readOrBuildCodeFacts,
+    readAllMemoryRecords,
+    callDesignDiscoveryAgent,
+    buildAndWriteCodeUnderstandingSpineForCodeFacts,
+    codeUnderstandingSpineDigest,
+    writeDesignDiscoveryProgress,
+    projectRelativePath,
+    writeInteractionModelCandidate,
+    writeDesignUseCaseProjectionViews,
+    appendChange,
+    appendTrace
+  });
+  const modelRegistryDocuments = await writeUmlModelRegistryDocuments(root).catch(() => undefined);
+  await maybeWriteJsonWithSchema(args, "out", result.model, InteractionModelCandidateSchema);
+  outputJson({
+    ...result.output,
+    modelRegistryDocPath: modelRegistryDocuments ? projectRelativePath(root, modelRegistryDocuments.markdownPath) : undefined,
+    modelRegistryHtmlPath: modelRegistryDocuments ? projectRelativePath(root, modelRegistryDocuments.htmlPath) : undefined
+  });
+}
+
+async function commandModelsDiscover(args: Args): Promise<void> {
+  const root = path.resolve(required(args, "root"));
+  const generatedAt = new Date().toISOString();
+  const registry = await buildUmlModelRegistry(root, generatedAt);
+  const documents = await writeUmlModelRegistryDocuments(root, registry);
+  await appendTrace(root, {
+    id: `trace-event:uml-model-registry:${Date.now()}`,
+    traceId: `trace:uml-model-registry:${Date.now()}`,
+    timestamp: generatedAt,
+    kind: "uml_model.registry.completed",
+    target: { type: "project", id: "project:root" },
+    summary: "UML Model Registry organized existing design, engineering and architecture projections as Model / Package / Diagram / Trace.",
+    data: {
+      markdownPath: projectRelativePath(root, documents.markdownPath),
+      htmlPath: projectRelativePath(root, documents.htmlPath),
+      modelCount: registry.summary.modelCount,
+      packageCount: registry.summary.packageCount,
+      diagramCount: registry.summary.diagramCount,
+      traceCount: registry.summary.traceCount
+    }
+  } satisfies TraceRecord).catch(() => undefined);
+  await appendChange(root, {
+    title: "UML Model Registry persisted",
+    summary: `Persisted ${registry.summary.modelCount} UML Model(s), ${registry.summary.packageCount} Package group(s), ${registry.summary.diagramCount} Diagram projection(s), and ${registry.summary.traceCount} Trace/Refine link(s).`,
+    kind: "CANDIDATE"
+  }).catch(() => undefined);
+  outputJson({
+    ok: true,
+    root,
+    generatedAt,
+    modelRegistryDocPath: projectRelativePath(root, documents.markdownPath),
+    modelRegistryHtmlPath: projectRelativePath(root, documents.htmlPath),
+    summary: registry.summary,
+    rootHtmlPath: UML_MODEL_ROOT_HTML_RELATIVE_PATH
+  });
+}
+
+async function commandEngineeringDiscover(args: Args): Promise<void> {
+  const root = path.resolve(required(args, "root"));
+  const generatedAt = new Date().toISOString();
+  const codeFacts = args["code-facts"]
+    ? await readJsonWithSchema(String(args["code-facts"]), CodeFactGraphSnapshotSchema)
+    : await readOrBuildCodeFacts(root, args);
+  const { spine, documents: spineDocuments } = await buildAndWriteCodeUnderstandingSpineForCodeFacts(root, codeFacts, generatedAt);
+  const model = await buildEngineeringComplexityModel(root, codeFacts, generatedAt, spine);
+  const documents = await writeEngineeringComplexityDocuments(root, model);
+  const modelRegistryDocuments = await writeUmlModelRegistryDocuments(root).catch(() => undefined);
+  await appendTrace(root, {
+    id: `trace-event:engineering-discovery:${Date.now()}`,
+    traceId: `trace:engineering-discovery:${Date.now()}`,
+    timestamp: generatedAt,
+    kind: "engineering.discovery.completed",
+    target: { type: "project", id: "project:root" },
+    summary: "Engineering Discovery produced technical complexity map documents.",
+    data: {
+      markdownPath: projectRelativePath(root, documents.markdownPath),
+      htmlPath: projectRelativePath(root, documents.htmlPath),
+      compatibilityMarkdownPath: projectRelativePath(root, documents.compatibilityMarkdownPath),
+      compatibilityHtmlPath: projectRelativePath(root, documents.compatibilityHtmlPath),
+      modelRegistryMarkdownPath: modelRegistryDocuments ? projectRelativePath(root, modelRegistryDocuments.markdownPath) : undefined,
+      modelRegistryHtmlPath: modelRegistryDocuments ? projectRelativePath(root, modelRegistryDocuments.htmlPath) : undefined,
+      codeUnderstandingSpineMarkdownPath: projectRelativePath(root, spineDocuments.markdownPath),
+      codeUnderstandingSpineJsonPath: projectRelativePath(root, spineDocuments.jsonPath),
+      diagramDocumentCount: documents.diagramDocumentCount,
+      packageCount: model.summary.packageCount,
+      componentCount: model.summary.componentCount,
+      runtimeFlowCount: model.summary.runtimeFlowCount,
+      deploymentNodeCount: model.summary.deploymentNodeCount,
+      hotspotCount: model.summary.hotspotCount
+    }
+  } satisfies TraceRecord).catch(() => undefined);
+  await appendChange(root, {
+    title: "Engineering complexity map persisted",
+    summary: `Persisted ${model.summary.packageCount} package/module item(s), ${model.summary.componentCount} component item(s), ${model.summary.runtimeFlowCount} runtime flow item(s), ${model.summary.deploymentNodeCount} deployment/runtime node(s), and ${model.summary.hotspotCount} technical hotspot(s).`,
+    kind: "CANDIDATE"
+  }).catch(() => undefined);
+  outputJson({
+    ok: true,
+    root,
+    generatedAt,
+    engineeringMapDocPath: projectRelativePath(root, documents.markdownPath),
+    engineeringMapHtmlPath: projectRelativePath(root, documents.htmlPath),
+    compatibilityMapDocPath: projectRelativePath(root, documents.compatibilityMarkdownPath),
+    compatibilityMapHtmlPath: projectRelativePath(root, documents.compatibilityHtmlPath),
+    modelRegistryDocPath: modelRegistryDocuments ? projectRelativePath(root, modelRegistryDocuments.markdownPath) : undefined,
+    modelRegistryHtmlPath: modelRegistryDocuments ? projectRelativePath(root, modelRegistryDocuments.htmlPath) : undefined,
+    codeUnderstandingSpineDocPath: projectRelativePath(root, spineDocuments.markdownPath),
+    codeUnderstandingSpineJsonPath: projectRelativePath(root, spineDocuments.jsonPath),
+    diagramDocumentCount: documents.diagramDocumentCount,
+    summary: model.summary,
+    source: model.source
+  });
+}
+
+async function commandEngineeringDiagramDiscuss(args: Args): Promise<void> {
+  const root = path.resolve(required(args, "root"));
+  const message = required(args, "message").trim();
+  const documentPath = stringArg(args, "document-path") ?? ENGINEERING_ROOT_MAP_HTML_RELATIVE_PATH;
+  const documentTitle = stringArg(args, "document-title");
+  const generatedAt = new Date().toISOString();
+  const conversationHistory = parseScopedAgentConversationHistory(stringArg(args, "conversation-history"));
+  const currentDiagram = await buildEngineeringDiagramDiscussionContext(root, documentPath, documentTitle, stringArg(args, "selected-anchor"), message, args);
+  const result = await callEngineeringDiagramDiscussionAgent(root, message, currentDiagram, generatedAt, conversationHistory);
+  const documentEdits = await applyDiagramDocumentEdits(root, result.discussion.documentEdits, ["docs/engineering"]);
+  await appendTrace(root, {
+    id: `trace-event:engineering-diagram-discussion:${Date.now()}`,
+    traceId: `trace:engineering-diagram-discussion:${Date.now()}`,
+    timestamp: generatedAt,
+    kind: "engineering.diagram_discussion.completed",
+    target: { type: "project", id: "project:root" },
+    summary: "Engineering Diagram Discussion answered within the technical complexity boundary.",
+    data: {
+      documentPath: currentDiagram.currentDocumentPath,
+      selectedAnchor: currentDiagram.selectedAnchor,
+      intent: result.discussion.intent,
+      technicalPerspective: result.discussion.technicalPerspective,
+      documentEdits,
+      provider: result.providerSummary
+    }
+  } satisfies TraceRecord).catch(() => undefined);
+  outputJson({
+    ok: true,
+    root,
+    documentPath: currentDiagram.currentDocumentPath,
+    intent: result.discussion.intent,
+    answer: result.discussion.answer,
+    guidance: result.discussion.guidance,
+    technicalPerspective: result.discussion.technicalPerspective,
+    referencedAnchors: result.discussion.referencedAnchors,
+    suggestedDrilldowns: result.discussion.suggestedDrilldowns,
+    documentEdits,
+    risks: result.discussion.risks,
+    questions: result.discussion.questions,
+    provider: result.providerSummary
+  });
+}
+
+async function commandArchitectureDiscover(args: Args): Promise<void> {
+  const root = path.resolve(required(args, "root"));
+  const generatedAt = new Date().toISOString();
+  const codeFacts = args["code-facts"]
+    ? await readJsonWithSchema(String(args["code-facts"]), CodeFactGraphSnapshotSchema)
+    : await readOrBuildCodeFacts(root, args);
+  const { spine, documents: spineDocuments } = await buildAndWriteCodeUnderstandingSpineForCodeFacts(root, codeFacts, generatedAt);
+  const model = await buildArchitectureC4Model(root, codeFacts, generatedAt, spine);
+  const documents = await writeArchitectureC4Documents(root, model);
+  const modelRegistryDocuments = await writeUmlModelRegistryDocuments(root).catch(() => undefined);
+  await appendTrace(root, {
+    id: `trace-event:architecture-c4-discovery:${Date.now()}`,
+    traceId: `trace:architecture-c4-discovery:${Date.now()}`,
+    timestamp: generatedAt,
+    kind: "architecture.c4_discovery.completed",
+    target: { type: "project", id: "project:root" },
+    summary: "Architecture Explorer produced code-first C4 model documents from the shared discovery spine.",
+    data: {
+      markdownPath: projectRelativePath(root, documents.markdownPath),
+      htmlPath: projectRelativePath(root, documents.htmlPath),
+      modelRegistryMarkdownPath: modelRegistryDocuments ? projectRelativePath(root, modelRegistryDocuments.markdownPath) : undefined,
+      modelRegistryHtmlPath: modelRegistryDocuments ? projectRelativePath(root, modelRegistryDocuments.htmlPath) : undefined,
+      codeUnderstandingSpineMarkdownPath: projectRelativePath(root, spineDocuments.markdownPath),
+      codeUnderstandingSpineJsonPath: projectRelativePath(root, spineDocuments.jsonPath),
+      diagramDocumentCount: documents.diagramDocumentCount,
+      systemContextCount: model.summary.systemContextCount,
+      containerCount: model.summary.containerCount,
+      componentViewCount: model.summary.componentViewCount,
+      codeViewCount: model.summary.codeViewCount
+    }
+  } satisfies TraceRecord).catch(() => undefined);
+  await appendChange(root, {
+    title: "Architecture C4 model persisted",
+    summary: `Persisted ${model.summary.systemContextCount} system context, ${model.summary.containerCount} container, ${model.summary.componentViewCount} component, and ${model.summary.codeViewCount} code view document(s).`,
+    kind: "CANDIDATE"
+  }).catch(() => undefined);
+  outputJson({
+    ok: true,
+    root,
+    generatedAt,
+    architectureMapDocPath: projectRelativePath(root, documents.markdownPath),
+    architectureMapHtmlPath: projectRelativePath(root, documents.htmlPath),
+    modelRegistryDocPath: modelRegistryDocuments ? projectRelativePath(root, modelRegistryDocuments.markdownPath) : undefined,
+    modelRegistryHtmlPath: modelRegistryDocuments ? projectRelativePath(root, modelRegistryDocuments.htmlPath) : undefined,
+    codeUnderstandingSpineDocPath: projectRelativePath(root, spineDocuments.markdownPath),
+    codeUnderstandingSpineJsonPath: projectRelativePath(root, spineDocuments.jsonPath),
+    diagramDocumentCount: documents.diagramDocumentCount,
+    summary: model.summary,
+    source: model.source
+  });
+}
+
+async function commandArchitectureDiagramDiscuss(args: Args): Promise<void> {
+  const root = path.resolve(required(args, "root"));
+  const message = required(args, "message").trim();
+  const documentPath = stringArg(args, "document-path") ?? ARCHITECTURE_C4_ROOT_MAP_HTML_RELATIVE_PATH;
+  const documentTitle = stringArg(args, "document-title");
+  const generatedAt = new Date().toISOString();
+  const conversationHistory = parseScopedAgentConversationHistory(stringArg(args, "conversation-history"));
+  const currentDiagram = await buildArchitectureDiagramDiscussionContext(root, documentPath, documentTitle, stringArg(args, "selected-anchor"), message, args);
+  const result = await callArchitectureDiagramDiscussionAgent(root, message, currentDiagram, generatedAt, conversationHistory);
+  const documentEdits = await applyDiagramDocumentEdits(root, result.discussion.documentEdits, ["docs/architecture"]);
+  await appendTrace(root, {
+    id: `trace-event:architecture-diagram-discussion:${Date.now()}`,
+    traceId: `trace:architecture-diagram-discussion:${Date.now()}`,
+    timestamp: generatedAt,
+    kind: "architecture.diagram_discussion.completed",
+    target: { type: "project", id: "project:root" },
+    summary: "Architecture Diagram Discussion answered within the C4 architecture boundary.",
+    data: {
+      documentPath: currentDiagram.currentDocumentPath,
+      selectedAnchor: currentDiagram.selectedAnchor,
+      intent: result.discussion.intent,
+      architecturePerspective: result.discussion.architecturePerspective,
+      documentEdits,
+      provider: result.providerSummary
+    }
+  } satisfies TraceRecord).catch(() => undefined);
+  outputJson({
+    ok: true,
+    root,
+    documentPath: currentDiagram.currentDocumentPath,
+    intent: result.discussion.intent,
+    answer: result.discussion.answer,
+    guidance: result.discussion.guidance,
+    architecturePerspective: result.discussion.architecturePerspective,
+    referencedAnchors: result.discussion.referencedAnchors,
+    suggestedDrilldowns: result.discussion.suggestedDrilldowns,
+    documentEdits,
+    risks: result.discussion.risks,
+    questions: result.discussion.questions,
+    provider: result.providerSummary
+  });
+}
+
+async function buildEngineeringDiagramDiscussionContext(
+  root: string,
+  documentPath: string,
+  documentTitle: string | undefined,
+  selectedAnchorJson: string | undefined,
+  userMessage = "",
+  args: Args = {}
+): Promise<EngineeringDiagramDiscussionContext> {
+  const normalizedDocumentPath = normalizeProjectRelativePath(documentPath);
+  const markdownPath = normalizedDocumentPath.endsWith(".html")
+    ? normalizedDocumentPath.replace(/\.html$/i, ".md")
+    : normalizedDocumentPath;
+  const htmlPath = normalizedDocumentPath.endsWith(".md")
+    ? normalizedDocumentPath.replace(/\.md$/i, ".html")
+    : normalizedDocumentPath;
+  const [html, markdown, rootMap] = await Promise.all([
+    readProjectTextIfExists(root, htmlPath),
+    readProjectTextIfExists(root, markdownPath),
+    readProjectTextIfExists(root, ENGINEERING_ROOT_MAP_HTML_RELATIVE_PATH)
+  ]);
+  const selectedAnchor = selectedAnchorJson ? safeJson(selectedAnchorJson) : undefined;
+  const currentDocumentPath = html || !markdown ? htmlPath : markdownPath;
+  const repositoryEvidence = await buildGenericDiagramRepositoryEvidenceContext(root, args, {
+    userMessage,
+    currentDocumentTitle: documentTitle,
+    currentDocumentPath,
+    currentDocumentHtmlExcerpt: html,
+    currentDocumentMarkdownExcerpt: markdown,
+    mapIndexExcerpt: rootMap,
+    selectedAnchor
+  });
+  return {
+    schemaVersion: "praxis.engineeringDiagramContext.v1",
+    rootMapPath: ENGINEERING_ROOT_MAP_HTML_RELATIVE_PATH,
+    currentDocumentPath,
+    currentDocumentTitle: documentTitle,
+    currentDocumentHtmlExcerpt: compactText(html, 16_000),
+    currentDocumentMarkdownExcerpt: compactText(markdown, 16_000),
+    mapIndexExcerpt: compactText(rootMap, 12_000),
+    repositoryEvidence,
+    selectedAnchor
+  };
+}
+
+async function buildArchitectureDiagramDiscussionContext(
+  root: string,
+  documentPath: string,
+  documentTitle: string | undefined,
+  selectedAnchorJson: string | undefined,
+  userMessage = "",
+  args: Args = {}
+): Promise<ArchitectureDiagramDiscussionContext> {
+  const normalizedDocumentPath = normalizeProjectRelativePath(documentPath);
+  const markdownPath = normalizedDocumentPath.endsWith(".html")
+    ? normalizedDocumentPath.replace(/\.html$/i, ".md")
+    : normalizedDocumentPath;
+  const htmlPath = normalizedDocumentPath.endsWith(".md")
+    ? normalizedDocumentPath.replace(/\.md$/i, ".html")
+    : normalizedDocumentPath;
+  const [html, markdown, rootMap] = await Promise.all([
+    readProjectTextIfExists(root, htmlPath),
+    readProjectTextIfExists(root, markdownPath),
+    readProjectTextIfExists(root, ARCHITECTURE_C4_ROOT_MAP_HTML_RELATIVE_PATH)
+  ]);
+  const selectedAnchor = selectedAnchorJson ? safeJson(selectedAnchorJson) : undefined;
+  const currentDocumentPath = html || !markdown ? htmlPath : markdownPath;
+  const repositoryEvidence = await buildGenericDiagramRepositoryEvidenceContext(root, args, {
+    userMessage,
+    currentDocumentTitle: documentTitle,
+    currentDocumentPath,
+    currentDocumentHtmlExcerpt: html,
+    currentDocumentMarkdownExcerpt: markdown,
+    mapIndexExcerpt: rootMap,
+    selectedAnchor
+  });
+  return {
+    schemaVersion: "praxis.architectureDiagramContext.v1",
+    rootMapPath: ARCHITECTURE_C4_ROOT_MAP_HTML_RELATIVE_PATH,
+    currentDocumentPath,
+    currentDocumentTitle: documentTitle,
+    currentDocumentHtmlExcerpt: compactText(html, 16_000),
+    currentDocumentMarkdownExcerpt: compactText(markdown, 16_000),
+    mapIndexExcerpt: compactText(rootMap, 12_000),
+    repositoryEvidence,
+    selectedAnchor
+  };
+}
+
+async function readProjectTextIfExists(root: string, relativePath: string): Promise<string> {
+  try {
+    return await readFile(path.join(root, normalizeProjectRelativePath(relativePath)), "utf8");
+  } catch (error) {
+    if (isMissingFileError(error)) return "";
+    throw error;
+  }
+}
+
+function normalizeProjectRelativePath(value: string): string {
+  return value.replace(/\\/g, "/").replace(/^\/+/, "").replace(/^\.\//, "");
+}
+
+function compactText(value: string, maxLength: number): string {
+  if (value.length <= maxLength) return value;
+  return `${value.slice(0, maxLength)}\n\n...[truncated ${value.length - maxLength} chars]`;
+}
+
+function parseScopedAgentConversationHistory(raw: string | undefined): ScopedAgentConversationHistoryEntry[] {
+  if (!raw) return [];
+  const parsed = safeJson(raw);
+  if (!Array.isArray(parsed)) return [];
+  return parsed.flatMap((entry) => {
+    if (!entry || typeof entry !== "object") return [];
+    const record = entry as Record<string, unknown>;
+    const id = stringValue(record.id);
+    const role = record.role === "user" || record.role === "assistant" || record.role === "system" ? record.role : undefined;
+    const text = stringValue(record.text);
+    const timestamp = stringValue(record.timestamp);
+    const scopeId = stringValue(record.scopeId);
+    const scopeTitle = stringValue(record.scopeTitle);
+    if (!id || !role || !text || !timestamp || !scopeId || !scopeTitle) return [];
+    return [{
+      id,
+      role,
+      text: compactText(text, 4000),
+      timestamp,
+      scopeId,
+      scopeTitle,
+      scopeKind: stringValue(record.scopeKind),
+      contextTitle: stringValue(record.contextTitle),
+      contextPath: stringValue(record.contextPath),
+      intent: stringValue(record.intent),
+      status: stringValue(record.status)
+    }];
+  });
+}
+
+async function callEngineeringDiagramDiscussionAgent(
+  root: string,
+  userMessage: string,
+  currentDiagram: EngineeringDiagramDiscussionContext,
+  generatedAt: string,
+  conversationHistory: ScopedAgentConversationHistoryEntry[] = []
+): Promise<{ discussion: EngineeringDiagramDiscussionResult; providerSummary: Record<string, unknown> }> {
+  const config = await loadModelConfig(root);
+  const taskType = "engineering.diagram_discussion";
+  const route = resolveModelRoute(config, taskType);
+  const providerConfig = config.providers[route.provider];
+  const provider = createProvider(route.provider, {
+    apiKey: providerConfig?.apiKey,
+    apiKeyEnv: providerConfig?.apiKeyEnv,
+    baseUrl: providerConfig?.baseUrl
+  });
+  const payload = {
+    schemaVersion: "praxis.engineeringDiagramDiscussionRequest.v1",
+    root,
+    generatedAt,
+    userMessage,
+    conversationHistory: conversationHistory.slice(-24),
+    currentDiagram,
+    policy: {
+      pageMode: "engineering_explorer",
+      allowedScope: "technical_complexity_only",
+      redirectBusinessStoryQuestionsToDesignExplorer: true,
+      doNotWriteFiles: false,
+      documentWritesAllowed: true,
+      allowedWriteRoots: ["docs/engineering"],
+      documentEditProtocol: ["replace_text", "replace_between_markers", "append_section", "replace_document"],
+      proposedOperationsAreCandidatesOnly: false,
+      doNotGenerateSourceCode: true,
+      keepFactsAndInferencesSeparated: true
+    }
+  };
+  const response = await provider.call({
+    route,
+    responseFormat: "json",
+    messages: [
+      { role: "system", content: getPrompt("engineering-diagram-discussion").body },
+      { role: "user", content: JSON.stringify(payload, null, 2) }
+    ]
+  });
+  return {
+    discussion: parseEngineeringDiagramDiscussionResult(response.content),
+    providerSummary: {
+      provider: response.provider,
+      model: response.model,
+      taskType,
+      reasoning: route.reasoning,
+      reasoningEffort: route.reasoningEffort
+    }
+  };
+}
+
+async function callArchitectureDiagramDiscussionAgent(
+  root: string,
+  userMessage: string,
+  currentDiagram: ArchitectureDiagramDiscussionContext,
+  generatedAt: string,
+  conversationHistory: ScopedAgentConversationHistoryEntry[] = []
+): Promise<{ discussion: ArchitectureDiagramDiscussionResult; providerSummary: Record<string, unknown> }> {
+  const config = await loadModelConfig(root);
+  const taskType = "architecture.diagram_discussion";
+  const route = resolveModelRoute(config, taskType);
+  const providerConfig = config.providers[route.provider];
+  const provider = createProvider(route.provider, {
+    apiKey: providerConfig?.apiKey,
+    apiKeyEnv: providerConfig?.apiKeyEnv,
+    baseUrl: providerConfig?.baseUrl
+  });
+  const payload = {
+    schemaVersion: "praxis.architectureDiagramDiscussionRequest.v1",
+    root,
+    generatedAt,
+    userMessage,
+    conversationHistory: conversationHistory.slice(-24),
+    currentDiagram,
+    policy: {
+      pageMode: "architecture_explorer",
+      allowedScope: "c4_architecture_only",
+      redirectBusinessStoryQuestionsToDesignExplorer: true,
+      redirectTechnicalComplexityQuestionsToEngineeringExplorer: true,
+      doNotWriteFiles: false,
+      documentWritesAllowed: true,
+      allowedWriteRoots: ["docs/architecture"],
+      documentEditProtocol: ["replace_text", "replace_between_markers", "append_section", "replace_document"],
+      proposedOperationsAreCandidatesOnly: false,
+      doNotGenerateSourceCode: true,
+      keepFactsAndInferencesSeparated: true
+    }
+  };
+  const response = await provider.call({
+    route,
+    responseFormat: "json",
+    messages: [
+      { role: "system", content: getPrompt("architecture-c4-discussion").body },
+      { role: "user", content: JSON.stringify(payload, null, 2) }
+    ]
+  });
+  return {
+    discussion: parseArchitectureDiagramDiscussionResult(response.content),
+    providerSummary: {
+      provider: response.provider,
+      model: response.model,
+      taskType,
+      reasoning: route.reasoning,
+      reasoningEffort: route.reasoningEffort
+    }
+  };
+}
+
+async function buildReviewFindingDiscussionContext(
+  root: string,
+  finding: ReviewFinding,
+  issue: { docPath?: string; htmlPath?: string } | undefined,
+  category: { category?: string; docPath?: string; htmlPath?: string } | undefined
+): Promise<ReviewFindingDiscussionContext> {
+  const [rootReviewExcerpt, issueExcerpt, categoryExcerpt, plan] = await Promise.all([
+    readProjectTextIfExists(root, QUALITY_REVIEW_DOC_RELATIVE_PATH).then((content) => compactText(content, 12_000)),
+    issue?.docPath
+      ? readProjectTextIfExists(root, issue.docPath).then((content) => compactText(content, 10_000))
+      : Promise.resolve(""),
+    category?.docPath
+      ? readProjectTextIfExists(root, category.docPath).then((content) => compactText(content, 10_000))
+      : Promise.resolve(""),
+    readProjectChangePlan(root).catch(() => undefined)
+  ]);
+  const relatedChangeItemId = reviewFindingChangeItemId(finding.id);
+  const relatedChangeItem = plan?.model?.changeItems.find((item) => item.id === relatedChangeItemId);
+  return {
+    schemaVersion: "praxis.reviewFindingDiscussionContext.v1",
+    rootReviewPath: QUALITY_REVIEW_DOC_RELATIVE_PATH,
+    rootReviewHtmlPath: QUALITY_REVIEW_HTML_RELATIVE_PATH,
+    finding,
+    issueDocument: issue ? {
+      docPath: issue.docPath,
+      htmlPath: issue.htmlPath,
+      excerpt: issueExcerpt
+    } : undefined,
+    categoryDocument: category ? {
+      category: category.category,
+      docPath: category.docPath,
+      htmlPath: category.htmlPath,
+      excerpt: categoryExcerpt
+    } : undefined,
+    rootReviewExcerpt,
+    projectChangePlan: plan ? {
+      exists: plan.exists,
+      stale: plan.stale,
+      markdownRelativePath: plan.markdownRelativePath,
+      htmlRelativePath: plan.htmlRelativePath,
+      relatedChangeItemId,
+      relatedChangeItemStatus: relatedChangeItem?.status
+    } : undefined
+  };
+}
+
+async function callReviewFindingDiscussionAgent(
+  root: string,
+  userMessage: string,
+  context: ReviewFindingDiscussionContext,
+  generatedAt: string,
+  conversationHistory: ScopedAgentConversationHistoryEntry[] = []
+): Promise<{ discussion: ReviewFindingDiscussionResult; providerSummary: Record<string, unknown> }> {
+  const config = await loadModelConfig(root);
+  const taskType = "review.finding_discussion";
+  const route = resolveModelRoute(config, taskType);
+  const providerConfig = config.providers[route.provider];
+  const provider = createProvider(route.provider, {
+    apiKey: providerConfig?.apiKey,
+    apiKeyEnv: providerConfig?.apiKeyEnv,
+    baseUrl: providerConfig?.baseUrl
+  });
+  const payload = {
+    schemaVersion: "praxis.reviewFindingDiscussionRequest.v1",
+    root,
+    generatedAt,
+    userMessage,
+    conversationHistory: conversationHistory.slice(-40),
+    context,
+    policy: {
+      pageMode: "review_queue",
+      allowedScope: "selected_review_finding_only",
+      sharedAgentHistory: true,
+      doNotEditSourceCode: true,
+      doNotLetUserCloseFindingManually: true,
+      allowAgentEvidenceBasedFalsePositiveDecision: true,
+      falsePositiveDecisionMustUpdateReviewDocuments: true,
+      regressionRecordRequiredWhenProjectUnderstandingChanges: true,
+      projectChangePlanIsRequiredForFixes: true,
+      runtimeOwnsPlanDocumentWrites: true,
+      allowedWriteTargetsAfterDecision: [
+        QUALITY_REVIEW_DOC_RELATIVE_PATH,
+        QUALITY_REVIEW_HTML_RELATIVE_PATH,
+        "docs/review/categories/**",
+        "docs/review/issues/**",
+        "docs/review/regressions/**",
+        PROJECT_CHANGE_PLAN_DOC_RELATIVE_PATH,
+        PROJECT_CHANGE_PLAN_HTML_RELATIVE_PATH
+      ],
+      reviewQueueIsProblemEvidenceNotImplementationWorkspace: true
+    }
+  };
+  const response = await provider.call({
+    route,
+    responseFormat: "json",
+    messages: [
+      { role: "system", content: getPrompt("review-finding-discussion").body },
+      { role: "user", content: JSON.stringify(payload, null, 2) }
+    ]
+  });
+  return {
+    discussion: parseReviewFindingDiscussionResult(response.content),
+    providerSummary: {
+      provider: response.provider,
+      model: response.model,
+      taskType,
+      reasoning: route.reasoning,
+      reasoningEffort: route.reasoningEffort
+    }
+  };
+}
+
+async function callDesignDiscoveryAgent(
+  root: string,
+  codeFacts: CodeFactGraphSnapshot,
+  memoryRecords: MemoryRecord[],
+  args: Args,
+  progress?: { runId: string; stage: string },
+  codeUnderstandingSpine?: Record<string, unknown>
+): Promise<{ model: InteractionModelCandidate; providerSummary: Record<string, unknown> }> {
+  const generatedAt = new Date().toISOString();
+  const config = await loadModelConfig(root);
+  const taskType = "design.discovery.use_cases";
+  const route = resolveModelRoute(config, taskType);
+  const providerConfig = config.providers[route.provider];
+  const provider = createProvider(route.provider, {
+    apiKey: providerConfig?.apiKey,
+    apiKeyEnv: providerConfig?.apiKeyEnv,
+    baseUrl: providerConfig?.baseUrl
+  });
+  const codeFactDigest = designDiscoveryCodeFactDigest(codeFacts, args);
+  const memoryDigest = designDiscoveryMemoryDigest(memoryRecords);
+  const payload = {
+    schemaVersion: "praxis.designDiscoveryUseCasesRequest.v1",
+    root,
+    generatedAt,
+    instruction: typeof args.instruction === "string" ? args.instruction : "请为 Design Explorer 恢复中文候选业务故事和用例图模型。",
+    outputSchema: "praxis.interactionModel.v1",
+    codeFacts: codeFactDigest,
+    codeUnderstandingSpine,
+    memory: memoryDigest,
+    projectionPolicy: {
+      modelIsSourceOfTruth: true,
+      useCaseDiagramIsProjection: true,
+      doNotOutputMermaid: true,
+      doNotMarkConfirmedWithoutUserEvidence: true,
+      humanReadableLanguage: "zh-CN",
+      keepTechnicalIdentifiersVerbatim: true,
+      persistentDocuments: {
+        map: [DESIGN_MAP_DOC_RELATIVE_PATH, DESIGN_MAP_HTML_RELATIVE_PATH],
+        perUseCaseDirectory: DESIGN_USE_CASE_DIAGRAMS_DIR_RELATIVE_PATH,
+        perUseCaseDrilldowns: [
+          `${DESIGN_USE_CASE_DIAGRAMS_DIR_RELATIVE_PATH}/<story>/activity.md`,
+          `${DESIGN_USE_CASE_DIAGRAMS_DIR_RELATIVE_PATH}/<story>/sequences/<scenario>.md`,
+          `${DESIGN_USE_CASE_DIAGRAMS_DIR_RELATIVE_PATH}/<story>/state-machines/<state-object>.md`,
+          `${DESIGN_USE_CASE_DIAGRAMS_DIR_RELATIVE_PATH}/<story>/realization/class-collaboration.md`
+        ]
+      }
+    }
+  };
+  if (progress) {
+    await writeDesignDiscoveryProgress(root, progress.runId, progress.stage, "running", "已构造 Design Discovery 模型请求上下文。", {
+      kind: "runtime_event",
+      title: "构造模型请求",
+      metadata: [
+        `selected code facts: ${String(codeFactDigest.selectedCount ?? 0)}`,
+        `spine behavior slices: ${String(readNestedNumber(codeUnderstandingSpine, ["summary", "behaviorSliceCount"]) ?? 0)}`,
+        `spine unknown gaps: ${String(readNestedNumber(codeUnderstandingSpine, ["summary", "unknownGapCount"]) ?? 0)}`,
+        `selected memory: ${String(memoryDigest.selectedCount ?? 0)}`,
+        `truncated code facts: ${String(codeFactDigest.truncatedCount ?? 0)}`,
+        `truncated memory: ${String(memoryDigest.truncatedCount ?? 0)}`
+      ]
+    });
+    await writeDesignDiscoveryProgress(root, progress.runId, progress.stage, "running", "正在调用 Design Discovery 模型。", {
+      kind: "tool_call",
+      title: "调用 Design Discovery 模型",
+      command: `${route.provider}/${route.model}`,
+      metadata: [
+        `task: ${taskType}`,
+        `reasoning: ${String(route.reasoning ?? false)}`,
+        `effort: ${route.reasoningEffort ?? "default"}`,
+        `timeout: ${formatModelRouteTimeout(route.timeoutMs)}`
+      ]
+    });
+  }
+  const response = await provider.call({
+    route,
+    responseFormat: "json",
+    messages: [
+      { role: "system", content: getPrompt("design-discovery-use-cases").body },
+      { role: "user", content: JSON.stringify(payload, null, 2) }
+    ]
+  });
+  if (progress) {
+    await writeDesignDiscoveryProgress(root, progress.runId, progress.stage, "running", "模型已返回，正在解析候选 Interaction Model。", {
+      kind: "assistant_message",
+      title: "模型返回",
+      metadata: [
+        `provider: ${response.provider}`,
+        `model: ${response.model}`,
+        `content_chars: ${response.content.length}`,
+        response.usage ? `usage: ${JSON.stringify(response.usage)}` : "usage: unavailable"
+      ]
+    });
+  }
+  const model = parseInteractionModelCandidate(response.content, root, generatedAt);
+  if (progress) {
+    await writeDesignDiscoveryProgress(root, progress.runId, progress.stage, "running", `模型输出已解析为 ${model.useCases.length} 个候选用例。`, {
+      kind: "validation",
+      title: "解析模型输出",
+      metadata: designModelCountMetadata(model)
+    });
+  }
+  return {
+    model,
+    providerSummary: {
+      provider: response.provider,
+      model: response.model,
+      taskType,
+      reasoning: route.reasoning,
+      reasoningEffort: route.reasoningEffort
+    }
+  };
+}
+
+function formatModelRouteTimeout(timeoutMs: number | undefined): string {
+  if (!timeoutMs || timeoutMs <= 0) return "no timeout";
+  return `${Math.round(timeoutMs / 1000)}s`;
+}
+
+function readNestedNumber(value: unknown, pathParts: string[]): number | undefined {
+  let cursor = value;
+  for (const key of pathParts) {
+    if (!cursor || typeof cursor !== "object" || Array.isArray(cursor)) return undefined;
+    cursor = (cursor as Record<string, unknown>)[key];
+  }
+  return typeof cursor === "number" ? cursor : undefined;
+}
+
+function designModelCountMetadata(model: InteractionModelCandidate): string[] {
+  return [
+    `contexts: ${model.contexts.length}`,
+    `actors: ${model.actors.length}`,
+    `external systems: ${model.externalSystems.length}`,
+    `use cases: ${model.useCases.length}`,
+    `relations: ${model.relations.length}`,
+    `drilldown diagrams: ${model.useCaseDrilldowns.length}`,
+    `questions: ${model.questions.length}`
+  ];
+}
+
+async function commandDesignStoryIntake(args: Args): Promise<void> {
+  const root = path.resolve(required(args, "root"));
+  const message = required(args, "message").trim();
+  const generatedAt = new Date().toISOString();
+  const currentModel = await readInteractionModelCandidateOrEmpty(root, args, generatedAt);
+  const result = await callDesignStoryIntakeAgent(root, message, currentModel, generatedAt);
+  const accepted = result.intake.accepted && result.intake.stories.length > 0;
+  let updatedModel: InteractionModelCandidate | undefined;
+  let designMapDocPath: string | undefined;
+  let designMapHtmlPath: string | undefined;
+  let useCaseDiagramDocuments: Awaited<ReturnType<typeof writeUseCaseDiagramDocuments>> | undefined;
+  let modelPath: string | undefined;
+  let projection: Awaited<ReturnType<typeof writeDesignUseCaseProjectionViews>> | undefined;
+  let addedUseCaseIds: string[] = [];
+  let versionDecision: DesignVersionDecision | undefined;
+  let versionProviderSummary: Record<string, unknown> | undefined;
+
+  if (accepted) {
+    const merged = mergeDesignStoryCandidates(root, currentModel, result.intake.stories, message, generatedAt);
+    updatedModel = merged.model;
+    addedUseCaseIds = merged.addedUseCaseIds;
+    const versionResult = await callDesignVersionDecisionAgent(root, {
+      generatedAt,
+      userMessage: message,
+      currentModel,
+      updatedModel,
+      intake: result.intake,
+      addedUseCaseIds,
+      changedArtifacts: [DESIGN_MAP_DOC_RELATIVE_PATH, DESIGN_MAP_HTML_RELATIVE_PATH, `${DESIGN_USE_CASE_DIAGRAMS_DIR_RELATIVE_PATH}/**`]
+    });
+    versionDecision = versionResult.decision;
+    versionProviderSummary = versionResult.providerSummary;
+    designMapDocPath = await writeUseCaseDiagramsMapDocument(root, updatedModel, versionDecision);
+    designMapHtmlPath = await writeUseCaseDiagramsMapHtmlDocument(root, updatedModel, versionDecision);
+    useCaseDiagramDocuments = await writeUseCaseDiagramDocuments(root, updatedModel, versionDecision);
+    modelPath = await writeInteractionModelCandidate(root, updatedModel);
+    projection = await writeDesignUseCaseProjectionViews(root, updatedModel);
+    await appendChange(root, {
+      title: "Design story intake updated Use Case Diagram map",
+      summary: `Accepted ${addedUseCaseIds.length} candidate Use Case Diagram(s) from Design Explorer story intake. Version ${versionDecision.currentVersion} -> ${versionDecision.nextVersion} (${versionDecision.bump.toUpperCase()}).`,
+      kind: "CANDIDATE"
+    }).catch(() => undefined);
+    await appendTrace(root, {
+      id: `trace-event:design-story-intake:${Date.now()}`,
+      traceId: `trace:design-story-intake:${Date.now()}`,
+      timestamp: generatedAt,
+      kind: "design.story_intake.completed",
+      target: { type: "project", id: "project:root" },
+      summary: "Design Story Intake added candidate Use Case Diagram stories to docs/design.",
+      data: {
+        addedUseCaseIds,
+        designMapDocPath,
+        designMapHtmlPath,
+        useCaseDiagramDocuments,
+        modelPath,
+        projection,
+        versionDecision,
+        provider: result.providerSummary,
+        versionProvider: versionProviderSummary
+      }
+    }).catch(() => undefined);
+  }
+
+  outputJson({
+    ok: true,
+    root,
+    intent: result.intake.intent,
+    accepted,
+    updated: Boolean(updatedModel),
+    summary: result.intake.summary,
+    reason: result.intake.reason,
+    guidance: result.intake.guidance,
+    missingParts: result.intake.missingParts,
+    questions: result.intake.questions,
+    addedUseCaseIds,
+    designMapDocPath,
+    designMapHtmlPath,
+    useCaseDiagramDocuments,
+    modelPath,
+    manifestPath: projection?.manifestPath,
+    useCaseListViewPath: projection?.useCaseListViewPath,
+    useCaseViewPaths: projection?.useCaseViewPaths ?? [],
+    mermaidPaths: projection?.mermaidPaths ?? [],
+    contexts: updatedModel?.contexts.length ?? currentModel.contexts.length,
+    actors: updatedModel?.actors.length ?? currentModel.actors.length,
+    externalSystems: updatedModel?.externalSystems.length ?? currentModel.externalSystems.length,
+    useCases: updatedModel?.useCases.length ?? currentModel.useCases.length,
+    relations: updatedModel?.relations.length ?? currentModel.relations.length,
+    useCaseDrilldowns: updatedModel?.useCaseDrilldowns.length ?? currentModel.useCaseDrilldowns.length,
+    versionDecision,
+    provider: result.providerSummary,
+    versionProvider: versionProviderSummary
+  });
+}
+
+async function callDesignStoryIntakeAgent(
+  root: string,
+  userMessage: string,
+  currentModel: InteractionModelCandidate,
+  generatedAt: string
+): Promise<{ intake: DesignStoryIntakeResult; providerSummary: Record<string, unknown> }> {
+  const config = await loadModelConfig(root);
+  const taskType = "design.story_intake";
+  const route = resolveModelRoute(config, taskType);
+  const providerConfig = config.providers[route.provider];
+  const provider = createProvider(route.provider, {
+    apiKey: providerConfig?.apiKey,
+    apiKeyEnv: providerConfig?.apiKeyEnv,
+    baseUrl: providerConfig?.baseUrl
+  });
+  const payload = {
+    schemaVersion: "praxis.designStoryIntakeRequest.v1",
+    root,
+    generatedAt,
+    userMessage,
+    currentModel,
+    policy: {
+      pageMode: "list",
+      allowedIntent: "new_story_only",
+      acceptedStoriesBecomeCandidateDesignDocs: true,
+      persistTarget: [DESIGN_MAP_DOC_RELATIVE_PATH, DESIGN_MAP_HTML_RELATIVE_PATH, `${DESIGN_USE_CASE_DIAGRAMS_DIR_RELATIVE_PATH}/<story>.md`, `${DESIGN_USE_CASE_DIAGRAMS_DIR_RELATIVE_PATH}/<story>.html`],
+      perUseCaseDrilldowns: [
+        `${DESIGN_USE_CASE_DIAGRAMS_DIR_RELATIVE_PATH}/<story>/activity.md`,
+        `${DESIGN_USE_CASE_DIAGRAMS_DIR_RELATIVE_PATH}/<story>/sequences/<scenario>.md`,
+        `${DESIGN_USE_CASE_DIAGRAMS_DIR_RELATIVE_PATH}/<story>/state-machines/<state-object>.md`,
+        `${DESIGN_USE_CASE_DIAGRAMS_DIR_RELATIVE_PATH}/<story>/realization/class-collaboration.md`
+      ],
+      doNotExplainExistingDiagramHere: true,
+      doNotGenerateSourceCode: true,
+      doNotMarkConfirmedWithoutUserConfirmation: true,
+      humanReadableLanguage: "zh-CN",
+      keepTechnicalIdentifiersVerbatim: true
+    }
+  };
+  const response = await provider.call({
+    route,
+    responseFormat: "json",
+    messages: [
+      { role: "system", content: getPrompt("design-story-intake").body },
+      { role: "user", content: JSON.stringify(payload, null, 2) }
+    ]
+  });
+  return {
+    intake: parseDesignStoryIntakeResult(response.content),
+    providerSummary: {
+      provider: response.provider,
+      model: response.model,
+      taskType,
+      reasoning: route.reasoning,
+      reasoningEffort: route.reasoningEffort
+    }
+  };
+}
+
+async function callDesignVersionDecisionAgent(
+  root: string,
+  input: {
+    generatedAt: string;
+    userMessage: string;
+    currentModel: InteractionModelCandidate;
+    updatedModel: InteractionModelCandidate;
+    intake: DesignStoryIntakeResult;
+    addedUseCaseIds: string[];
+    changedArtifacts: string[];
+  }
+): Promise<{ decision: DesignVersionDecision; providerSummary: Record<string, unknown> }> {
+  const currentVersion = await readProjectSemanticVersion(root) ?? "0.1.0";
+  const gitVersion = await readProjectGitVersion(root);
+  const config = await loadModelConfig(root);
+  const taskType = "design.version_decision";
+  const route = resolveModelRoute(config, taskType);
+  const providerConfig = config.providers[route.provider];
+  const provider = createProvider(route.provider, {
+    apiKey: providerConfig?.apiKey,
+    apiKeyEnv: providerConfig?.apiKeyEnv,
+    baseUrl: providerConfig?.baseUrl
+  });
+  const payload = {
+    schemaVersion: "praxis.designVersionDecisionRequest.v1",
+    root,
+    generatedAt: input.generatedAt,
+    currentVersion,
+    gitVersion,
+    change: {
+      source: "design-story-intake",
+      userMessage: input.userMessage,
+      intakeSummary: input.intake.summary,
+      intakeReason: input.intake.reason,
+      stories: input.intake.stories.map((story) => ({
+        title: story.title,
+        summary: story.summary,
+        contextTitle: story.contextTitle,
+        primaryActors: story.primaryActors,
+        externalSystems: story.externalSystems,
+        relationCount: story.relations.length,
+        drilldownDiagramCount: story.drilldownDiagrams.length
+      })),
+      addedUseCaseIds: input.addedUseCaseIds,
+      beforeCounts: interactionModelCounts(input.currentModel),
+      afterCounts: interactionModelCounts(input.updatedModel),
+      changedArtifacts: input.changedArtifacts
+    },
+    policy: {
+      agentOwnsVersionDecision: true,
+      userSuppliedVersionIsNotAuthoritative: true,
+      atomicGitCommitRequired: true,
+      oneVersionChangePerAtomicCommit: true,
+      semverRules: {
+        major: "参与者边界、系统边界、故事职责、API 或数据契约发生不兼容变化。",
+        minor: "向后兼容地新增能力、故事、参与者、外部系统、支持流程或设计图层。",
+        patch: "向后兼容的问题修复、澄清、证据更新、非行为性文档或布局变更。",
+        none: "没有持久化的产品、设计、代码或项目记忆变更。"
+      },
+      humanReadableLanguage: "zh-CN",
+      keepTechnicalIdentifiersVerbatim: true
+    }
+  };
+  const response = await provider.call({
+    route,
+    responseFormat: "json",
+    messages: [
+      { role: "system", content: getPrompt("design-version-decision").body },
+      { role: "user", content: JSON.stringify(payload, null, 2) }
+    ]
+  });
+  const decision = parseDesignVersionDecisionResult(
+    response.content,
+    currentVersion,
+    input.changedArtifacts,
+    `新增 ${input.addedUseCaseIds.length} 个候选用例图`,
+    "新增候选用例图故事"
+  );
+  return {
+    decision,
+    providerSummary: {
+      provider: response.provider,
+      model: response.model,
+      taskType,
+      reasoning: route.reasoning,
+      reasoningEffort: route.reasoningEffort
+    }
+  };
+}
+
+async function commandDesignDiagramDiscuss(args: Args): Promise<void> {
+  const root = path.resolve(required(args, "root"));
+  const message = required(args, "message").trim();
+  const diagramId = stringArg(args, "use-case-id") ?? stringArg(args, "diagram-id") ?? required(args, "diagram");
+  const generatedAt = new Date().toISOString();
+  const conversationHistory = parseScopedAgentConversationHistory(stringArg(args, "conversation-history"));
+  const model = await readInteractionModelCandidate(root, args);
+  const currentDiagram = await buildDesignDiagramDiscussionContext(
+    root,
+    model,
+    diagramId,
+    stringArg(args, "selected-anchor"),
+    stringArg(args, "current-uml"),
+    message,
+    args
+  );
+  const result = await callDesignDiagramDiscussionAgent(root, message, currentDiagram, generatedAt, conversationHistory);
+  const documentEdits = await applyDiagramDocumentEdits(root, result.discussion.documentEdits, ["docs/design"]);
+  await appendTrace(root, {
+    id: `trace-event:design-diagram-discussion:${Date.now()}`,
+    traceId: `trace:design-diagram-discussion:${Date.now()}`,
+    timestamp: generatedAt,
+    kind: "design.diagram_discussion.completed",
+    target: { type: "project", id: "project:root" },
+    summary: "Design Diagram Discussion answered within the selected Use Case Diagram boundary.",
+    data: {
+      diagramId: currentDiagram.targetUseCase.id,
+      currentUml: currentDiagram.currentUml,
+      selectedAnchor: currentDiagram.selectedAnchor,
+      linkedDocuments: currentDiagram.linkedDocuments,
+      intent: result.discussion.intent,
+      affectedDocuments: result.discussion.affectedDocuments,
+      documentEdits,
+      provider: result.providerSummary
+    }
+  }).catch(() => undefined);
+  outputJson({
+    ok: true,
+    root,
+    diagramId: currentDiagram.targetUseCase.id,
+    currentUml: currentDiagram.currentUml,
+    intent: result.discussion.intent,
+    answer: result.discussion.answer,
+    guidance: result.discussion.guidance,
+    referencedAnchors: result.discussion.referencedAnchors,
+    suggestedOperations: result.discussion.suggestedOperations,
+    affectedDocuments: result.discussion.affectedDocuments,
+    documentEdits,
+    risks: result.discussion.risks,
+    questions: result.discussion.questions,
+    provider: result.providerSummary
+  });
+}
+
+async function callDesignDiagramDiscussionAgent(
+  root: string,
+  userMessage: string,
+  currentDiagram: DesignDiagramDiscussionContext,
+  generatedAt: string,
+  conversationHistory: ScopedAgentConversationHistoryEntry[] = []
+): Promise<{ discussion: DesignDiagramDiscussionResult; providerSummary: Record<string, unknown> }> {
+  const config = await loadModelConfig(root);
+  const taskType = "design.diagram_discussion";
+  const route = resolveModelRoute(config, taskType);
+  const providerConfig = config.providers[route.provider];
+  const provider = createProvider(route.provider, {
+    apiKey: providerConfig?.apiKey,
+    apiKeyEnv: providerConfig?.apiKeyEnv,
+    baseUrl: providerConfig?.baseUrl
+  });
+  const payload = {
+    schemaVersion: "praxis.designDiagramDiscussionRequest.v1",
+    root,
+    generatedAt,
+    userMessage,
+    conversationHistory: conversationHistory.slice(-24),
+    currentDiagram,
+    policy: {
+      pageMode: "diagram",
+      allowedScope: "selected_current_uml_document_first",
+      rejectNewStoryIntakeHere: true,
+      doNotWriteFiles: false,
+      documentWritesAllowed: true,
+      allowedWriteRoots: ["docs/design"],
+      documentEditProtocol: ["replace_text", "replace_between_markers", "append_section", "replace_document"],
+      proposedOperationsAreCandidatesOnly: false,
+      doNotGenerateSourceCode: true
+    }
+  };
+  const response = await provider.call({
+    route,
+    responseFormat: "json",
+    messages: [
+      { role: "system", content: getPrompt("design-diagram-discussion").body },
+      { role: "user", content: JSON.stringify(payload, null, 2) }
+    ]
+  });
+  return {
+    discussion: parseDesignDiagramDiscussionResult(response.content),
+    providerSummary: {
+      provider: response.provider,
+      model: response.model,
+      taskType,
+      reasoning: route.reasoning,
+      reasoningEffort: route.reasoningEffort
+    }
+  };
+}
+
+async function readInteractionModelCandidateOrEmpty(root: string, args: Args, generatedAt: string): Promise<InteractionModelCandidate> {
+  try {
+    return await readInteractionModelCandidate(root, args);
+  } catch (error) {
+    if (isMissingFileError(error)) return emptyInteractionModelCandidate(root, generatedAt);
+    throw error;
+  }
+}
+
+function parseDesignStoryIntakeResult(content: string): DesignStoryIntakeResult {
+  const parsed = safeJson(content);
+  const raw = isRecord(parsed) && isRecord(parsed.result) ? parsed.result : parsed;
+  if (!isRecord(raw)) throw new Error("Design Story Intake response did not contain a JSON object.");
+  const stories = parseDesignStoryCandidates(raw.stories);
+  const intent = designStoryIntakeIntent(raw.intent);
+  const accepted = raw.accepted === true && intent === "new_story" && stories.length > 0;
+  return {
+    schemaVersion: "praxis.designStoryIntakeResult.v1",
+    intent: accepted ? "new_story" : intent,
+    accepted,
+    summary: stringOr(raw.summary, accepted ? `Accepted ${stories.length} candidate story/stories.` : "The input was not accepted as a new story."),
+    reason: stringOr(raw.reason, ""),
+    guidance: stringOr(raw.guidance, accepted ? "Review the generated candidate Use Case Diagram documents." : "Describe a business actor, goal, trigger and expected outcome."),
+    missingParts: stringArray(raw.missingParts),
+    questions: stringArray(raw.questions),
+    stories: accepted ? stories : []
+  };
+}
+
+function parseDesignStoryCandidates(value: unknown): DesignStoryCandidateInput[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item): DesignStoryCandidateInput[] => {
+    if (!isRecord(item)) return [];
+    const title = stringValue(item.title);
+    const summary = stringValue(item.summary);
+    if (!title || !summary) return [];
+    return [{
+      title,
+      summary,
+      contextTitle: stringOr(item.contextTitle, "Project Design"),
+      contextSummary: stringOr(item.contextSummary, `Stories related to ${title}.`),
+      primaryActors: stringArray(item.primaryActors),
+      supportingActors: stringArray(item.supportingActors),
+      externalSystems: stringArray(item.externalSystems),
+      trigger: stringValue(item.trigger),
+      preconditions: stringArray(item.preconditions),
+      mainSuccessScenario: stringArray(item.mainSuccessScenario),
+      alternativeFlows: stringArray(item.alternativeFlows),
+      failureFlows: stringArray(item.failureFlows),
+      postconditions: stringArray(item.postconditions),
+      questions: stringArray(item.questions),
+      relations: parseDesignStoryRelations(item.relations),
+      drilldownDiagrams: parseDesignStoryDrilldownDiagrams(item.drilldownDiagrams)
+    }];
+  });
+}
+
+function parseDesignStoryDrilldownDiagrams(value: unknown): DesignStoryDrilldownDiagramInput[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item): DesignStoryDrilldownDiagramInput[] => {
+    if (!isRecord(item)) return [];
+    const kind = designDrilldownKind(item.kind);
+    const title = stringValue(item.title);
+    const summary = stringValue(item.summary);
+    if (!title || !summary) return [];
+    const coverage = normalizeUseCaseDrilldownCoverage(item, kind, undefined, summary);
+    return [{
+      kind,
+      title,
+      summary,
+      coverage,
+      explanation: normalizeUseCaseDrilldownExplanation(item, kind, undefined, coverage, summary),
+      mermaid: stringValue(item.mermaid),
+      questions: stringArray(item.questions)
+    }];
+  });
+}
+
+function parseDesignStoryRelations(value: unknown): DesignStoryRelationInput[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item): DesignStoryRelationInput[] => {
+    if (!isRecord(item)) return [];
+    const kind = designStoryRelationKind(item.kind);
+    const targetTitle = stringValue(item.targetTitle);
+    if (!kind || !targetTitle) return [];
+    return [{
+      kind,
+      targetTitle,
+      summary: stringOr(item.summary, `${kind} ${targetTitle}`)
+    }];
+  });
+}
+
+function parseDesignDiagramDiscussionResult(content: string): DesignDiagramDiscussionResult {
+  const parsed = safeJson(content);
+  const raw = isRecord(parsed) && isRecord(parsed.result) ? parsed.result : parsed;
+  if (!isRecord(raw)) throw new Error("Design Diagram Discussion response did not contain a JSON object.");
+  return {
+    schemaVersion: "praxis.designDiagramDiscussionResult.v1",
+    intent: designDiagramDiscussionIntent(raw.intent),
+    answer: stringOr(raw.answer, "当前问题没有落在所选 Use Case Diagram 的边界内。"),
+    guidance: stringOr(raw.guidance, ""),
+    referencedAnchors: stringArray(raw.referencedAnchors),
+    suggestedOperations: stringArray(raw.suggestedOperations),
+    affectedDocuments: parseDesignDiscussionAffectedDocuments(raw.affectedDocuments),
+    documentEdits: parseDiagramDocumentEdits(raw.documentEdits),
+    risks: stringArray(raw.risks),
+    questions: stringArray(raw.questions)
+  };
+}
+
+function parseDesignDiscussionAffectedDocuments(value: unknown): DesignDiscussionAffectedDocument[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item): DesignDiscussionAffectedDocument[] => {
+    if (!isRecord(item)) return [];
+    const pathValue = normalizeProjectRelativePath(stringValue(item.path) ?? "");
+    if (!pathValue) return [];
+    return [{
+      path: pathValue,
+      kind: stringOr(item.kind, "linked_document"),
+      reason: stringOr(item.reason, "需要根据当前 UML 讨论结果复核该关联文档。"),
+      update: designAffectedDocumentUpdate(item.update)
+    }];
+  });
+}
+
+function designAffectedDocumentUpdate(value: unknown): DesignDiscussionAffectedDocument["update"] {
+  if (value === "must_update" || value === "review" || value === "no_change") return value;
+  return "review";
+}
+
+function parseEngineeringDiagramDiscussionResult(content: string): EngineeringDiagramDiscussionResult {
+  const parsed = safeJson(content);
+  const raw = isRecord(parsed) && isRecord(parsed.result) ? parsed.result : parsed;
+  if (!isRecord(raw)) throw new Error("Engineering Diagram Discussion response did not contain a JSON object.");
+  return {
+    schemaVersion: "praxis.engineeringDiagramDiscussionResult.v1",
+    intent: engineeringDiagramDiscussionIntent(raw.intent),
+    answer: stringOr(raw.answer, "当前问题没有落在 Engineering Explorer 的技术复杂度边界内。"),
+    guidance: stringOr(raw.guidance, ""),
+    technicalPerspective: stringOr(raw.technicalPerspective, "unknown"),
+    referencedAnchors: stringArray(raw.referencedAnchors),
+    suggestedDrilldowns: stringArray(raw.suggestedDrilldowns),
+    documentEdits: parseDiagramDocumentEdits(raw.documentEdits),
+    risks: stringArray(raw.risks),
+    questions: stringArray(raw.questions)
+  };
+}
+
+function parseArchitectureDiagramDiscussionResult(content: string): ArchitectureDiagramDiscussionResult {
+  const parsed = safeJson(content);
+  const raw = isRecord(parsed) && isRecord(parsed.result) ? parsed.result : parsed;
+  if (!isRecord(raw)) throw new Error("Architecture Diagram Discussion response did not contain a JSON object.");
+  return {
+    schemaVersion: "praxis.architectureDiagramDiscussionResult.v1",
+    intent: architectureDiagramDiscussionIntent(raw.intent),
+    answer: stringOr(raw.answer, "当前问题没有落在 Architecture Explorer 的 C4 架构边界内。"),
+    guidance: stringOr(raw.guidance, ""),
+    architecturePerspective: stringOr(raw.architecturePerspective, "unknown"),
+    referencedAnchors: stringArray(raw.referencedAnchors),
+    suggestedDrilldowns: stringArray(raw.suggestedDrilldowns),
+    documentEdits: parseDiagramDocumentEdits(raw.documentEdits),
+    risks: stringArray(raw.risks),
+    questions: stringArray(raw.questions)
+  };
+}
+
+function parseReviewFindingDiscussionResult(content: string): ReviewFindingDiscussionResult {
+  const parsed = safeJson(content);
+  const raw = isRecord(parsed) && isRecord(parsed.result) ? parsed.result : parsed;
+  if (!isRecord(raw)) throw new Error("Review Finding Discussion response did not contain a JSON object.");
+  const intent = reviewFindingDiscussionIntent(raw.intent);
+  return {
+    schemaVersion: "praxis.reviewFindingDiscussionResult.v1",
+    intent,
+    answer: stringOr(raw.answer, "当前问题没有落在所选评审问题的处理边界内。"),
+    guidance: stringOr(raw.guidance, ""),
+    referencedDocuments: stringArray(raw.referencedDocuments).map(normalizeProjectRelativePath),
+    planAction: parseReviewFindingDiscussionPlanAction(raw.planAction),
+    statusDecision: parseReviewFindingStatusDecision(raw.statusDecision, intent),
+    regressionAction: parseReviewFindingRegressionAction(raw.regressionAction),
+    risks: stringArray(raw.risks),
+    questions: stringArray(raw.questions)
+  };
+}
+
+function parseReviewFindingDiscussionPlanAction(value: unknown): ReviewFindingDiscussionPlanAction {
+  const raw = isRecord(value) ? value : {};
+  return {
+    shouldCreateOrUpdate: raw.shouldCreateOrUpdate === true,
+    reason: stringOr(raw.reason, "当前讨论未要求创建或更新项目变更项。"),
+    expectedChangeSummary: stringOr(raw.expectedChangeSummary, "")
+  };
+}
+
+function parseReviewFindingStatusDecision(value: unknown, intent: ReviewFindingDiscussionIntent): ReviewFindingStatusDecision {
+  const raw = isRecord(value) ? value : {};
+  const status = raw.status === "needs_more_evidence" ? "needs_more_evidence" : "false_positive";
+  return {
+    shouldUpdate: raw.shouldUpdate === true || intent === "mark_finding_false_positive",
+    status,
+    reason: stringOr(raw.reason, "Review Agent did not provide a status update reason."),
+    evidenceSummary: stringOr(raw.evidenceSummary, ""),
+    updatedSuggestedAction: stringOr(raw.updatedSuggestedAction, "")
+  };
+}
+
+function parseReviewFindingRegressionAction(value: unknown): ReviewFindingRegressionAction {
+  const raw = isRecord(value) ? value : {};
+  return {
+    shouldCreate: raw.shouldCreate === true,
+    reason: stringOr(raw.reason, ""),
+    correctedUnderstanding: stringOr(raw.correctedUnderstanding, ""),
+    affectedCategories: stringArray(raw.affectedCategories).flatMap((item) => {
+      const parsed = ReviewCategorySchema.safeParse(item);
+      return parsed.success ? [parsed.data] : [];
+    }),
+    affectedFindingIds: stringArray(raw.affectedFindingIds),
+    recommendedReviewScope: stringOr(raw.recommendedReviewScope, "")
+  };
+}
+
+function parseDiagramDocumentEdits(value: unknown): DiagramDocumentEdit[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item): DiagramDocumentEdit[] => {
+    if (!isRecord(item)) return [];
+    const pathValue = normalizeProjectRelativePath(stringValue(item.path) ?? "");
+    const operation = diagramDocumentEditOperation(item.operation);
+    if (!pathValue || !operation) return [];
+    return [{
+      path: pathValue,
+      operation,
+      reason: stringOr(item.reason, "Agent requested a docs-backed diagram document edit."),
+      oldText: stringValue(item.oldText),
+      newText: stringValue(item.newText),
+      startMarker: stringValue(item.startMarker),
+      endMarker: stringValue(item.endMarker),
+      content: stringValue(item.content),
+      createIfMissing: item.createIfMissing === true
+    }];
+  });
+}
+
+function diagramDocumentEditOperation(value: unknown): DiagramDocumentEditOperation | undefined {
+  if (
+    value === "replace_text"
+    || value === "replace_between_markers"
+    || value === "append_section"
+    || value === "replace_document"
+  ) {
+    return value;
+  }
+  return undefined;
+}
+
+async function applyDiagramDocumentEdits(
+  root: string,
+  edits: DiagramDocumentEdit[],
+  allowedPrefixes: string[]
+): Promise<DiagramDocumentEditResult[]> {
+  const results: DiagramDocumentEditResult[] = [];
+  const changedMarkdownPaths = new Set<string>();
+  for (const edit of edits.slice(0, 20)) {
+    const result = await applyDiagramDocumentEdit(root, edit, allowedPrefixes);
+    results.push(result);
+    if (result.status === "applied" && result.changed && result.path.endsWith(".md")) {
+      changedMarkdownPaths.add(result.path);
+    }
+  }
+  for (const markdownPath of changedMarkdownPaths) {
+    const syncResult = await refreshCompanionHtmlProjectionFromMarkdown(root, markdownPath, allowedPrefixes);
+    if (syncResult) results.push(syncResult);
+  }
+  return results;
+}
+
+async function refreshCompanionHtmlProjectionFromMarkdown(
+  root: string,
+  markdownPath: string,
+  allowedPrefixes: string[]
+): Promise<DiagramDocumentEditResult | undefined> {
+  const family = diagramProjectionFamilyFromMarkdownPath(markdownPath);
+  if (!family) return undefined;
+  const htmlPath = markdownPath.replace(/\.md$/i, ".html");
+  if (htmlPath === markdownPath) return undefined;
+  const rejection = rejectDiagramDocumentEditPath(root, htmlPath, allowedPrefixes);
+  if (rejection) return undefined;
+  const markdownAbsolutePath = path.resolve(root, markdownPath);
+  const htmlAbsolutePath = path.resolve(root, htmlPath);
+  let markdown = "";
+  let existingHtml = "";
+  try {
+    markdown = await readFile(markdownAbsolutePath, "utf8");
+  } catch (error) {
+    return {
+      path: htmlPath,
+      operation: "replace_document",
+      status: "failed",
+      changed: false,
+      reason: `同步 ${markdownPath} 的 HTML 投影。`,
+      message: error instanceof Error ? error.message : String(error)
+    };
+  }
+  try {
+    existingHtml = await readFile(htmlAbsolutePath, "utf8");
+  } catch (error) {
+    if (!isMissingFileError(error)) {
+      return {
+        path: htmlPath,
+        operation: "replace_document",
+        status: "failed",
+        changed: false,
+        reason: `同步 ${markdownPath} 的 HTML 投影。`,
+        message: error instanceof Error ? error.message : String(error)
+      };
+    }
+  }
+  const nextHtml = renderDiagramMarkdownProjectionHtml(markdown, markdownPath, htmlPath, existingHtml, family);
+  if (nextHtml === existingHtml) {
+    return {
+      path: htmlPath,
+      operation: "replace_document",
+      status: "skipped",
+      changed: false,
+      reason: `同步 ${markdownPath} 的 HTML 投影。`,
+      message: "Companion HTML projection already matches the Markdown document."
+    };
+  }
+  await mkdir(path.dirname(htmlAbsolutePath), { recursive: true });
+  await writeFile(htmlAbsolutePath, nextHtml, "utf8");
+  return {
+    path: htmlPath,
+    operation: "replace_document",
+    status: "applied",
+    changed: true,
+    reason: `同步 ${markdownPath} 的 HTML 投影。`,
+    message: "Companion HTML projection refreshed from Markdown.",
+    bytesWritten: Buffer.byteLength(nextHtml, "utf8")
+  };
+}
+
+type DiagramProjectionFamily = "design" | "engineering" | "architecture";
+
+function diagramProjectionFamilyFromMarkdownPath(markdownPath: string): DiagramProjectionFamily | undefined {
+  const normalized = normalizeProjectRelativePath(markdownPath);
+  if (normalized.startsWith("docs/engineering/")) return "engineering";
+  if (normalized.startsWith("docs/architecture/")) return "architecture";
+  if (!normalized.startsWith("docs/design/use-case-diagrams/")) return undefined;
+  if (
+    normalized.endsWith("/activity.md")
+    || normalized.includes("/sequences/")
+    || normalized.includes("/state-machines/")
+    || normalized.includes("/realization/")
+    || normalized.includes("/interaction-overviews/")
+    || normalized.includes("/communications/")
+    || normalized.includes("/timing/")
+    || normalized.includes("/object-snapshots/")
+    || normalized.includes("/composite-structures/")
+  ) {
+    return "design";
+  }
+  return undefined;
+}
+
+async function applyDiagramDocumentEdit(
+  root: string,
+  edit: DiagramDocumentEdit,
+  allowedPrefixes: string[]
+): Promise<DiagramDocumentEditResult> {
+  const normalizedPath = normalizeProjectRelativePath(edit.path);
+  const rejection = rejectDiagramDocumentEditPath(root, normalizedPath, allowedPrefixes);
+  if (rejection) {
+    return {
+      path: normalizedPath,
+      operation: edit.operation,
+      status: "rejected",
+      changed: false,
+      reason: edit.reason,
+      message: rejection
+    };
+  }
+  const absolutePath = path.resolve(root, normalizedPath);
+  let existing = "";
+  try {
+    existing = await readFile(absolutePath, "utf8");
+  } catch (error) {
+    if (!isMissingFileError(error)) {
+      return {
+        path: normalizedPath,
+        operation: edit.operation,
+        status: "failed",
+        changed: false,
+        reason: edit.reason,
+        message: error instanceof Error ? error.message : String(error)
+      };
+    }
+    if (!edit.createIfMissing && edit.operation !== "replace_document" && edit.operation !== "append_section") {
+      return {
+        path: normalizedPath,
+        operation: edit.operation,
+        status: "failed",
+        changed: false,
+        reason: edit.reason,
+        message: "Document does not exist and createIfMissing was not set."
+      };
+    }
+  }
+
+  const next = applyDiagramDocumentEditToContent(existing, edit, normalizedPath);
+  if (next.status !== "applied") {
+    return {
+      path: normalizedPath,
+      operation: edit.operation,
+      status: next.status,
+      changed: false,
+      reason: edit.reason,
+      message: next.message
+    };
+  }
+  const nextContent = normalizeDiagramDocumentContent(normalizedPath, next.content);
+  if (nextContent === existing) {
+    return {
+      path: normalizedPath,
+      operation: edit.operation,
+      status: "skipped",
+      changed: false,
+      reason: edit.reason,
+      message: "Edit produced no content change."
+    };
+  }
+  await mkdir(path.dirname(absolutePath), { recursive: true });
+  await writeFile(absolutePath, nextContent, "utf8");
+  return {
+    path: normalizedPath,
+    operation: edit.operation,
+    status: "applied",
+    changed: true,
+    reason: edit.reason,
+    message: "Document edit applied.",
+    bytesWritten: Buffer.byteLength(nextContent, "utf8")
+  };
+}
+
+function normalizeDiagramDocumentContent(normalizedPath: string, content: string): string {
+  if (!/\.(md|html)$/i.test(normalizedPath)) return content;
+  if (!content.includes("sequenceDiagram")) return content;
+  return content.replace(/^(\s*)end\s+box\s*$/gim, "$1end");
+}
+
+function applyDiagramDocumentEditToContent(
+  existing: string,
+  edit: DiagramDocumentEdit,
+  normalizedPath: string
+): { status: Extract<DiagramDocumentEditStatus, "applied" | "failed">; content: string; message: string } {
+  if (edit.operation === "replace_text") {
+    if (!edit.oldText || edit.newText === undefined) {
+      return { status: "failed", content: existing, message: "replace_text requires oldText and newText." };
+    }
+    const index = existing.indexOf(edit.oldText);
+    if (index < 0) {
+      return { status: "failed", content: existing, message: "oldText was not found in the target document." };
+    }
+    return {
+      status: "applied",
+      content: `${existing.slice(0, index)}${edit.newText}${existing.slice(index + edit.oldText.length)}`,
+      message: "Text replacement applied."
+    };
+  }
+  if (edit.operation === "replace_between_markers") {
+    if (!edit.startMarker || !edit.endMarker || edit.content === undefined) {
+      return { status: "failed", content: existing, message: "replace_between_markers requires startMarker, endMarker and content." };
+    }
+    const startIndex = existing.indexOf(edit.startMarker);
+    const endIndex = existing.indexOf(edit.endMarker);
+    if (startIndex < 0 || endIndex < 0 || endIndex <= startIndex) {
+      return { status: "failed", content: existing, message: "Markers were not found in the expected order." };
+    }
+    return {
+      status: "applied",
+      content: [
+        existing.slice(0, startIndex + edit.startMarker.length).trimEnd(),
+        edit.content.trim(),
+        existing.slice(endIndex).trimStart()
+      ].join("\n\n"),
+      message: "Managed marker block replacement applied."
+    };
+  }
+  if (edit.operation === "append_section") {
+    if (!edit.content) {
+      return { status: "failed", content: existing, message: "append_section requires content." };
+    }
+    const content = formatAppendSectionContent(existing, edit.content, normalizedPath);
+    return {
+      status: "applied",
+      content,
+      message: "Section appended."
+    };
+  }
+  if (edit.operation === "replace_document") {
+    if (edit.content === undefined) {
+      return { status: "failed", content: existing, message: "replace_document requires content." };
+    }
+    return {
+      status: "applied",
+      content: edit.content.endsWith("\n") ? edit.content : `${edit.content}\n`,
+      message: "Full document replacement applied."
+    };
+  }
+  return { status: "failed", content: existing, message: "Unsupported document edit operation." };
+}
+
+function formatAppendSectionContent(existing: string, content: string, normalizedPath: string): string {
+  const trimmedContent = content.trim();
+  if (normalizedPath.endsWith(".html")) {
+    const block = `\n\n<section class="semantic-layer agent-edited-layer" data-praxis-kind="agent_edit" data-praxis-layer="agent_edit" data-praxis-author="agent">\n${trimmedContent}\n</section>\n`;
+    const mainCloseIndex = existing.lastIndexOf("</main>");
+    if (mainCloseIndex >= 0) return `${existing.slice(0, mainCloseIndex).trimEnd()}${block}${existing.slice(mainCloseIndex)}`;
+    return `${existing.trimEnd()}${block}`;
+  }
+  const markdownBlock = `\n\n## Agent 文档补充\n\n${trimmedContent}\n`;
+  return `${existing.trimEnd()}${markdownBlock}`;
+}
+
+function renderDiagramMarkdownProjectionHtml(
+  markdown: string,
+  markdownPath: string,
+  htmlPath: string,
+  existingHtml: string,
+  family: DiagramProjectionFamily
+): string {
+  const title = markdown.match(/^#\s+(.+)$/m)?.[1]?.trim() || path.posix.basename(markdownPath, ".md");
+  const anchor = existingHtml.match(/\sdata-praxis-anchor="([^"]+)"/)?.[1] || diagramAnchorFromMarkdownPath(markdownPath, family);
+  const kind = diagramKindFromMarkdownPath(markdownPath, family);
+  const status = markdown.match(/^状态：(.+)$/m)?.[1]?.trim() || "candidate";
+  const confidence = markdown.match(/^置信度：(.+)$/m)?.[1]?.trim() || "medium";
+  const body = renderMarkdownDocumentBodyHtml(markdown, anchor, kind, family);
+  const payload = buildDiagramPayloadFromMarkdown(markdown, markdownPath, htmlPath, anchor, kind, title, family);
+  const explorerLabel = diagramExplorerLabel(family);
+  const mainClass = family === "design" ? "praxis-design-map" : family === "architecture" ? "praxis-architecture-map" : "praxis-engineering-map";
+  return [
+    "<!doctype html>",
+    '<html lang="zh-CN">',
+    "<head>",
+    '  <meta charset="utf-8" />',
+    `  <title>${escapeRuntimeHtmlText(title)}</title>`,
+    "</head>",
+    "<body>",
+    `<main class="${mainClass}" data-praxis-anchor="${escapeRuntimeHtmlAttr(anchor)}" data-praxis-kind="${family}_${escapeRuntimeHtmlAttr(kind)}_diagram" data-praxis-status="${escapeRuntimeHtmlAttr(status)}" data-praxis-confidence="${escapeRuntimeHtmlAttr(confidence)}" data-praxis-document-path="${escapeRuntimeHtmlAttr(htmlPath)}" data-praxis-source-md="${escapeRuntimeHtmlAttr(markdownPath)}" data-praxis-drilldowns="${escapeRuntimeHtmlAttr(JSON.stringify(payload.drilldowns))}">`,
+    body,
+    `  <script type="application/json" id="praxis-${family}-diagram-document" data-praxis-explorer="${escapeRuntimeHtmlAttr(explorerLabel)}">${escapeRuntimeScriptJson(JSON.stringify(payload))}</script>`,
+    "</main>",
+    "</body>",
+    "</html>",
+    ""
+  ].join("\n");
+}
+
+function renderMarkdownDocumentBodyHtml(markdown: string, anchor: string, kind: string, family: DiagramProjectionFamily): string {
+  const lines = markdown.split(/\r?\n/);
+  const html: string[] = [];
+  let inCodeFence = false;
+  let codeLang = "";
+  let codeLines: string[] = [];
+  let inList = false;
+  let inTable = false;
+  let sectionOpen = false;
+
+  const closeList = () => {
+    if (!inList) return;
+    html.push("    </ul>");
+    inList = false;
+  };
+  const closeTable = () => {
+    if (!inTable) return;
+    html.push("    </tbody>", "    </table>");
+    inTable = false;
+  };
+  const closeBlocks = () => {
+    closeList();
+    closeTable();
+  };
+  const closeSection = () => {
+    closeBlocks();
+    if (!sectionOpen) return;
+    html.push("  </section>");
+    sectionOpen = false;
+  };
+
+  for (const line of lines) {
+    const fence = line.match(/^```([A-Za-z0-9_-]*)\s*$/);
+    if (fence) {
+      if (inCodeFence) {
+        const code = codeLines.join("\n").trimEnd();
+        if (codeLang.toLowerCase() === "mermaid") {
+          const mermaid = normalizeMermaidProjectionSource(code);
+          closeSection();
+          html.push(`  <section class="semantic-layer diagram-section" data-praxis-anchor="${escapeRuntimeHtmlAttr(anchor)}:diagram-body" data-praxis-kind="${family}_diagram_body">`);
+          html.push(`    <h2>${escapeRuntimeHtmlText(diagramBodyHeading(family))}</h2>`);
+          html.push(`    <pre class="mermaid" data-praxis-anchor="${escapeRuntimeHtmlAttr(anchor)}:uml" data-praxis-kind="${family}_${escapeRuntimeHtmlAttr(kind)}_uml">${escapeRuntimeHtmlText(mermaid)}</pre>`);
+          html.push("  </section>");
+        } else {
+          closeBlocks();
+          html.push(`    <pre><code>${escapeRuntimeHtmlText(code)}</code></pre>`);
+        }
+        inCodeFence = false;
+        codeLang = "";
+        codeLines = [];
+      } else {
+        closeBlocks();
+        inCodeFence = true;
+        codeLang = fence[1] ?? "";
+        codeLines = [];
+      }
+      continue;
+    }
+    if (inCodeFence) {
+      codeLines.push(line);
+      continue;
+    }
+
+    const trimmed = line.trim();
+    if (!trimmed) {
+      closeBlocks();
+      continue;
+    }
+
+    const heading = trimmed.match(/^(#{1,6})\s+(.+)$/);
+    if (heading) {
+      closeSection();
+      const level = heading[1]?.length ?? 2;
+      const text = heading[2] ?? "";
+      if (level === 1) {
+        html.push("  <header class=\"praxis-design-map-header\">");
+        html.push(`    <p>${escapeRuntimeHtmlText(diagramExplorerLabel(family))}</p>`);
+        html.push(`    <h1>${renderInlineMarkdownHtml(text)}</h1>`);
+        html.push("  </header>");
+      } else {
+        if (isDiagramBodyHeading(text)) continue;
+        html.push(`  <section class="semantic-layer" data-praxis-kind="${family}_document_section">`);
+        html.push(`    <h${Math.min(level, 6)}>${renderInlineMarkdownHtml(text)}</h${Math.min(level, 6)}>`);
+        sectionOpen = true;
+      }
+      continue;
+    }
+
+    if (/^\|.+\|$/.test(trimmed)) {
+      closeList();
+      if (/^\|\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|$/.test(trimmed)) continue;
+      if (!inTable) {
+        html.push("    <table>", "    <tbody>");
+        inTable = true;
+      }
+      const cells = trimmed.slice(1, -1).split("|").map((cell) => cell.trim());
+      html.push(`      <tr>${cells.map((cell) => `<td>${renderInlineMarkdownHtml(cell)}</td>`).join("")}</tr>`);
+      continue;
+    }
+
+    const listItem = trimmed.match(/^-\s+(.+)$/);
+    if (listItem) {
+      closeTable();
+      if (!inList) {
+        html.push("    <ul>");
+        inList = true;
+      }
+      html.push(`      <li>${renderInlineMarkdownHtml(listItem[1] ?? "")}</li>`);
+      continue;
+    }
+
+    closeBlocks();
+    html.push(`    <p>${renderInlineMarkdownHtml(trimmed)}</p>`);
+  }
+  closeSection();
+  if (inCodeFence && codeLines.length) {
+    html.push(`    <pre><code>${escapeRuntimeHtmlText(codeLines.join("\n").trimEnd())}</code></pre>`);
+  }
+  return html.join("\n");
+}
+
+function buildDiagramPayloadFromMarkdown(
+  markdown: string,
+  markdownPath: string,
+  htmlPath: string,
+  anchor: string,
+  kind: string,
+  title: string,
+  family: DiagramProjectionFamily
+): Record<string, unknown> {
+  const mermaid = firstMermaidCodeFence(markdown);
+  const elements = parseDiagramElementsFromMarkdown(markdown, markdownPath, mermaid, family);
+  const drilldowns = parseMarkdownDrilldownLinks(markdown, markdownPath, family);
+  return {
+    id: anchor,
+    family,
+    kind,
+    title,
+    anchor,
+    docPath: markdownPath,
+    htmlPath,
+    elements,
+    drilldowns
+  };
+}
+
+function parseDiagramElementsFromMarkdown(markdown: string, markdownPath: string, mermaid: string, family: DiagramProjectionFamily): Record<string, unknown>[] {
+  const sectionMatch = markdown.match(/## 图内语义元素下钻\s*\n([\s\S]*?)(?:\n## |\s*$)/);
+  if (!sectionMatch?.[1]) return [];
+  const blocks = sectionMatch[1].split(/\n###\s+/).map((block) => block.trim()).filter(Boolean);
+  const mermaidIds = parseMermaidClassIds(mermaid);
+  return blocks.map((block, index) => {
+    const lines = block.split(/\r?\n/);
+    const label = lines[0]?.replace(/^###\s+/, "").trim() || `元素 ${index + 1}`;
+    const fields = markdownBulletFields(lines.slice(1));
+    return {
+      id: fields["锚点"] || `${diagramAnchorFromMarkdownPath(markdownPath, family)}:element:${slugPart(label)}`,
+      mermaidId: mermaidIds[index] || `C_${slugPart(label)}`,
+      label,
+      kind: fields["元素类型"] || "component",
+      anchor: fields["锚点"] || `${diagramAnchorFromMarkdownPath(markdownPath, family)}:element:${slugPart(label)}`,
+      summary: fields["说明"] || "",
+      role: fields["技术角色"] || "",
+      whyItExists: fields["为什么出现"] || "",
+      relationshipMeaning: fields["关系意义"] || "",
+      drilldownIntent: fields["下钻意图"] || "",
+      businessRelevance: fields["业务关联"] || "",
+      changeImpact: fields["变更影响"] || "",
+      evidence: markdownNestedListAfter(lines, "证据"),
+      risks: markdownNestedListAfter(lines, "风险"),
+      questions: markdownNestedListAfter(lines, "问题"),
+      confidence: fields["置信度"] || "",
+      drilldowns: parseMarkdownDrilldownLinks(block, markdownPath, family)
+    };
+  });
+}
+
+function markdownBulletFields(lines: string[]): Record<string, string> {
+  const fields: Record<string, string> = {};
+  for (const line of lines) {
+    const match = line.match(/^\s*-\s*([^：]+)：\s*(.+)$/);
+    if (match?.[1] && match[2]) fields[match[1].trim()] = match[2].trim();
+  }
+  return fields;
+}
+
+function markdownNestedListAfter(lines: string[], heading: string): string[] {
+  const result: string[] = [];
+  const start = lines.findIndex((line) => new RegExp(`^\\s*-\\s*${escapeRegExpText(heading)}：\\s*$`).test(line));
+  if (start < 0) return result;
+  for (const line of lines.slice(start + 1)) {
+    if (/^\s*-\s+\S/.test(line)) break;
+    const nested = line.match(/^\s{2,}-\s+(.+)$/);
+    if (nested?.[1]) result.push(nested[1].trim());
+  }
+  return result;
+}
+
+function parseMarkdownDrilldownLinks(markdown: string, markdownPath: string, family: DiagramProjectionFamily): Record<string, unknown>[] {
+  const links: Record<string, unknown>[] = [];
+  const pattern = /-\s*(?:下钻：)?\[([^\]]+)]\(([^)]+)\)(?:\s*-\s*(.+))?/g;
+  for (const match of markdown.matchAll(pattern)) {
+    const title = match[1]?.trim();
+    const docPath = match[2]?.trim();
+    if (!title || !docPath) continue;
+    const projectDocPath = normalizeMarkdownRelativeLink(markdownPath, docPath);
+    links.push({
+      id: `${family}:diagram-link:${slugPart(projectDocPath)}`,
+      kind: diagramKindFromMarkdownPath(projectDocPath, family),
+      title,
+      summary: match[3]?.trim() || "",
+      docPath: projectDocPath,
+      htmlPath: projectDocPath.replace(/\.md$/i, ".html"),
+      anchor: diagramAnchorFromMarkdownPath(projectDocPath, family),
+      reason: match[3]?.trim() || ""
+    });
+  }
+  return links;
+}
+
+function normalizeMarkdownRelativeLink(markdownPath: string, linkPath: string): string {
+  if (linkPath.startsWith("docs/")) return normalizeProjectRelativePath(linkPath);
+  const baseDir = path.posix.dirname(normalizeProjectRelativePath(markdownPath));
+  return normalizeProjectRelativePath(path.posix.normalize(path.posix.join(baseDir, linkPath)));
+}
+
+function firstMermaidCodeFence(markdown: string): string {
+  const match = markdown.match(/```mermaid\s*\n([\s\S]*?)\n```/i);
+  return normalizeMermaidProjectionSource(match?.[1]?.trim() || "");
+}
+
+function normalizeMermaidProjectionSource(source: string): string {
+  let result = source.trim();
+  if (/^sequenceDiagram\b/im.test(result)) {
+    result = result.replace(/^(\s*)end\s+box\s*$/gim, "$1end");
+  }
+  return sanitizeFlowchartProjectionNodeIds(result);
+}
+
+const FLOWCHART_RESERVED_PROJECTION_NODE_IDS = new Set([
+  "end",
+  "class",
+  "click",
+  "default",
+  "direction",
+  "flowchart",
+  "graph",
+  "linkstyle",
+  "style",
+  "subgraph"
+]);
+
+function sanitizeFlowchartProjectionNodeIds(source: string): string {
+  const lines = source.split(/\r?\n/);
+  const firstMeaningfulLine = lines.find((line) => line.trim().length > 0)?.trim() ?? "";
+  if (!/^(flowchart|graph)\b/i.test(firstMeaningfulLine)) return source;
+
+  const definedIds = new Set<string>();
+  for (const line of lines) {
+    const id = flowchartProjectionDefinitionId(line);
+    if (id) definedIds.add(id);
+  }
+
+  const replacements = new Map<string, string>();
+  for (const id of definedIds) {
+    if (!FLOWCHART_RESERVED_PROJECTION_NODE_IDS.has(id.toLowerCase())) continue;
+    replacements.set(id, nextSafeFlowchartProjectionNodeId(id, definedIds, replacements));
+  }
+  if (!replacements.size) return source;
+  return lines.map((line) => rewriteFlowchartProjectionNodeIds(line, replacements)).join("\n");
+}
+
+function flowchartProjectionDefinitionId(line: string): string | undefined {
+  return line.match(/^\s*([A-Za-z][A-Za-z0-9_]*)\s*(?=\[|\(|\{|\>)/)?.[1];
+}
+
+function nextSafeFlowchartProjectionNodeId(id: string, used: Set<string>, replacements: Map<string, string>): string {
+  const base = `${id}Node`;
+  let candidate = base;
+  let suffix = 2;
+  while (
+    used.has(candidate) ||
+    Array.from(replacements.values()).includes(candidate) ||
+    FLOWCHART_RESERVED_PROJECTION_NODE_IDS.has(candidate.toLowerCase())
+  ) {
+    candidate = `${base}${suffix}`;
+    suffix += 1;
+  }
+  return candidate;
+}
+
+function rewriteFlowchartProjectionNodeIds(line: string, replacements: Map<string, string>): string {
+  let result = line;
+  for (const [from, to] of replacements.entries()) {
+    const escaped = escapeRegExpText(from);
+    result = result.replace(new RegExp(`^(\\s*)${escaped}(\\s*(?=\\[|\\(|\\{|\\>|--|-\\.|==))`), `$1${to}$2`);
+    result = result.replace(new RegExp(`((?:-->|---|==>|-\\.->|--[^\\n-]*-->|--\\|[^\\n|]*\\|))\\s*${escaped}\\b`, "g"), `$1 ${to}`);
+    result = result.replace(new RegExp(`((?:--&gt;|---|==&gt;|-\\.-&gt;|--[^\\n-]*--&gt;|--\\|[^\\n|]*\\|))\\s*${escaped}\\b`, "g"), `$1 ${to}`);
+    result = result.replace(new RegExp(`^(\\s*(?:style|class|click)\\s+)${escaped}\\b`), `$1${to}`);
+    result = result.replace(new RegExp(`,\\s*${escaped}\\b`, "g"), `, ${to}`);
+  }
+  return result;
+}
+
+function parseMermaidClassIds(mermaid: string): string[] {
+  const ids: string[] = [];
+  const seen = new Set<string>();
+  for (const line of mermaid.split(/\r?\n/)) {
+    const match = line.match(/^\s*class\s+([A-Za-z_][A-Za-z0-9_]*)\b/);
+    const id = match?.[1];
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    ids.push(id);
+  }
+  return ids;
+}
+
+function diagramKindFromMarkdownPath(markdownPath: string, family: DiagramProjectionFamily): string {
+  const normalized = normalizeProjectRelativePath(markdownPath);
+  if (family === "design") {
+    if (normalized.endsWith("/activity.md")) return "activity";
+    if (normalized.includes("/sequences/")) return "sequence";
+    if (normalized.includes("/state-machines/")) return "state_machine";
+    if (normalized.includes("/realization/")) return "class_collaboration";
+    if (normalized.includes("/interaction-overviews/")) return "interaction_overview";
+    if (normalized.includes("/communications/")) return "communication";
+    if (normalized.includes("/timing/")) return "timing";
+    if (normalized.includes("/object-snapshots/")) return "object";
+    if (normalized.includes("/composite-structures/")) return "composite_structure";
+    return "use_case_diagram";
+  }
+  if (family === "architecture") {
+    if (normalized.includes("/system-context/")) return "system_context";
+    if (normalized.includes("/containers/")) return "container";
+    if (normalized.includes("/components/")) return "component";
+    if (normalized.includes("/code/")) return "code";
+    return "c4";
+  }
+  return engineeringKindFromMarkdownPath(normalized);
+}
+
+function engineeringKindFromMarkdownPath(markdownPath: string): string {
+  if (markdownPath.includes("/package-diagrams/")) return "package";
+  if (markdownPath.includes("/component-diagrams/")) return "component";
+  if (markdownPath.includes("/class-structural-diagrams/")) return "class_structural";
+  if (markdownPath.includes("/sequence-diagrams/")) return "sequence";
+  if (markdownPath.includes("/deployment-diagrams/")) return "deployment";
+  if (markdownPath.includes("/technical-hotspots/")) return "technical_hotspot";
+  return "diagram";
+}
+
+function diagramAnchorFromMarkdownPath(markdownPath: string, family: DiagramProjectionFamily): string {
+  const normalized = normalizeProjectRelativePath(markdownPath);
+  if (family === "engineering") return engineeringAnchorFromMarkdownPath(normalized);
+  if (family === "design") {
+    const parts = normalized.split("/");
+    const useCaseIndex = parts.indexOf("use-case-diagrams") + 1;
+    const useCaseSlug = parts[useCaseIndex] || path.posix.basename(normalized, ".md");
+    const kind = diagramKindFromMarkdownPath(normalized, family).replace(/_/g, "-");
+    const basename = path.posix.basename(normalized, ".md");
+    const suffix = basename && basename !== "activity" && basename !== "class-collaboration" ? `:${basename}` : "";
+    return `design:${kind}:${useCaseSlug}${suffix}`;
+  }
+  const kind = diagramKindFromMarkdownPath(normalized, family).replace(/_/g, "-");
+  const basename = path.posix.basename(normalized, ".md");
+  const directory = normalized.split("/").at(-2) || basename;
+  return `architecture:${kind}:${directory}:${basename}`;
+}
+
+function engineeringAnchorFromMarkdownPath(markdownPath: string): string {
+  const normalized = normalizeProjectRelativePath(markdownPath);
+  const parts = normalized.split("/");
+  const directory = parts.at(-2) || path.posix.basename(normalized, ".md");
+  const kind = engineeringKindFromMarkdownPath(normalized).replace(/_/g, "-");
+  return `engineering:${kind}:${directory}`;
+}
+
+function diagramExplorerLabel(family: DiagramProjectionFamily): string {
+  if (family === "design") return "Praxis Design Explorer";
+  if (family === "architecture") return "Praxis Architecture Explorer";
+  return "Praxis Engineering Explorer";
+}
+
+function diagramBodyHeading(family: DiagramProjectionFamily): string {
+  if (family === "design") return "UML 底图";
+  if (family === "architecture") return "C4 图";
+  return "UML / 技术图";
+}
+
+function isDiagramBodyHeading(value: string): boolean {
+  return ["UML", "UML 底图", "UML / 技术图", "C4 图"].includes(value.trim());
+}
+
+function renderInlineMarkdownHtml(value: string): string {
+  const codeTokens: string[] = [];
+  let escaped = escapeRuntimeHtmlText(value).replace(/`([^`]+)`/g, (_, code: string) => {
+    const token = `@@CODE_${codeTokens.length}@@`;
+    codeTokens.push(`<code>${escapeRuntimeHtmlText(code)}</code>`);
+    return token;
+  });
+  escaped = escaped.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  escaped = escaped.replace(/\[([^\]]+)]\(([^)]+)\)/g, (_match, label: string, href: string) =>
+    `<a href="${escapeRuntimeHtmlAttr(href)}">${escapeRuntimeHtmlText(label)}</a>`
+  );
+  codeTokens.forEach((replacement, index) => {
+    escaped = escaped.replace(`@@CODE_${index}@@`, replacement);
+  });
+  return escaped;
+}
+
+function escapeRuntimeHtmlText(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function escapeRuntimeHtmlAttr(value: string): string {
+  return escapeRuntimeHtmlText(value).replace(/"/g, "&quot;");
+}
+
+function escapeRuntimeScriptJson(value: string): string {
+  return value.replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/&/g, "\\u0026");
+}
+
+function slugPart(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/::/g, "-")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "") || "item";
+}
+
+function escapeRegExpText(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function rejectDiagramDocumentEditPath(root: string, relativePath: string, allowedPrefixes: string[]): string | undefined {
+  if (!relativePath || relativePath.includes("\0")) return "Invalid document path.";
+  if (!relativePath.endsWith(".md") && !relativePath.endsWith(".html")) return "Only Markdown and HTML design documents can be edited.";
+  const parts = relativePath.split("/");
+  if (parts.includes("..")) return "Path traversal is not allowed.";
+  const prefixAllowed = allowedPrefixes.some((prefix) => {
+    const normalizedPrefix = normalizeProjectRelativePath(prefix);
+    return relativePath === normalizedPrefix || relativePath.startsWith(`${normalizedPrefix}/`);
+  });
+  if (!prefixAllowed) return `Document path is outside the allowed roots: ${allowedPrefixes.join(", ")}.`;
+  const resolved = path.resolve(root, relativePath);
+  const rootRelative = path.relative(root, resolved);
+  if (rootRelative.startsWith("..") || path.isAbsolute(rootRelative)) return "Resolved document path escapes the project root.";
+  return undefined;
+}
+
+function parseDesignVersionDecisionResult(
+  content: string,
+  currentVersion: string,
+  changedArtifacts: string[],
+  fallbackScope: string,
+  fallbackCommitSummary: string
+): DesignVersionDecision {
+  const parsed = safeJson(content);
+  const raw = isRecord(parsed) && isRecord(parsed.result) ? parsed.result : parsed;
+  if (!isRecord(raw)) throw new Error("Design Version Decision response did not contain a JSON object.");
+  const bump = designVersionBump(raw.bump);
+  const normalizedCurrentVersion = semverCore(currentVersion) ?? "0.1.0";
+  const nextVersion = bumpSemver(normalizedCurrentVersion, bump);
+  const agentNextVersion = semverCore(stringValue(raw.nextVersion));
+  const reason = stringOr(raw.reason, `Agent selected ${bump.toUpperCase()} for this design change.`);
+  const semverRule = stringOr(raw.semverRule, semverRuleForBump(bump));
+  return {
+    schemaVersion: "praxis.designVersionDecision.v1",
+    bump,
+    currentVersion: normalizedCurrentVersion,
+    nextVersion,
+    reason: agentNextVersion && agentNextVersion !== nextVersion
+      ? `${reason} Runtime corrected nextVersion from ${agentNextVersion} to ${nextVersion} so it matches the selected bump.`
+      : reason,
+    semverRule,
+    atomicCommitScope: stringOr(raw.atomicCommitScope, fallbackScope),
+    commitSummary: stringOr(raw.commitSummary, fallbackCommitSummary),
+    affectedArtifacts: nonEmptyStringArray(raw.affectedArtifacts, changedArtifacts),
+    breaking: raw.breaking === true || bump === "major",
+    confidence: designVersionConfidence(raw.confidence),
+    questions: stringArray(raw.questions)
+  };
+}
+
+function mergeDesignStoryCandidates(
+  root: string,
+  currentModel: InteractionModelCandidate,
+  stories: DesignStoryCandidateInput[],
+  userMessage: string,
+  generatedAt: string
+): { model: InteractionModelCandidate; addedUseCaseIds: string[] } {
+  const intakeId = `design-story-intake:${Date.now()}`;
+  const contexts = [...currentModel.contexts];
+  const actors = [...currentModel.actors];
+  const externalSystems = [...currentModel.externalSystems];
+  const useCases = [...currentModel.useCases];
+  const relations = [...currentModel.relations];
+  const useCaseDrilldowns = [...currentModel.useCaseDrilldowns];
+  const questions = [...currentModel.questions];
+  const contextByTitle = new Map(contexts.map((context) => [designTitleKey(context.title), context]));
+  const actorByTitle = new Map(actors.map((actor) => [designTitleKey(actor.title), actor]));
+  const externalByTitle = new Map(externalSystems.map((external) => [designTitleKey(external.title), external]));
+  const useCaseByTitle = new Map(useCases.map((useCase) => [designTitleKey(useCase.title), useCase.id]));
+  const allIds = new Set([
+    ...contexts.map((item) => item.id),
+    ...actors.map((item) => item.id),
+    ...externalSystems.map((item) => item.id),
+    ...useCases.map((item) => item.id),
+    ...relations.map((item) => item.id),
+    ...useCaseDrilldowns.map((item) => item.id),
+    ...questions.map((item) => item.id)
+  ]);
+  const addedUseCaseIds: string[] = [];
+  const evidence = {
+    source: "user_confirmation" as const,
+    filePath: DESIGN_MAP_DOC_RELATIVE_PATH,
+    excerpt: truncateText(userMessage, 1200),
+    summary: "User described this candidate story in Design Explorer story intake.",
+    strength: "medium" as const,
+    knowledgeKind: "CANDIDATE" as const
+  };
+
+  for (const story of stories) {
+    const context = contextByTitle.get(designTitleKey(story.contextTitle)) ?? (() => {
+      const contextCandidate = {
+        ...designTraceability(intakeId, [], [evidence]),
+        id: nextDesignId("context", story.contextTitle, allIds),
+        title: story.contextTitle,
+        summary: story.contextSummary,
+        kind: "business_module" as const,
+        scope: story.contextSummary,
+        responsibility: story.contextSummary,
+        businessTerms: inferDesignBusinessTerms(`${story.contextTitle} ${story.contextSummary}`),
+        status: "candidate" as const,
+        confidence: "medium" as const
+      };
+      contexts.push(contextCandidate);
+      contextByTitle.set(designTitleKey(story.contextTitle), contextCandidate);
+      return contextCandidate;
+    })();
+    const primaryActorIds = story.primaryActors.map((title) =>
+      getOrCreateDesignActor(title, "role", actors, actorByTitle, allIds, intakeId, evidence)
+    );
+    const supportingActorIds = story.supportingActors.map((title) =>
+      getOrCreateDesignActor(title, "role", actors, actorByTitle, allIds, intakeId, evidence)
+    );
+    const externalSystemIds = story.externalSystems.map((title) =>
+      getOrCreateDesignExternalSystem(title, externalSystems, externalByTitle, allIds, intakeId, evidence)
+    );
+    const useCase = {
+      ...designTraceability(intakeId, story.questions, [evidence]),
+      id: nextDesignId("use-case", story.title, allIds),
+      contextId: context.id,
+      title: story.title,
+      summary: story.summary,
+      status: "candidate" as const,
+      confidence: "medium" as const,
+      primaryActorIds,
+      supportingActorIds,
+      externalSystemIds,
+      entryPointIds: [],
+      trigger: story.trigger,
+      preconditions: nonEmptyOrDefault(story.preconditions, "Preconditions need user confirmation."),
+      postconditions: nonEmptyOrDefault(story.postconditions, "Postconditions need user confirmation."),
+      mainSuccessScenario: nonEmptyOrDefault(story.mainSuccessScenario, story.summary),
+      alternativeFlows: story.alternativeFlows,
+      failureFlows: story.failureFlows
+    };
+    useCases.push(useCase);
+    useCaseByTitle.set(designTitleKey(story.title), useCase.id);
+    addedUseCaseIds.push(useCase.id);
+    const storyDrilldowns = story.drilldownDiagrams.length
+      ? story.drilldownDiagrams.map((diagram, diagramIndex) => ({
+          ...designTraceability(intakeId, diagram.questions, [evidence]),
+          id: nextDesignId(designDrilldownIdPrefix(diagram.kind), `${useCase.id}-${diagram.title}-${diagramIndex + 1}`, allIds),
+          useCaseId: useCase.id,
+          kind: diagram.kind,
+          title: diagram.title,
+          summary: diagram.summary,
+          coverage: diagram.coverage,
+          explanation: diagram.explanation,
+          status: "candidate" as const,
+          confidence: "medium" as const,
+          mermaid: diagram.mermaid ?? fallbackDrilldownMermaid(diagram.kind, useCase)
+        }))
+      : ensureUseCaseDrilldownDiagrams([], [useCase], allIds) as unknown as InteractionModelCandidate["useCaseDrilldowns"];
+    useCaseDrilldowns.push(...(storyDrilldowns as unknown as InteractionModelCandidate["useCaseDrilldowns"]));
+    for (const [index, question] of story.questions.entries()) {
+      questions.push({
+        id: nextDesignId("question", `${useCase.id}-${index + 1}`, allIds),
+        question,
+        targetId: useCase.id,
+        severity: "warning"
+      });
+    }
+  }
+
+  for (const story of stories) {
+    const sourceId = useCaseByTitle.get(designTitleKey(story.title));
+    if (!sourceId) continue;
+    for (const relation of story.relations) {
+      const targetId = useCaseByTitle.get(designTitleKey(relation.targetTitle));
+      if (!targetId || targetId === sourceId) continue;
+      relations.push({
+        ...designTraceability(intakeId, [], [evidence]),
+        id: nextDesignId("relation", `${sourceId}-${relation.kind}-${targetId}`, allIds),
+        kind: relation.kind,
+        sourceId,
+        targetId,
+        summary: relation.summary,
+        status: "candidate" as const,
+        confidence: "medium" as const
+      });
+    }
+  }
+
+  return {
+    model: InteractionModelCandidateSchema.parse({
+      ...currentModel,
+      root,
+      generatedAt,
+      source: "agent",
+      contexts,
+      actors,
+      externalSystems,
+      useCases,
+      relations,
+      useCaseDrilldowns,
+      questions,
+      warnings: currentModel.warnings
+    }),
+    addedUseCaseIds
+  };
+}
+
+async function buildDesignDiagramDiscussionContext(
+  root: string,
+  model: InteractionModelCandidate,
+  useCaseId: string,
+  selectedAnchorRaw?: string,
+  currentUmlRaw?: string,
+  userMessage = "",
+  args: Args = {}
+): Promise<DesignDiagramDiscussionContext> {
+  const targetUseCase = model.useCases.find((useCase) => useCase.id === useCaseId);
+  if (!targetUseCase) throw new Error(`Use Case Diagram not found: ${useCaseId}`);
+  const context = model.contexts.find((item) => item.id === targetUseCase.contextId);
+  const contextUseCases = model.useCases.filter((useCase) => useCase.contextId === targetUseCase.contextId);
+  const useCaseIds = new Set(contextUseCases.map((useCase) => useCase.id));
+  const actorIds = new Set(contextUseCases.flatMap((useCase) => [...useCase.primaryActorIds, ...useCase.supportingActorIds]));
+  const externalSystemIds = new Set(contextUseCases.flatMap((useCase) => useCase.externalSystemIds));
+  const targetUseCaseDrilldowns = model.useCaseDrilldowns.filter((diagram) => diagram.useCaseId === targetUseCase.id);
+  const currentUml = await buildDesignCurrentUmlContext(root, targetUseCase, targetUseCaseDrilldowns, currentUmlRaw);
+  const linkedDocuments = buildDesignLinkedDocuments(targetUseCase, targetUseCaseDrilldowns, currentUml);
+  const linkedDocumentExcerpts = await buildDesignLinkedDocumentExcerpts(root, linkedDocuments);
+  const repositoryEvidence = await buildDesignRepositoryEvidenceContext(root, model, {
+    targetUseCase,
+    targetUseCaseDrilldowns,
+    currentUml,
+    linkedDocumentExcerpts,
+    userMessage,
+    args
+  });
+  return {
+    schemaVersion: "praxis.designDiagramContext.v1",
+    targetUseCase,
+    targetUseCaseDrilldowns,
+    currentUml,
+    linkedDocuments,
+    linkedDocumentExcerpts,
+    repositoryEvidence,
+    context,
+    contextUseCases,
+    actors: model.actors.filter((actor) => actorIds.has(actor.id)),
+    externalSystems: model.externalSystems.filter((external) => externalSystemIds.has(external.id)),
+    relations: model.relations.filter((relation) => useCaseIds.has(relation.sourceId) || useCaseIds.has(relation.targetId)),
+    questions: model.questions.filter((question) => !question.targetId || useCaseIds.has(question.targetId)),
+    selectedAnchor: parseSelectedAnchor(selectedAnchorRaw),
+    sourceSpecPaths: [DESIGN_MAP_DOC_RELATIVE_PATH, DESIGN_MAP_HTML_RELATIVE_PATH]
+  };
+}
+
+async function buildDesignCurrentUmlContext(
+  root: string,
+  targetUseCase: InteractionModelCandidate["useCases"][number],
+  drilldowns: InteractionModelCandidate["useCaseDrilldowns"],
+  currentUmlRaw?: string
+): Promise<DesignCurrentUmlContext> {
+  const raw = currentUmlRaw ? safeJson(currentUmlRaw) : undefined;
+  const provided = isRecord(raw) ? raw : {};
+  const requestedId = stringValue(provided.id);
+  const requestedPath = stringValue(provided.htmlPath);
+  const matchedDrilldown = drilldowns.find((diagram) =>
+    diagram.id === requestedId
+    || (requestedPath ? designUseCaseDrilldownHtmlRelativePath(diagram) === normalizeProjectRelativePath(requestedPath) : false)
+  );
+  const fallbackHtmlPath = designUseCaseDiagramHtmlRelativePath(targetUseCase.id);
+  const htmlPath = normalizeProjectRelativePath(
+    stringOr(provided.htmlPath, matchedDrilldown ? designUseCaseDrilldownHtmlRelativePath(matchedDrilldown) : fallbackHtmlPath)
+  );
+  const markdownPath = normalizeProjectRelativePath(
+    stringOr(provided.markdownPath, htmlPath.replace(/\.html$/i, ".md"))
+  );
+  const [html, markdown] = await Promise.all([
+    readProjectTextIfExists(root, htmlPath),
+    readProjectTextIfExists(root, markdownPath)
+  ]);
+  return {
+    id: stringOr(provided.id, matchedDrilldown?.id ?? `${targetUseCase.id}:use-case-diagram`),
+    kind: stringOr(provided.kind, matchedDrilldown?.kind ?? "use_case_diagram"),
+    title: stringOr(provided.title, matchedDrilldown?.title ?? targetUseCase.title),
+    summary: stringValue(provided.summary) ?? matchedDrilldown?.summary ?? targetUseCase.summary,
+    htmlPath,
+    markdownPath,
+    status: stringValue(provided.status) ?? matchedDrilldown?.status ?? targetUseCase.status,
+    confidence: stringValue(provided.confidence) ?? matchedDrilldown?.confidence ?? targetUseCase.confidence,
+    coverage: isRecord(provided.coverage) ? provided.coverage : matchedDrilldown?.coverage,
+    currentDocumentHtmlExcerpt: compactText(html, 16_000),
+    currentDocumentMarkdownExcerpt: compactText(markdown, 16_000)
+  };
+}
+
+function buildDesignLinkedDocuments(
+  targetUseCase: InteractionModelCandidate["useCases"][number],
+  drilldowns: InteractionModelCandidate["useCaseDrilldowns"],
+  currentUml: DesignCurrentUmlContext
+): DesignLinkedDocumentContext[] {
+  const documents: DesignLinkedDocumentContext[] = [];
+  const pushDocument = (document: DesignLinkedDocumentContext) => {
+    const key = `${document.relationship}:${document.id}:${document.htmlPath ?? ""}:${document.markdownPath ?? ""}`;
+    if (documents.some((item) => `${item.relationship}:${item.id}:${item.htmlPath ?? ""}:${item.markdownPath ?? ""}` === key)) return;
+    documents.push(document);
+  };
+
+  pushDocument({
+    id: currentUml.id,
+    kind: currentUml.kind,
+    title: currentUml.title,
+    htmlPath: currentUml.htmlPath,
+    markdownPath: currentUml.markdownPath,
+    relationship: "current_uml",
+    updateReason: "当前中间面板正在显示的 UML 文档；任何解释层、锚点、证据或图形语义调整都应先落在这里。"
+  });
+
+  const parentHtmlPath = designUseCaseDiagramHtmlRelativePath(targetUseCase.id);
+  const parentMarkdownPath = designMarkdownRelativePath(parentHtmlPath);
+  if (normalizeProjectRelativePath(currentUml.htmlPath) !== parentHtmlPath) {
+    pushDocument({
+      id: `${targetUseCase.id}:use-case-diagram`,
+      kind: "use_case_diagram",
+      title: targetUseCase.title,
+      htmlPath: parentHtmlPath,
+      markdownPath: parentMarkdownPath,
+      relationship: "parent_use_case",
+      updateReason: "父级 Use Case Diagram 承载业务故事边界；下钻图改变业务流程、参与者、成功/失败路径或范围时必须同步复核。"
+    });
+  }
+
+  for (const diagram of drilldowns) {
+    const htmlPath = designUseCaseDrilldownHtmlRelativePath(diagram);
+    if (normalizeProjectRelativePath(currentUml.htmlPath) === htmlPath) continue;
+    pushDocument({
+      id: diagram.id,
+      kind: diagram.kind,
+      title: diagram.title,
+      htmlPath,
+      markdownPath: designMarkdownRelativePath(htmlPath),
+      relationship: "sibling_uml",
+      updateReason: `同一 Use Case 下的 ${diagram.kind} 下钻图；当前图改变流程、时序、状态或结构协作语义时需要联动复核。`
+    });
+  }
+
+  pushDocument({
+    id: "design-map:markdown",
+    kind: "design_map_index",
+    title: "Use Case Diagrams Maps",
+    htmlPath: DESIGN_MAP_HTML_RELATIVE_PATH,
+    markdownPath: DESIGN_MAP_DOC_RELATIVE_PATH,
+    relationship: "map_index",
+    updateReason: "设计地图索引承载 Use Case / 下钻 UML 列表、版本和变更摘要；新增、删除、重命名或关系变化时必须同步。"
+  });
+
+  return documents;
+}
+
+async function buildDesignLinkedDocumentExcerpts(
+  root: string,
+  documents: DesignLinkedDocumentContext[]
+): Promise<DesignLinkedDocumentExcerpt[]> {
+  const result: DesignLinkedDocumentExcerpt[] = [];
+  for (const document of documents) {
+    const [markdown, html] = await Promise.all([
+      document.markdownPath ? readProjectTextIfExists(root, document.markdownPath) : Promise.resolve(""),
+      document.htmlPath ? readProjectTextIfExists(root, document.htmlPath) : Promise.resolve("")
+    ]);
+    result.push({
+      path: document.markdownPath ?? document.htmlPath ?? "",
+      relationship: document.relationship,
+      title: document.title,
+      kind: document.kind,
+      markdownExcerpt: compactText(markdown, 8_000),
+      htmlExcerpt: compactText(html, 8_000)
+    });
+  }
+  return result;
+}
+
+async function buildDesignRepositoryEvidenceContext(
+  root: string,
+  model: InteractionModelCandidate,
+  input: {
+    targetUseCase: InteractionModelCandidate["useCases"][number];
+    targetUseCaseDrilldowns: InteractionModelCandidate["useCaseDrilldowns"];
+    currentUml: DesignCurrentUmlContext;
+    linkedDocumentExcerpts: DesignLinkedDocumentExcerpt[];
+    userMessage: string;
+    args: Args;
+  }
+): Promise<DesignRepositoryEvidenceContext> {
+  const queryTerms = designDiscussionQueryTerms(input);
+  try {
+    const codeFacts = await readOrBuildCodeFacts(root, input.args);
+    const directIds = designDiscussionDirectCodeFactIds(input.targetUseCase, input.targetUseCaseDrilldowns);
+    const scoredNodes = codeFacts.nodes
+      .map((node) => ({ node, score: designDiscussionNodeScore(node, queryTerms, directIds) }))
+      .filter((item) => item.score > 0)
+      .sort((left, right) => right.score - left.score || left.node.filePath.localeCompare(right.node.filePath))
+      .slice(0, 80);
+    const matchingNodes: DesignRepositoryEvidenceNode[] = scoredNodes.map(({ node }) => ({
+      id: node.id,
+      kind: node.kind,
+      name: node.name,
+      qualifiedName: node.qualifiedName,
+      filePath: node.filePath,
+      range: node.range ? { startLine: node.range.startLine, endLine: node.range.endLine } : undefined,
+      signature: node.signature,
+      docSummary: node.docSummary,
+      evidence: node.evidence.slice(0, 4),
+      matchReason: designDiscussionNodeMatchReason(node, queryTerms, directIds)
+    }));
+    const matchedNodeIds = new Set(matchingNodes.map((node) => node.id));
+    const relatedEdges: DesignRepositoryEvidenceEdge[] = codeFacts.edges
+      .filter((edge) => matchedNodeIds.has(edge.sourceId) || matchedNodeIds.has(edge.targetId))
+      .slice(0, 120)
+      .map((edge) => ({
+        id: edge.id,
+        kind: edge.kind,
+        sourceId: edge.sourceId,
+        targetId: edge.targetId,
+        filePath: edge.filePath,
+        evidence: edge.evidence.slice(0, 3)
+      }));
+    const fileExcerpts = await designDiscussionRepositoryFileExcerpts(root, matchingNodes, queryTerms);
+    const limitations = [
+      matchingNodes.length ? "" : "没有在本地代码事实中找到与当前 UML 和用户输入直接匹配的符号。",
+      fileExcerpts.length ? "" : "没有读取到可展示的源码片段；只能基于代码事实节点和文档摘录判断。"
+    ].filter(Boolean);
+    return {
+      source: "local_code_facts",
+      queryTerms,
+      matchingNodes,
+      relatedEdges,
+      fileExcerpts,
+      limitations
+    };
+  } catch (error) {
+    return {
+      source: "unavailable",
+      queryTerms,
+      matchingNodes: [],
+      relatedEdges: [],
+      fileExcerpts: [],
+      limitations: [`无法读取或生成本地代码事实：${error instanceof Error ? error.message : String(error)}`]
+    };
+  }
+}
+
+async function buildGenericDiagramRepositoryEvidenceContext(
+  root: string,
+  args: Args,
+  input: {
+    userMessage: string;
+    currentDocumentTitle?: string;
+    currentDocumentPath: string;
+    currentDocumentHtmlExcerpt: string;
+    currentDocumentMarkdownExcerpt: string;
+    mapIndexExcerpt: string;
+    selectedAnchor?: unknown;
+  }
+): Promise<DesignRepositoryEvidenceContext> {
+  const queryTerms = diagramDiscussionQueryTermsFromText([
+    input.userMessage,
+    input.currentDocumentTitle,
+    input.currentDocumentPath,
+    input.currentDocumentHtmlExcerpt,
+    input.currentDocumentMarkdownExcerpt,
+    input.mapIndexExcerpt,
+    input.selectedAnchor ? JSON.stringify(input.selectedAnchor) : ""
+  ].filter(Boolean).join("\n"));
+  try {
+    const codeFacts = await readOrBuildCodeFacts(root, args);
+    const directIds = new Set<string>();
+    const scoredNodes = codeFacts.nodes
+      .map((node) => ({ node, score: designDiscussionNodeScore(node, queryTerms, directIds) }))
+      .filter((item) => item.score > 0)
+      .sort((left, right) => right.score - left.score || left.node.filePath.localeCompare(right.node.filePath))
+      .slice(0, 80);
+    const matchingNodes: DesignRepositoryEvidenceNode[] = scoredNodes.map(({ node }) => ({
+      id: node.id,
+      kind: node.kind,
+      name: node.name,
+      qualifiedName: node.qualifiedName,
+      filePath: node.filePath,
+      range: node.range ? { startLine: node.range.startLine, endLine: node.range.endLine } : undefined,
+      signature: node.signature,
+      docSummary: node.docSummary,
+      evidence: node.evidence.slice(0, 4),
+      matchReason: designDiscussionNodeMatchReason(node, queryTerms, directIds)
+    }));
+    const matchedNodeIds = new Set(matchingNodes.map((node) => node.id));
+    const relatedEdges: DesignRepositoryEvidenceEdge[] = codeFacts.edges
+      .filter((edge) => matchedNodeIds.has(edge.sourceId) || matchedNodeIds.has(edge.targetId))
+      .slice(0, 120)
+      .map((edge) => ({
+        id: edge.id,
+        kind: edge.kind,
+        sourceId: edge.sourceId,
+        targetId: edge.targetId,
+        filePath: edge.filePath,
+        evidence: edge.evidence.slice(0, 3)
+      }));
+    const fileExcerpts = await designDiscussionRepositoryFileExcerpts(root, matchingNodes, queryTerms);
+    const limitations = [
+      matchingNodes.length ? "" : "没有在本地仓库证据中找到与当前文档、锚点和用户输入直接匹配的符号。",
+      fileExcerpts.length ? "" : "没有读取到可展示的源码片段；只能基于文档摘录和本地仓库证据节点判断。"
+    ].filter(Boolean);
+    return {
+      source: "local_code_facts",
+      queryTerms,
+      matchingNodes,
+      relatedEdges,
+      fileExcerpts,
+      limitations
+    };
+  } catch (error) {
+    return {
+      source: "unavailable",
+      queryTerms,
+      matchingNodes: [],
+      relatedEdges: [],
+      fileExcerpts: [],
+      limitations: [`无法读取或生成本地仓库证据：${error instanceof Error ? error.message : String(error)}`]
+    };
+  }
+}
+
+function designDiscussionDirectCodeFactIds(
+  targetUseCase: InteractionModelCandidate["useCases"][number],
+  drilldowns: InteractionModelCandidate["useCaseDrilldowns"]
+): Set<string> {
+  const ids = new Set<string>();
+  const collect = (item: Pick<InteractionModelCandidate["useCases"][number], "sourceCodeFactIds" | "evidence">) => {
+    item.sourceCodeFactIds.forEach((id) => ids.add(id));
+    item.evidence.forEach((evidence) => {
+      if (evidence.sourceCodeFactId) ids.add(evidence.sourceCodeFactId);
+    });
+  };
+  collect(targetUseCase);
+  for (const drilldown of drilldowns) collect(drilldown);
+  return ids;
+}
+
+function designDiscussionQueryTerms(input: {
+  targetUseCase: InteractionModelCandidate["useCases"][number];
+  targetUseCaseDrilldowns: InteractionModelCandidate["useCaseDrilldowns"];
+  currentUml: DesignCurrentUmlContext;
+  linkedDocumentExcerpts: DesignLinkedDocumentExcerpt[];
+  userMessage: string;
+}): string[] {
+  const rawText = [
+    input.userMessage,
+    input.currentUml.title,
+    input.currentUml.summary,
+    input.currentUml.currentDocumentMarkdownExcerpt,
+    input.currentUml.currentDocumentHtmlExcerpt,
+    input.targetUseCase.title,
+    input.targetUseCase.summary,
+    input.targetUseCase.trigger,
+    ...input.targetUseCase.mainSuccessScenario,
+    ...input.targetUseCase.alternativeFlows,
+    ...input.targetUseCase.failureFlows,
+    ...input.targetUseCaseDrilldowns.flatMap((diagram) => [
+      diagram.id,
+      diagram.title,
+      diagram.summary,
+      diagram.coverage.scenario,
+      diagram.coverage.boundary,
+      diagram.coverage.rationale,
+      diagram.explanation.business,
+      diagram.explanation.design,
+      diagram.explanation.implementation,
+      diagram.mermaid,
+      ...diagram.coverage.implementationScope.modules,
+      ...diagram.coverage.implementationScope.entryPoints,
+      ...diagram.coverage.implementationScope.keyFiles,
+      ...diagram.coverage.implementationScope.codeAnchors
+    ]),
+    ...input.linkedDocumentExcerpts.flatMap((document) => [document.markdownExcerpt, document.htmlExcerpt])
+  ].filter(Boolean).join("\n");
+  return diagramDiscussionQueryTermsFromText(rawText);
+}
+
+function diagramDiscussionQueryTermsFromText(rawText: string): string[] {
+  const terms = new Set<string>();
+  for (const match of rawText.matchAll(/[A-Za-z][A-Za-z0-9_$]*(?:::[A-Za-z][A-Za-z0-9_$]*)?/g)) {
+    const value = match[0];
+    if (designDiscussionUsefulTerm(value)) addDesignDiscussionTerm(terms, value);
+  }
+  const lower = rawText.toLowerCase();
+  const zhHints: Array<[string, string[]]> = [
+    ["策略", ["Strategy"]],
+    ["通道", ["Channel", "Provider"]],
+    ["网关", ["Gateway", "Provider"]],
+    ["创建", ["Create", "Creation"]],
+    ["架构", ["Architecture", "Container", "Component"]],
+    ["组件", ["Component"]],
+    ["模块", ["Module", "Package"]],
+    ["包", ["Package", "Module"]],
+    ["类", ["Class"]],
+    ["接口", ["Interface"]],
+    ["服务", ["Service"]],
+    ["领域", ["Domain"]],
+    ["部署", ["Deployment"]],
+    ["配置", ["Config", "Configuration"]],
+    ["依赖", ["Dependency", "Import"]],
+    ["调用", ["Call", "Invoke"]],
+    ["状态", ["State"]],
+    ["事件", ["Event"]]
+  ];
+  for (const [needle, values] of zhHints) {
+    if (rawText.includes(needle)) values.forEach((value) => addDesignDiscussionTerm(terms, value));
+  }
+  if (lower.includes("strategy")) addDesignDiscussionTerm(terms, "Strategy");
+  if (lower.includes("provider")) addDesignDiscussionTerm(terms, "Provider");
+  return Array.from(terms).slice(0, 120);
+}
+
+function addDesignDiscussionTerm(terms: Set<string>, value: string): void {
+  const cleaned = value.replace(/^use-case:/, "").replace(/^class-collaboration:/, "").replace(/^sequence:/, "").trim();
+  if (!designDiscussionUsefulTerm(cleaned)) return;
+  terms.add(cleaned);
+  for (const part of cleaned.split(/[:.$_\-\/\\]+/)) {
+    if (designDiscussionUsefulTerm(part)) terms.add(part);
+  }
+}
+
+function designDiscussionUsefulTerm(value: string): boolean {
+  const normalized = value.trim();
+  if (normalized.length < 3 || normalized.length > 90) return false;
+  if (/^\d+$/.test(normalized)) return false;
+  const lower = normalized.toLowerCase();
+  return !new Set([
+    "div",
+    "span",
+    "class",
+    "section",
+    "article",
+    "data",
+    "praxis",
+    "candidate",
+    "high",
+    "medium",
+    "low",
+    "true",
+    "false",
+    "docs",
+    "design",
+    "html",
+    "markdown",
+    "mermaid",
+    "flowchart",
+    "sequencediagram",
+    "classdiagram"
+  ]).has(lower);
+}
+
+function designDiscussionNodeScore(
+  node: CodeFactGraphSnapshot["nodes"][number],
+  queryTerms: string[],
+  directIds: Set<string>
+): number {
+  let score = directIds.has(node.id) ? 25 : 0;
+  const haystack = `${node.id} ${node.kind} ${node.name} ${node.qualifiedName} ${node.filePath} ${node.signature ?? ""} ${node.docSummary ?? ""}`.toLowerCase();
+  for (const term of queryTerms) {
+    const lower = term.toLowerCase();
+    if (!lower || lower.length < 3) continue;
+    if (node.name.toLowerCase() === lower) score += 10;
+    else if (node.qualifiedName.toLowerCase().includes(lower)) score += lower.length >= 8 ? 6 : 3;
+    else if (haystack.includes(lower)) score += lower.length >= 8 ? 4 : 1;
+  }
+  if (node.kind === "class" || node.kind === "interface" || node.kind === "enum") score += 2;
+  if (node.kind === "method" || node.kind === "function") score += 1;
+  if (designDiscussionGeneratedOrVendorPath(node.filePath)) score -= 8;
+  return score;
+}
+
+function designDiscussionNodeMatchReason(
+  node: CodeFactGraphSnapshot["nodes"][number],
+  queryTerms: string[],
+  directIds: Set<string>
+): string {
+  if (directIds.has(node.id)) return "当前 Use Case 或下钻图已经引用该代码事实。";
+  const haystack = `${node.name} ${node.qualifiedName} ${node.filePath} ${node.signature ?? ""} ${node.docSummary ?? ""}`.toLowerCase();
+  const matched = queryTerms
+    .filter((term) => term.length >= 3 && haystack.includes(term.toLowerCase()))
+    .slice(0, 6);
+  return matched.length ? `匹配当前问题/文档关键词：${matched.join(", ")}` : "与当前图的本地代码事实相关。";
+}
+
+async function designDiscussionRepositoryFileExcerpts(
+  root: string,
+  matchingNodes: DesignRepositoryEvidenceNode[],
+  queryTerms: string[]
+): Promise<DesignRepositoryEvidenceFileExcerpt[]> {
+  const byFile = new Map<string, DesignRepositoryEvidenceNode[]>();
+  for (const node of matchingNodes) {
+    if (!node.filePath || designDiscussionGeneratedOrVendorPath(node.filePath)) continue;
+    if (!byFile.has(node.filePath)) byFile.set(node.filePath, []);
+    byFile.get(node.filePath)?.push(node);
+  }
+  const result: DesignRepositoryEvidenceFileExcerpt[] = [];
+  for (const [filePath, nodes] of Array.from(byFile.entries()).slice(0, 8)) {
+    const content = await readProjectTextIfExists(root, filePath);
+    if (!content.trim()) continue;
+    const excerpt = designDiscussionSourceExcerpt(content, nodes, queryTerms);
+    if (!excerpt.trim()) continue;
+    result.push({
+      path: filePath,
+      reason: nodes.slice(0, 6).map((node) => `${node.kind}:${node.qualifiedName || node.name}`).join(", "),
+      excerpt
+    });
+  }
+  return result;
+}
+
+function designDiscussionSourceExcerpt(content: string, nodes: DesignRepositoryEvidenceNode[], queryTerms: string[]): string {
+  const lines = content.split(/\r?\n/);
+  const windows: Array<{ start: number; end: number }> = [];
+  for (const node of nodes.slice(0, 8)) {
+    if (!node.range) continue;
+    windows.push({
+      start: Math.max(1, node.range.startLine - 8),
+      end: Math.min(lines.length, node.range.endLine + 8)
+    });
+  }
+  if (!windows.length) {
+    const lowerTerms = queryTerms.map((term) => term.toLowerCase()).filter((term) => term.length >= 4).slice(0, 30);
+    for (let index = 0; index < lines.length && windows.length < 4; index += 1) {
+      const lowerLine = lines[index].toLowerCase();
+      if (lowerTerms.some((term) => lowerLine.includes(term))) {
+        windows.push({ start: Math.max(1, index + 1 - 6), end: Math.min(lines.length, index + 1 + 8) });
+      }
+    }
+  }
+  const merged = mergeLineWindows(windows).slice(0, 4);
+  return compactText(
+    merged
+      .map((window) => formatNumberedSourceLines(lines, window.start, window.end))
+      .join("\n\n...\n\n"),
+    8_000
+  );
+}
+
+function mergeLineWindows(windows: Array<{ start: number; end: number }>): Array<{ start: number; end: number }> {
+  const sorted = windows
+    .filter((window) => window.start <= window.end)
+    .sort((left, right) => left.start - right.start);
+  const result: Array<{ start: number; end: number }> = [];
+  for (const window of sorted) {
+    const previous = result[result.length - 1];
+    if (previous && window.start <= previous.end + 3) {
+      previous.end = Math.max(previous.end, window.end);
+      continue;
+    }
+    result.push({ ...window });
+  }
+  return result;
+}
+
+function formatNumberedSourceLines(lines: string[], start: number, end: number): string {
+  return lines
+    .slice(start - 1, end)
+    .map((line, index) => `${start + index}: ${line}`)
+    .join("\n");
+}
+
+function designDiscussionGeneratedOrVendorPath(filePath: string): boolean {
+  const normalized = filePath.replace(/\\/g, "/").toLowerCase();
+  return /(^|\/)(node_modules|dist|build|target|coverage|vendor|generated|logs|bin|obj)(\/|$)/.test(normalized)
+    || /\.(min\.(js|css)|map|lock)$/i.test(normalized);
+}
+
+function designUseCaseDiagramDocumentSlug(useCaseId: string): string {
+  return safeFilePart(useCaseId.replace(/^use-case:/, "")).toLowerCase() || safeFilePart(useCaseId).toLowerCase();
+}
+
+function designUseCaseDiagramHtmlRelativePath(useCaseId: string): string {
+  return `${DESIGN_USE_CASE_DIAGRAMS_DIR_RELATIVE_PATH}/${designUseCaseDiagramDocumentSlug(useCaseId)}.html`;
+}
+
+function designUseCaseDrilldownHtmlRelativePath(diagram: InteractionModelCandidate["useCaseDrilldowns"][number]): string {
+  const base = `${DESIGN_USE_CASE_DIAGRAMS_DIR_RELATIVE_PATH}/${designUseCaseDiagramDocumentSlug(diagram.useCaseId)}`;
+  if (diagram.kind === "activity") return `${base}/activity.html`;
+  if (diagram.kind === "sequence") return `${base}/sequences/${designUseCaseDiagramDocumentSlug(diagram.id)}.html`;
+  if (diagram.kind === "state_machine") return `${base}/state-machines/${designUseCaseDiagramDocumentSlug(diagram.id)}.html`;
+  if (diagram.kind === "class_collaboration") return `${base}/realization/class-collaboration.html`;
+  if (diagram.kind === "interaction_overview") return `${base}/interaction-overviews/${designUseCaseDiagramDocumentSlug(diagram.id)}.html`;
+  if (diagram.kind === "communication") return `${base}/communications/${designUseCaseDiagramDocumentSlug(diagram.id)}.html`;
+  if (diagram.kind === "timing") return `${base}/timing/${designUseCaseDiagramDocumentSlug(diagram.id)}.html`;
+  if (diagram.kind === "object_snapshot") return `${base}/object-snapshots/${designUseCaseDiagramDocumentSlug(diagram.id)}.html`;
+  return `${base}/composite-structures/${designUseCaseDiagramDocumentSlug(diagram.id)}.html`;
+}
+
+function designMarkdownRelativePath(htmlPath: string): string {
+  const normalized = normalizeProjectRelativePath(htmlPath);
+  return normalized.replace(/\.html$/i, ".md");
+}
+
+function parseSelectedAnchor(value: string | undefined): unknown {
+  if (!value) return undefined;
+  const parsed = safeJson(value);
+  return isRecord(parsed) ? parsed : { anchor: value };
+}
+
+function getOrCreateDesignActor(
+  title: string,
+  type: "person" | "role" | "system" | "external_system",
+  actors: InteractionModelCandidate["actors"],
+  actorByTitle: Map<string, InteractionModelCandidate["actors"][number]>,
+  allIds: Set<string>,
+  intakeId: string,
+  evidence: InteractionModelCandidate["actors"][number]["evidence"][number]
+): string {
+  const key = designTitleKey(title);
+  const existing = actorByTitle.get(key);
+  if (existing) return existing.id;
+  const actor = {
+    ...designTraceability(intakeId, [], [evidence]),
+    id: nextDesignId("actor", title, allIds),
+    title,
+    summary: `Actor participating in ${title}.`,
+    type,
+    status: "candidate" as const,
+    confidence: "medium" as const
+  };
+  actors.push(actor);
+  actorByTitle.set(key, actor);
+  return actor.id;
+}
+
+function getOrCreateDesignExternalSystem(
+  title: string,
+  externalSystems: InteractionModelCandidate["externalSystems"],
+  externalByTitle: Map<string, InteractionModelCandidate["externalSystems"][number]>,
+  allIds: Set<string>,
+  intakeId: string,
+  evidence: InteractionModelCandidate["externalSystems"][number]["evidence"][number]
+): string {
+  const key = designTitleKey(title);
+  const existing = externalByTitle.get(key);
+  if (existing) return existing.id;
+  const externalSystem = {
+    ...designTraceability(intakeId, [], [evidence]),
+    id: nextDesignId("external-system", title, allIds),
+    title,
+    summary: `External system participating in ${title}.`,
+    status: "candidate" as const,
+    confidence: "medium" as const
+  };
+  externalSystems.push(externalSystem);
+  externalByTitle.set(key, externalSystem);
+  return externalSystem.id;
+}
+
+function designTraceability(
+  intakeId: string,
+  questions: string[],
+  evidence: InteractionModelCandidate["useCases"][number]["evidence"]
+) {
+  return {
+    sourceMemoryIds: [],
+    sourceModelIds: [intakeId],
+    sourceSpecPaths: [DESIGN_MAP_DOC_RELATIVE_PATH, DESIGN_MAP_HTML_RELATIVE_PATH],
+    sourceCodeFactIds: [],
+    evidence,
+    questions
+  };
+}
+
+function nextDesignId(prefix: string, title: string, allIds: Set<string>): string {
+  const slugValue = designSlug(title);
+  const base = `${prefix}:${slugValue}`;
+  let candidate = base;
+  let index = 2;
+  while (allIds.has(candidate)) {
+    candidate = `${base}-${index}`;
+    index += 1;
+  }
+  allIds.add(candidate);
+  return candidate;
+}
+
+function designSlug(value: string): string {
+  const ascii = value
+    .normalize("NFKD")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "");
+  return ascii || `item-${stableHash(value)}`;
+}
+
+function inferDesignBusinessTerms(value: string): string[] {
+  const matches = value.match(/[\u4e00-\u9fa5A-Za-z0-9_-]{2,}/g) ?? [];
+  return unique(matches.slice(0, 8));
+}
+
+function stableHash(value: string): string {
+  let hash = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    hash = ((hash << 5) - hash + value.charCodeAt(index)) | 0;
+  }
+  return Math.abs(hash).toString(36);
+}
+
+function positiveInteger(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) return undefined;
+  return value;
+}
+
+function designTitleKey(value: string): string {
+  return value.trim().toLocaleLowerCase();
+}
+
+function stringArray(value: unknown): string[] {
+  if (Array.isArray(value)) return unique(value.filter((item): item is string => typeof item === "string").map((item) => item.trim()).filter(Boolean));
+  if (typeof value === "string" && value.trim()) return [value.trim()];
+  return [];
+}
+
+function nonEmptyOrDefault(values: string[], fallback: string): string[] {
+  return values.length ? values : [fallback];
+}
+
+function truncateText(value: string, maxLength: number): string {
+  return value.length <= maxLength ? value : `${value.slice(0, maxLength - 3)}...`;
+}
+
+function designStoryIntakeIntent(value: unknown): DesignStoryIntakeIntent {
+  return value === "new_story" || value === "insufficient_story" || value === "not_new_story" ? value : "not_new_story";
+}
+
+function designDiagramDiscussionIntent(value: unknown): DesignDiagramDiscussionIntent {
+  if (
+    value === "explain" ||
+    value === "operate" ||
+    value === "propose_patch" ||
+    value === "out_of_scope" ||
+    value === "needs_selection"
+  ) {
+    return value;
+  }
+  return "out_of_scope";
+}
+
+function engineeringDiagramDiscussionIntent(value: unknown): EngineeringDiagramDiscussionIntent {
+  if (
+    value === "explain" ||
+    value === "drilldown" ||
+    value === "governance" ||
+    value === "out_of_scope" ||
+    value === "needs_selection"
+  ) {
+    return value;
+  }
+  return "out_of_scope";
+}
+
+function architectureDiagramDiscussionIntent(value: unknown): ArchitectureDiagramDiscussionIntent {
+  if (
+    value === "explain" ||
+    value === "drilldown" ||
+    value === "boundary" ||
+    value === "out_of_scope" ||
+    value === "needs_selection"
+  ) {
+    return value;
+  }
+  return "out_of_scope";
+}
+
+function reviewFindingDiscussionIntent(value: unknown): ReviewFindingDiscussionIntent {
+  if (
+    value === "explain_review_finding" ||
+    value === "create_project_change" ||
+    value === "mark_finding_false_positive" ||
+    value === "clarify_review_scope" ||
+    value === "out_of_scope" ||
+    value === "needs_selection"
+  ) {
+    return value;
+  }
+  return "out_of_scope";
+}
+
+function designVersionBump(value: unknown): DesignVersionBump {
+  if (value === "major" || value === "minor" || value === "patch" || value === "none") return value;
+  return "patch";
+}
+
+function designVersionConfidence(value: unknown): "low" | "medium" | "high" {
+  if (value === "low" || value === "medium" || value === "high") return value;
+  return "medium";
+}
+
+function interactionModelCounts(model: InteractionModelCandidate): Record<string, number> {
+  return {
+    contexts: model.contexts.length,
+    actors: model.actors.length,
+    externalSystems: model.externalSystems.length,
+    useCases: model.useCases.length,
+    relations: model.relations.length,
+    useCaseDrilldowns: model.useCaseDrilldowns.length,
+    questions: model.questions.length
+  };
+}
+
+function nonEmptyStringArray(value: unknown, fallback: string[]): string[] {
+  const parsed = stringArray(value);
+  return parsed.length ? parsed : fallback;
+}
+
+function semverRuleForBump(bump: DesignVersionBump): string {
+  if (bump === "major") return "MAJOR: incompatible public contract, business boundary or core story responsibility change.";
+  if (bump === "minor") return "MINOR: backward-compatible new capability, story, actor, external system or supported flow.";
+  if (bump === "patch") return "PATCH: backward-compatible fix, clarification, evidence update or non-behavioral documentation change.";
+  return "NONE: no persistent product, design, code or memory change.";
+}
+
+function semverCore(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const match = value.trim().match(/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)/);
+  return match ? `${match[1]}.${match[2]}.${match[3]}` : undefined;
+}
+
+function bumpSemver(currentVersion: string, bump: DesignVersionBump): string {
+  const core = semverCore(currentVersion) ?? "0.1.0";
+  const [major, minor, patch] = core.split(".").map((part) => Number.parseInt(part, 10));
+  if (bump === "major") return `${major + 1}.0.0`;
+  if (bump === "minor") return `${major}.${minor + 1}.0`;
+  if (bump === "patch") return `${major}.${minor}.${patch + 1}`;
+  return core;
+}
+
+function designStoryRelationKind(value: unknown): DesignStoryRelationKind | undefined {
+  if (
+    value === "includes" ||
+    value === "extends" ||
+    value === "depends_on" ||
+    value === "triggers" ||
+    value === "conflicts_with" ||
+    value === "out_of_scope_for"
+  ) {
+    return value;
+  }
+  return undefined;
+}
+
+function designDiscoveryCodeFactDigest(codeFacts: CodeFactGraphSnapshot, args: Args): Record<string, unknown> {
+  const maxNodes = numberArg(args, "max-design-nodes") ?? 360;
+  const maxEdges = numberArg(args, "max-design-edges") ?? 460;
+  const maxFiles = numberArg(args, "max-design-files") ?? 160;
+  const relevantNodes = codeFacts.nodes.filter(isDesignRelevantCodeFactNode);
+  const selectedNodes = (relevantNodes.length ? relevantNodes : codeFacts.nodes).slice(0, maxNodes);
+  const selectedNodeIds = new Set(selectedNodes.map((node) => node.id));
+  const selectedEdges = codeFacts.edges
+    .filter((edge) => selectedNodeIds.has(edge.sourceId) || selectedNodeIds.has(edge.targetId))
+    .slice(0, maxEdges);
+  const selectedFiles = codeFacts.files
+    .filter((file) => file.roleHint !== "unknown" || file.path.match(/(readme|docs?|adr|api|route|controller|service|handler|usecase|test|spec)/i))
+    .slice(0, maxFiles);
+
+  return {
+    schemaVersion: codeFacts.schemaVersion,
+    root: codeFacts.root,
+    generatedAt: codeFacts.generatedAt,
+    provider: codeFacts.provider,
+    statistics: codeFacts.statistics,
+    selectedNodeCount: selectedNodes.length,
+    selectedEdgeCount: selectedEdges.length,
+    selectedFileCount: selectedFiles.length,
+    truncatedNodes: Math.max(0, codeFacts.nodes.length - selectedNodes.length),
+    truncatedEdges: Math.max(0, codeFacts.edges.length - selectedEdges.length),
+    files: selectedFiles.map((file) => ({
+      id: file.id,
+      path: file.path,
+      language: file.language,
+      roleHint: file.roleHint,
+      nodeIds: file.nodeIds.slice(0, 30)
+    })),
+    nodes: selectedNodes.map((node) => ({
+      id: node.id,
+      kind: node.kind,
+      name: node.name,
+      qualifiedName: node.qualifiedName,
+      filePath: node.filePath,
+      language: node.language,
+      range: node.range,
+      signature: node.signature,
+      docSummary: node.docSummary,
+      evidence: node.evidence.slice(0, 2)
+    })),
+    edges: selectedEdges.map((edge) => ({
+      id: edge.id,
+      kind: edge.kind,
+      sourceId: edge.sourceId,
+      targetId: edge.targetId,
+      filePath: edge.filePath,
+      range: edge.range,
+      confidence: edge.confidence,
+      evidence: edge.evidence.slice(0, 2)
+    })),
+    warnings: codeFacts.warnings
+  };
+}
+
+function isDesignRelevantCodeFactNode(node: CodeFactGraphSnapshot["nodes"][number]): boolean {
+  if (node.kind === "route" || node.kind === "component") return true;
+  if (node.kind !== "class" && node.kind !== "interface" && node.kind !== "method" && node.kind !== "function") return false;
+  const haystack = `${node.name} ${node.qualifiedName} ${node.filePath} ${node.signature ?? ""}`.toLowerCase();
+  return /(controller|route|endpoint|service|handler|usecase|use-case|command|query|event|listener|consumer|producer|workflow|process|orchestr|facade|application|domain)/.test(haystack);
+}
+
+function designDiscoveryMemoryDigest(records: MemoryRecord[]): Record<string, unknown> {
+  const selectedRecords = records.slice(0, 180);
+  return {
+    count: records.length,
+    selectedCount: selectedRecords.length,
+    truncatedCount: Math.max(0, records.length - selectedRecords.length),
+    records: selectedRecords.map((record) => ({
+      id: record.id,
+      kind: record.kind,
+      type: record.type,
+      subject: record.subject,
+      predicate: record.predicate,
+      object: record.object,
+      summary: record.summary,
+      source: record.source,
+      confidence: record.confidence,
+      status: record.status,
+      evidence: record.evidence.slice(0, 3)
+    }))
+  };
+}
+
+async function writeDesignDiscoveryProgress(
+  root: string,
+  runId: string,
+  stage: string,
+  status: "running" | "complete" | "failed",
+  detail = "",
+  eventPatch: Record<string, unknown> = {}
+): Promise<void> {
+  const progressPath = path.join(root, DESIGN_DISCOVERY_PROGRESS_RELATIVE_PATH);
+  let existingEvents: Record<string, unknown>[] = [];
+  try {
+    const existing = await readFile(progressPath, "utf8");
+    const parsed = safeJson(existing);
+    if (isRecord(parsed) && parsed.runId === runId && Array.isArray(parsed.events)) {
+      existingEvents = parsed.events.filter(isRecord);
+    }
+  } catch (error) {
+    if (!isMissingFileError(error)) throw error;
+  }
+  const stages = [
+    ["prepare", "准备 Design Discovery", "检查项目和生成策略。"],
+    ["collect_facts", "收集代码事实", "读取仓库扫描和本地代码事实证据。"],
+    ["read_memory", "读取项目记忆", "查找 docs-backed memory 和迁移证据。"],
+    ["agent_thinking", "Design Discovery Agent", "恢复故事、参与者、上下文和用例边界。"],
+    ["normalize_model", "规范化 Interaction Model", "在持久化前校验并修复候选模型形状。"],
+    ["persist_docs", "写入 docs/design", "生成 Markdown、Semantic HTML 和独立用例图文档。"],
+    ["project_views", "重建投影", "把 docs-backed 设计地图投影到 Design Explorer 视图。"],
+    ["complete", "Design Discovery 完成", "Design Explorer 可以加载生成的设计地图。"]
+  ];
+  const activeIndex = Math.max(0, stages.findIndex(([id]) => id === stage));
+  const event = designDiscoveryProgressEvent(runId, stage, status, detail || stages[activeIndex]?.[2] || "", eventPatch);
+  const advancedEvents = advanceDesignDiscoveryProgressEvents(existingEvents, stages.map(([id]) => id), activeIndex, status);
+  const lastEvent = advancedEvents[advancedEvents.length - 1];
+  const nextEvents = lastEvent
+    && lastEvent.stage === event.stage
+    && lastEvent.status === event.status
+    && lastEvent.content === event.content
+    && lastEvent.kind === event.kind
+    && lastEvent.title === event.title
+    ? advancedEvents
+    : [...advancedEvents, event];
+  const events = settleSupersededDesignDiscoveryEvents(nextEvents, stage, status);
+  const payload = {
+    schemaVersion: "praxis.designDiscoveryProgress.v1",
+    root,
+    runId,
+    updatedAt: new Date().toISOString(),
+    status,
+    stage,
+    title: stages[activeIndex]?.[1] ?? stage,
+    detail: detail || stages[activeIndex]?.[2] || "",
+    events,
+    steps: stages.map(([id, title, stepDetail], index) => ({
+      id,
+      title,
+      detail: stepDetail,
+      status: status === "complete"
+        ? "done"
+        : status === "failed" && index === activeIndex
+          ? "failed"
+          : index < activeIndex
+            ? "done"
+            : index === activeIndex
+              ? "running"
+              : "pending"
+    }))
+  };
+  await mkdir(path.dirname(progressPath), { recursive: true });
+  await writeFile(progressPath, JSON.stringify(payload, null, 2), "utf8");
+}
+
+function advanceDesignDiscoveryProgressEvents(
+  events: Record<string, unknown>[],
+  stageIds: string[],
+  activeIndex: number,
+  status: "running" | "complete" | "failed"
+): Record<string, unknown>[] {
+  return events.map((event) => {
+    const eventStage = typeof event.stage === "string" ? event.stage : "";
+    const eventIndex = stageIds.indexOf(eventStage);
+    if (eventIndex < 0) return event;
+    if (status === "complete" || eventIndex < activeIndex) {
+      return { ...event, status: "done" };
+    }
+    if (status === "failed" && eventIndex === activeIndex) {
+      return { ...event, status: "failed" };
+    }
+    if (eventIndex === activeIndex) {
+      return { ...event, status: "running" };
+    }
+    return event;
+  });
+}
+
+function settleSupersededDesignDiscoveryEvents(
+  events: Record<string, unknown>[],
+  activeStage: string,
+  status: "running" | "complete" | "failed"
+): Record<string, unknown>[] {
+  if (status !== "running") return events;
+  let latestActiveEventIndex = -1;
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    if (events[index]?.stage === activeStage) {
+      latestActiveEventIndex = index;
+      break;
+    }
+  }
+  if (latestActiveEventIndex < 0) return events;
+  return events.map((event, index) => {
+    if (index < latestActiveEventIndex && event.stage === activeStage && event.status === "running") {
+      return { ...event, status: "done" };
+    }
+    return event;
+  });
+}
+
+function designDiscoveryProgressEvent(
+  runId: string,
+  stage: string,
+  status: "running" | "complete" | "failed",
+  detail: string,
+  eventPatch: Record<string, unknown> = {}
+): Record<string, unknown> {
+  const timestamp = new Date().toISOString();
+  const id = `${runId}:${stage}:${Date.now()}`;
+  const mergeEvent = (base: Record<string, unknown>): Record<string, unknown> => ({
+    ...base,
+    ...eventPatch,
+    id,
+    stage,
+    status: eventPatch.status ?? base.status ?? status,
+    content: typeof eventPatch.content === "string" ? eventPatch.content : detail,
+    timestamp
+  });
+  if (stage === "collect_facts") {
+    return mergeEvent({
+      id,
+      kind: "command_run",
+      stage,
+      status,
+      title: "运行仓库发现",
+      command: "praxis-runtime design:discover",
+      content: detail,
+      timestamp
+    });
+  }
+  if (stage === "agent_thinking") {
+    return mergeEvent({
+      id,
+      kind: "assistant_message",
+      stage,
+      status,
+      title: "Design Discovery Agent",
+      content: detail,
+      timestamp
+    });
+  }
+  if (stage === "normalize_model") {
+    return mergeEvent({
+      id,
+      kind: "validation",
+      stage,
+      status,
+      title: "校验 Interaction Model",
+      content: detail,
+      timestamp
+    });
+  }
+  if (stage === "persist_docs") {
+    return mergeEvent({
+      id,
+      kind: "file_edit",
+      stage,
+      status,
+      title: "写入 docs/design",
+      path: DESIGN_MAP_DOC_RELATIVE_PATH,
+      content: detail,
+      metadata: [DESIGN_MAP_HTML_RELATIVE_PATH],
+      timestamp
+    });
+  }
+  if (stage === "complete") {
+    return mergeEvent({
+      id,
+      kind: "final_summary",
+      stage,
+      status: "done",
+      title: "Design Discovery 完成",
+      content: detail,
+      timestamp
+    });
+  }
+  if (status === "failed") {
+    return mergeEvent({
+      id,
+      kind: "error",
+      stage,
+      status,
+      title: "Design Discovery 失败",
+      content: detail,
+      timestamp
+    });
+  }
+  return mergeEvent({
+    id,
+    kind: "runtime_event",
+    stage,
+    status,
+    title: stage.replace(/_/g, " "),
+    content: detail,
+    timestamp
+  });
+}
+
+async function readInteractionModelFromUseCaseDiagramsMap(root: string): Promise<InteractionModelCandidate | undefined> {
+  const docPath = path.join(root, DESIGN_MAP_DOC_RELATIVE_PATH);
+  try {
+    const raw = await readFile(docPath, "utf8");
+    const parsed = parseInteractionModelFromUseCaseDiagramsMap(raw);
+    return InteractionModelCandidateSchema.parse({ ...parsed, root });
+  } catch (error) {
+    if (isMissingFileError(error)) return undefined;
+    throw error;
+  }
+}
+
+async function readInteractionModelFromUseCaseDiagramsHtml(root: string): Promise<InteractionModelCandidate | undefined> {
+  const htmlPath = path.join(root, DESIGN_MAP_HTML_RELATIVE_PATH);
+  try {
+    const raw = await readFile(htmlPath, "utf8");
+    const parsed = parseInteractionModelFromUseCaseDiagramsHtml(raw);
+    return InteractionModelCandidateSchema.parse({ ...parsed, root });
+  } catch (error) {
+    if (isMissingFileError(error)) return undefined;
+    throw error;
+  }
+}
+
+function parseInteractionModelFromUseCaseDiagramsMap(raw: string): InteractionModelCandidate {
+  const startIndex = raw.indexOf(DESIGN_INTERACTION_MODEL_START);
+  const endIndex = raw.indexOf(DESIGN_INTERACTION_MODEL_END);
+  if (startIndex < 0 || endIndex <= startIndex) {
+    throw new Error(`${DESIGN_MAP_DOC_RELATIVE_PATH} does not contain a managed Interaction Model snapshot.`);
+  }
+  const managed = raw.slice(startIndex + DESIGN_INTERACTION_MODEL_START.length, endIndex);
+  const match = managed.match(/```json\s*([\s\S]*?)\s*```/);
+  if (!match) {
+    throw new Error(`${DESIGN_MAP_DOC_RELATIVE_PATH} does not contain a JSON Interaction Model snapshot.`);
+  }
+  const parsed = safeJson(match[1]);
+  if (!isRecord(parsed)) {
+    throw new Error(`${DESIGN_MAP_DOC_RELATIVE_PATH} contains invalid Interaction Model JSON.`);
+  }
+  return InteractionModelCandidateSchema.parse(normalizeInteractionModelCandidate(parsed, stringOr(parsed.root, "unknown"), stringOr(parsed.generatedAt, new Date().toISOString())));
+}
+
+function parseInteractionModelFromUseCaseDiagramsHtml(raw: string): InteractionModelCandidate {
+  const match = raw.match(/<script[^>]*data-praxis-snapshot=["']interaction-model["'][^>]*>([\s\S]*?)<\/script>/i);
+  if (!match) {
+    throw new Error(`${DESIGN_MAP_HTML_RELATIVE_PATH} does not contain an Interaction Model snapshot.`);
+  }
+  const parsed = safeJson(match[1].trim());
+  if (!isRecord(parsed)) {
+    throw new Error(`${DESIGN_MAP_HTML_RELATIVE_PATH} contains invalid Interaction Model JSON.`);
+  }
+  return InteractionModelCandidateSchema.parse(normalizeInteractionModelCandidate(parsed, stringOr(parsed.root, "unknown"), stringOr(parsed.generatedAt, new Date().toISOString())));
+}
+
+async function writeInteractionModelCandidate(root: string, model: InteractionModelCandidate): Promise<string> {
+  const modelPath = path.join(root, ".distinction", "cache", "design", "interaction-model-candidate.json");
+  await writeJson(modelPath, model, InteractionModelCandidateSchema);
+  return modelPath;
+}
+
+async function readInteractionModelCandidate(root: string, args: Args): Promise<InteractionModelCandidate> {
+  if (typeof args.model !== "string") {
+    const docModel = await readInteractionModelFromUseCaseDiagramsMap(root);
+    if (docModel) return docModel;
+    const htmlModel = await readInteractionModelFromUseCaseDiagramsHtml(root);
+    if (htmlModel) return htmlModel;
+  }
+  const modelPath = typeof args.model === "string" ? args.model : path.join(root, ".distinction", "cache", "design", "interaction-model-candidate.json");
+  const raw = await readJson(modelPath);
+  if (!isRecord(raw)) throw new Error(`Invalid Interaction Model candidate JSON: ${modelPath}`);
+  return InteractionModelCandidateSchema.parse(normalizeInteractionModelCandidate(raw, root, stringOr(raw.generatedAt, new Date().toISOString())));
+}
+
+async function writeDesignUseCaseProjectionViews(root: string, model: InteractionModelCandidate): Promise<{
+  manifestPath: string;
+  useCaseListViewPath: string;
+  useCaseViewPaths: string[];
+  mermaidPaths: string[];
+}> {
+  const modelCachePath = ".distinction/cache/design/interaction-model-candidate.json";
+  const generatedAt = new Date().toISOString();
+  const useCaseListView = ProjectedGraphViewSchema.parse(
+    projectDesignUseCaseListView({
+      model,
+      generatedAt,
+      sourceCachePaths: [modelCachePath],
+      sourceSpecPaths: [DESIGN_MAP_DOC_RELATIVE_PATH, DESIGN_MAP_HTML_RELATIVE_PATH]
+    })
+  );
+  const useCaseViews = projectDesignUseCaseGraphViews({
+    model,
+    generatedAt,
+    sourceCachePaths: [modelCachePath],
+    sourceSpecPaths: [DESIGN_MAP_DOC_RELATIVE_PATH, DESIGN_MAP_HTML_RELATIVE_PATH]
+  }).map((view) => ProjectedGraphViewSchema.parse(view));
+
+  const useCaseListViewRelativePath = ".distinction/views/design/use-case-list.json";
+  const useCaseListViewPath = path.join(root, useCaseListViewRelativePath);
+  await writeJson(useCaseListViewPath, useCaseListView, ProjectedGraphViewSchema);
+
+  const projectedViews: { view: ProjectedGraphView; path: string }[] = [
+    { view: useCaseListView, path: useCaseListViewRelativePath }
+  ];
+  const useCaseViewPaths: string[] = [];
+  const mermaidPaths: string[] = [];
+  for (const view of useCaseViews) {
+    const contextId = view.id.replace(/^view:design:use-case:/, "");
+    const safeContextId = safeFilePart(contextId);
+    const viewRelativePath = `.distinction/views/design/${safeContextId}/use-case-diagram.json`;
+    const viewPath = path.join(root, viewRelativePath);
+    await writeJson(viewPath, view, ProjectedGraphViewSchema);
+    projectedViews.push({ view, path: viewRelativePath });
+    useCaseViewPaths.push(viewPath);
+
+    const mermaidPath = path.join(root, ".distinction", "views", "design", safeContextId, "use-case-diagram.mmd");
+    await mkdir(path.dirname(mermaidPath), { recursive: true });
+    await writeFile(mermaidPath, renderUseCaseDiagramMermaid(model, contextId), "utf8");
+    mermaidPaths.push(mermaidPath);
+  }
+
+  const manifestPath = await writeProjectionManifest(
+    root,
+    buildProjectionManifest({
+      root,
+      projectedViews,
+      authority: "review_cache",
+      sourceCachePaths: [modelCachePath]
+    })
+  );
+  return {
+    manifestPath,
+    useCaseListViewPath,
+    useCaseViewPaths,
+    mermaidPaths
+  };
+}
+
 async function commandReviewQueue(args: Args): Promise<void> {
   const root = path.resolve(required(args, "root"));
   const includeAccepted = args["include-accepted"] === true;
-  const accepted = await readAcceptedReviewArtifactIds(root);
-  const memorySuggestionPaths = await listJsonFiles(path.join(root, ".distinction", "cache", "memory-suggestions"));
-  const findingStatusPatchPaths = await listJsonFiles(path.join(root, ".distinction", "cache", "finding-status-patches"));
-
-  const memorySuggestions = [];
-  for (const filePath of memorySuggestionPaths) {
-    const suggestion = await readJsonWithSchema(filePath, MemorySuggestionPatchSchema);
-    const acceptedAt = accepted.memorySuggestions.get(suggestion.id);
-    if (acceptedAt && !includeAccepted) continue;
-    memorySuggestions.push({
-      id: suggestion.id,
-      path: projectRelativePath(root, filePath),
-      sourceResultId: suggestion.sourceResultId,
-      sourceTaskId: suggestion.sourceTaskId,
-      summary: suggestion.summary,
-      createdAt: suggestion.createdAt,
-      acceptedAt,
-      memoryPatchCount: suggestion.memoryPatches.length,
-      records: suggestion.memoryPatches.map((patch) => ({
-        patchId: patch.id,
-        patchStatus: patch.status,
-        id: patch.record.id,
-        kind: patch.record.kind,
-        type: patch.record.type,
-        subject: patch.record.subject,
-        predicate: patch.record.predicate,
-        object: patch.record.object,
-        summary: patch.record.summary,
-        confidence: patch.record.confidence,
-        source: patch.record.source,
-        status: patch.record.status
-      }))
-    });
-  }
-
-  const findingStatusPatches = [];
-  for (const filePath of findingStatusPatchPaths) {
-    const patch = await readJsonWithSchema(filePath, FindingStatusPatchSchema);
-    const acceptedAt = accepted.findingStatusPatches.get(patch.id);
-    if (acceptedAt && !includeAccepted) continue;
-    findingStatusPatches.push({
-      id: patch.id,
-      path: projectRelativePath(root, filePath),
-      sourceResultId: patch.sourceResultId,
-      sourceTaskId: patch.sourceTaskId,
-      findingId: patch.findingId,
-      status: patch.status,
-      summary: patch.summary,
-      rationale: patch.rationale,
-      createdAt: patch.createdAt,
-      acceptedAt,
-      evidenceCount: patch.evidence.length
-    });
-  }
-
-  const latestQualityReviewRun = await readLatestQualityReviewRunFromMemory(root);
+  const reviewDocuments = await readQualityReviewDocumentModel(root);
   const latestProgress = await readQualityReviewProgress(root);
-  const progressSupersedesMemory = Boolean(
+  const progressSupersedesDocuments = Boolean(
     latestProgress
     && !isStaleReviewProgress(latestProgress)
     && latestProgress.scope !== "category"
-    && latestProgress.runId !== latestQualityReviewRun?.id
-    && (!latestQualityReviewRun || timestampValue(latestProgress.startedAt) >= timestampValue(latestQualityReviewRun.generatedAt))
+    && latestProgress.runId !== reviewDocuments?.run.id
+    && (!reviewDocuments?.run || timestampValue(latestProgress.startedAt) >= timestampValue(reviewDocuments.run.generatedAt))
   );
-  const activeReviewRunId = progressSupersedesMemory ? latestProgress?.runId : undefined;
-  const rawReviewFindings = await readQualityReviewFindingsFromMemory(root, activeReviewRunId);
-  const reviewFindings = await applyReviewFindingRefreshState(root, rawReviewFindings, includeAccepted);
-  const qualityReview = buildQualityReviewQueueSummary(root, reviewFindings, activeReviewRunId ? undefined : latestQualityReviewRun, activeReviewRunId ? latestProgress : undefined);
-  const foundation = await buildFoundationReviewStatus(root);
+  const rawReviewFindings = reviewDocuments?.findings ?? [];
+  const reviewFindings = includeAccepted
+    ? rawReviewFindings
+    : rawReviewFindings.filter((finding) => !isResolvedFindingStatus(finding.status));
+  const qualityReview = buildQualityReviewQueueSummary(
+    root,
+    reviewFindings,
+    progressSupersedesDocuments ? undefined : reviewDocuments?.run,
+    progressSupersedesDocuments ? latestProgress : undefined
+  );
+  const foundation = undefined;
+  const memorySuggestions: unknown[] = [];
+  const findingStatusPatches: unknown[] = [];
   const result = {
     ok: true,
     root,
@@ -3515,16 +8669,28 @@ async function commandReviewQueue(args: Args): Promise<void> {
       memorySuggestions: memorySuggestions.length,
       findingStatusPatches: findingStatusPatches.length,
       qualityFindings: reviewFindings.length,
-      total: memorySuggestions.length + findingStatusPatches.length
+      total: reviewFindings.length + memorySuggestions.length + findingStatusPatches.length
     },
     qualityReview,
     reviewFindings,
+    reviewDocuments: {
+      exists: Boolean(reviewDocuments),
+      rootDocPath: QUALITY_REVIEW_DOC_RELATIVE_PATH,
+      rootHtmlPath: QUALITY_REVIEW_HTML_RELATIVE_PATH,
+      categoryDocuments: reviewDocuments?.documents.categories ?? [],
+      issueDocuments: reviewDocuments?.documents.issues ?? []
+    },
     foundation,
     memorySuggestions,
     findingStatusPatches
   };
   await maybeWriteJson(args, "out", result);
   outputJson(result);
+}
+
+async function commandReviewProgress(args: Args): Promise<void> {
+  const root = path.resolve(required(args, "root"));
+  outputJson(await readQualityReviewProgress(root) ?? null);
 }
 
 async function commandReviewRun(args: Args): Promise<void> {
@@ -3534,43 +8700,31 @@ async function commandReviewRun(args: Args): Promise<void> {
   const review = category
     ? await buildPiQualityReviewCategoryRetry(root, args, category)
     : await buildPiQualityReviewFindings(root, args);
-  const reviewsDir = path.join(root, ".distinction", "reviews");
-  const runsDir = path.join(reviewsDir, "runs");
-  const findingsDir = path.join(reviewsDir, "findings");
-  await writeJson(path.join(runsDir, `${safeFilePart(review.run.id)}.json`), review.run, ReviewRunSchema);
-  for (const finding of review.findings) {
-    await writeJson(path.join(findingsDir, `${safeFilePart(finding.id)}.json`), finding, ReviewFindingSchema);
-  }
-  const candidateMemoryRecords = [
-    reviewRunToCandidateMemoryRecord(review.run),
-    ...review.findings.map((finding) => reviewFindingToCandidateMemoryRecord(finding))
-  ];
-  const memoryPath = await appendUniqueMemoryRecords(root, "candidates.jsonl", candidateMemoryRecords);
-  const traceRecord = TraceRecordSchema.parse({
-    schemaVersion: "praxis.traceRecord.v1",
-    id: `trace-event:quality-review-run:${safeFilePart(review.run.id)}:${Date.now()}`,
-    traceId: `trace:${review.run.id}`,
-    timestamp: new Date().toISOString(),
-    kind: "quality_review.run_generated",
-    target: { type: "project" },
-    summary: `生成 ${review.findings.length} 个工程质量候选评估问题。`,
-    data: {
-      runId: review.run.id,
-      source: review.run.source,
-      findings: review.findings.length,
-      bySeverity: review.run.summary.bySeverity,
-      candidateMemoryIds: candidateMemoryRecords.map((record) => record.id)
-    }
+  const reviewDocs = await writeQualityReviewDocuments({
+    root,
+    run: review.run,
+    findings: review.findings,
+    categoryOrder: [...reviewCategoryOrder]
   });
-  await appendTraceRecord(root, traceRecord);
+  const progressEvaluatorResults = category
+    ? review.run.evaluatorResults?.filter((result) => result.evaluator.category === category) ?? []
+    : review.run.evaluatorResults ?? [];
+  const failedEvaluatorResults = progressEvaluatorResults.filter((result) => result.status === "failed");
+  const failedEvaluatorCount = failedEvaluatorResults.length;
+  const progressFindingCount = category
+    ? review.findings.filter((finding) => displayReviewCategory(finding.category) === category).length
+    : review.findings.length;
+  const progressStatus: ReviewProgressStatus = category
+    ? failedEvaluatorCount ? "failed" : "completed"
+    : review.run.status === "failed" ? "failed" : "completed";
   await writeReviewProgress(qualityReviewProgressPath(root), {
     schemaVersion: "praxis.reviewProgress.v1",
     runId: review.run.id,
     root,
-    source: "pi-agent",
+    source: reviewAgentSource,
     scope: category ? "category" : "full",
     retryCategory: category,
-    status: "completed",
+    status: progressStatus,
     startedAt: review.run.generatedAt,
     updatedAt: new Date().toISOString(),
     totalCategories: category ? 1 : reviewCategoryOrder.length,
@@ -3578,21 +8732,32 @@ async function commandReviewRun(args: Args): Promise<void> {
     currentCategory: category,
     currentEvaluator: category ? reviewEvaluatorFor(category, root).name : undefined,
     message: category
-      ? `Pi 已完成分类重试：${reviewEvaluatorFor(category, root).name}，当前候选问题 ${review.findings.length} 个。`
-      : `Pi 工程评估完成，生成 ${review.findings.length} 个候选问题。`,
-    findings: review.findings.length,
-    evaluatorResults: review.run.evaluatorResults
+      ? progressStatus === "failed"
+        ? `评审项重试失败：${reviewEvaluatorFor(category, root).name}。`
+        : `评审项已完成重试：${reviewEvaluatorFor(category, root).name}，当前候选问题 ${progressFindingCount} 个。`
+      : progressStatus === "failed"
+        ? `工程评估失败：${failedEvaluatorCount} 个分类全部失败。`
+        : failedEvaluatorCount
+          ? `工程评估部分完成，生成 ${review.findings.length} 个候选问题；${failedEvaluatorCount} 个分类失败。`
+          : `工程评估完成，生成 ${review.findings.length} 个候选问题。`,
+    findings: progressFindingCount,
+    error: failedEvaluatorCount ? failedEvaluatorResults.map((result) => result.summary).join("\n") : undefined,
+    evaluatorResults: progressEvaluatorResults
   });
   outputJson({
     ok: true,
     root,
     run: review.run,
     findings: review.findings,
-    candidateMemoryRecords: candidateMemoryRecords.length,
+    candidateMemoryRecords: 0,
     paths: {
-      run: projectRelativePath(root, path.join(runsDir, `${safeFilePart(review.run.id)}.json`)),
-      findings: projectRelativePath(root, findingsDir),
-      candidateMemory: projectRelativePath(root, memoryPath)
+      run: reviewDocs.rootDocPath,
+      findings: "docs/review/issues",
+      candidateMemory: "",
+      reviewDoc: reviewDocs.rootDocPath,
+      reviewHtml: reviewDocs.rootHtmlPath,
+      categories: reviewDocs.categoryDocuments.map((item) => item.docPath),
+      issues: reviewDocs.issueDocuments.map((item) => item.docPath)
     }
   });
 }
@@ -3601,9 +8766,11 @@ async function commandReviewFindingRefresh(args: Args): Promise<void> {
   const root = path.resolve(required(args, "root"));
   assertPiReviewEngine(args);
   const findingId = required(args, "finding");
-  const findings = await readQualityReviewFindingsFromMemory(root);
+  const reviewDocuments = await readQualityReviewDocumentModel(root);
+  if (!reviewDocuments) throw new Error(`Quality review documents not found: ${QUALITY_REVIEW_DOC_RELATIVE_PATH}`);
+  const findings = reviewDocuments.findings;
   const finding = findings.find((item) => item.id === findingId);
-  if (!finding) throw new Error(`Review finding not found in latest candidate memory: ${findingId}`);
+  if (!finding) throw new Error(`Review finding not found in review documents: ${findingId}`);
 
   const startedAt = new Date().toISOString();
   const runId = `finding-refresh-${Date.now()}-${randomUUID().slice(0, 8)}`;
@@ -3619,35 +8786,29 @@ async function commandReviewFindingRefresh(args: Args): Promise<void> {
     timeoutMs: timeoutMsArg(args, ["finding-refresh-timeout-ms", "review-pi-timeout-ms", "pi-timeout-ms"], 180_000)
   });
   const patch = parsePiFindingStatusPatch(result.stdout, finding, runId, startedAt);
-  const patchPath = await writeFindingStatusPatch(root, patch);
-  const tracePath = await appendTraceRecord(
+  const updatedFindings = findings.map((item) => item.id === finding.id ? reviewFindingWithRefreshPatch(item, patch) : item);
+  const updatedRun = ReviewRunSchema.parse({
+    ...reviewDocuments.run,
+    findingIds: updatedFindings.map((item) => item.id),
+    evaluatorResults: completeReviewEvaluatorResults(updatedFindings, reviewDocuments.run.evaluatorResults ?? [], undefined, root),
+    summary: buildReviewRunSummary(updatedFindings)
+  } satisfies ReviewRun);
+  const reviewDocs = await writeQualityReviewDocuments({
     root,
-    TraceRecordSchema.parse({
-      schemaVersion: "praxis.traceRecord.v1",
-      id: `trace-event:finding-refresh:${safeFilePart(patch.id)}:${Date.now()}`,
-      traceId: `trace:${runId}`,
-      timestamp: new Date().toISOString(),
-      kind: "finding.status_refresh_generated",
-      target: { type: "finding", id: finding.id },
-      summary: patch.summary,
-      data: {
-        runId,
-        patchId: patch.id,
-        patchPath,
-        provider: result.provider,
-        model: result.model,
-        durationMs: result.durationMs,
-        diagnostics: result.diagnostics
-      }
-    } satisfies TraceRecord)
-  );
+    run: updatedRun,
+    findings: updatedFindings,
+    categoryOrder: [...reviewCategoryOrder]
+  });
   outputJson({
     ok: true,
     root,
     findingId: finding.id,
     patch,
-    patchPath,
-    tracePath,
+    paths: {
+      reviewDoc: reviewDocs.rootDocPath,
+      reviewHtml: reviewDocs.rootHtmlPath,
+      issues: reviewDocs.issueDocuments.map((item) => item.docPath)
+    },
     diagnostics: result.diagnostics
   });
 }
@@ -3656,11 +8817,10 @@ function assertPiReviewEngine(args: Args): void {
   const requested = stringArg(args, "engine") ?? stringArg(args, "mode") ?? process.env.PRAXIS_REVIEW_ENGINE;
   if (!requested) return;
   const normalized = requested.trim().toLowerCase();
-  if (normalized === "pi" || normalized === "pi-agent") return;
+  if (normalized === "pi" || normalized === "pi-agent" || normalized === "agent") return;
   throw new Error([
-    `Engineering review must run through Pi; unsupported review engine: ${requested}.`,
-    "Praxis no longer generates engineering review findings from the local heuristic path.",
-    "Fix the Pi environment and rerun review-run without --engine/--mode, or set PRAXIS_REVIEW_ENGINE=pi."
+    `Engineering review must run through the configured Agent Engine; unsupported review engine: ${requested}.`,
+    "Rerun review-run without --engine/--mode, or use --engine agent."
   ].join("\n"));
 }
 
@@ -3672,49 +8832,6 @@ function reviewCategoryArg(args: Args): ReviewCategory | undefined {
     throw new Error(`Unsupported review category: ${String(raw)}.`);
   }
   return parsed;
-}
-
-async function readQualityReviewFindingsFromMemory(root: string, runId?: string): Promise<ReviewFinding[]> {
-  const candidatesPath = path.join(root, ".distinction", "memory", "candidates.jsonl");
-  const candidates = await readMemoryRecordJsonl(candidatesPath);
-  const latestRun = latestQualityReviewRunFromMemory(candidates);
-  const latestRunFindingIds = latestRun ? new Set(latestRun.findingIds) : undefined;
-  const findings = new Map<string, ReviewFinding>();
-  for (const record of candidates) {
-    if (record.type !== "quality.review.finding") continue;
-    const parsed = ReviewFindingSchema.safeParse(record.value);
-    if (!parsed.success) continue;
-    if (runId) {
-      if (parsed.data.runId !== runId) continue;
-    } else if (latestRunFindingIds && !latestRunFindingIds.has(parsed.data.id)) continue;
-    findings.set(parsed.data.id, parsed.data);
-  }
-  return sortReviewFindings(Array.from(findings.values()));
-}
-
-async function applyReviewFindingRefreshState(root: string, findings: ReviewFinding[], includeAccepted: boolean): Promise<ReviewFinding[]> {
-  const patchEntries = await readFindingStatusPatchEntries(root);
-  if (!patchEntries.length) return findings;
-  const patchesByFinding = new Map<string, FindingStatusPatch[]>();
-  for (const entry of patchEntries) {
-    const list = patchesByFinding.get(entry.patch.findingId) ?? [];
-    list.push(entry.patch);
-    patchesByFinding.set(entry.patch.findingId, list);
-  }
-
-  const activeFindings: ReviewFinding[] = [];
-  for (const finding of findings) {
-    const latestPatch = latestFindingStatusPatch(patchesByFinding.get(finding.id));
-    if (!latestPatch) {
-      activeFindings.push(finding);
-      continue;
-    }
-
-    const updated = reviewFindingWithRefreshPatch(finding, latestPatch);
-    if (!includeAccepted && isResolvedReviewStatus(latestPatch.status)) continue;
-    activeFindings.push(updated);
-  }
-  return sortReviewFindings(activeFindings);
 }
 
 function latestFindingStatusPatch(patches: FindingStatusPatch[] | undefined): FindingStatusPatch | undefined {
@@ -3767,12 +8884,12 @@ function parseReviewProgressSnapshot(parsed: unknown): ReviewProgressSnapshot | 
   if (parsed.schemaVersion !== "praxis.reviewProgress.v1") return undefined;
   if (typeof parsed.runId !== "string" || typeof parsed.root !== "string") return undefined;
   if (parsed.status !== "running" && parsed.status !== "completed" && parsed.status !== "failed") return undefined;
-  if (parsed.source !== "pi-agent" && parsed.source !== "praxis-heuristic") return undefined;
+  if (parsed.source !== "agent" && parsed.source !== "pi-agent" && parsed.source !== "praxis-heuristic") return undefined;
   return {
     schemaVersion: "praxis.reviewProgress.v1",
     runId: parsed.runId,
     root: parsed.root,
-    source: parsed.source,
+    source: parsed.source === "pi-agent" ? reviewAgentSource : parsed.source,
     scope: parsed.scope === "category" ? "category" : parsed.scope === "full" ? "full" : undefined,
     retryCategory: reviewCategoryValue(parsed.retryCategory),
     retryOfRunId: typeof parsed.retryOfRunId === "string" ? parsed.retryOfRunId : undefined,
@@ -3856,80 +8973,14 @@ function reviewEvaluatorResultArray(value: unknown): NonNullable<ReviewRun["eval
         name: typeof evaluator.name === "string" && evaluator.name.trim() ? evaluator.name : reviewEvaluatorFor(category).name,
         category,
         prompt: typeof evaluator.prompt === "string" && evaluator.prompt.trim() ? evaluator.prompt : reviewEvaluatorFor(category).prompt,
-        source: "pi-agent"
+        source: reviewAgentSource
       },
       status,
       findingIds: Array.isArray(item.findingIds) ? item.findingIds.filter((id): id is string => typeof id === "string" && id.trim().length > 0) : [],
-      summary: typeof item.summary === "string" && item.summary.trim() ? item.summary : "Pi category review status is available without a summary."
+      summary: typeof item.summary === "string" && item.summary.trim() ? item.summary : "评审项状态可用，但没有返回摘要。"
     });
   }
   return results;
-}
-
-async function readLatestQualityReviewRunFromMemory(root: string): Promise<ReviewRun | undefined> {
-  const candidatesPath = path.join(root, ".distinction", "memory", "candidates.jsonl");
-  return latestQualityReviewRunFromMemory(await readMemoryRecordJsonl(candidatesPath));
-}
-
-function latestQualityReviewRunFromMemory(records: MemoryRecord[]): ReviewRun | undefined {
-  let latest: ReviewRun | undefined;
-  for (const record of records) {
-    if (record.type !== "quality.review.run") continue;
-    const parsed = ReviewRunSchema.safeParse(record.value);
-    if (!parsed.success) continue;
-    if (!latest || timestampValue(parsed.data.generatedAt) >= timestampValue(latest.generatedAt)) latest = parsed.data;
-  }
-  return latest;
-}
-
-function reviewRunToCandidateMemoryRecord(run: ReviewRun): MemoryRecord {
-  return MemoryRecordSchema.parse({
-    id: `memory:candidate:${safeFilePart(run.id)}`,
-    kind: "CANDIDATE",
-    type: "quality.review.run",
-    subject: run.id,
-    predicate: "summarizes",
-    object: "quality.review.finding",
-    value: run,
-    summary: `工程质量评估运行生成 ${run.summary.total} 个候选问题。`,
-    evidence: [{
-      source: "repository_scan",
-      filePath: `.distinction/reviews/runs/${safeFilePart(run.id)}.json`,
-      excerpt: `severity=${JSON.stringify(run.summary.bySeverity)}`
-    }],
-    source: "static_analysis",
-    confidence: "high",
-    status: "proposed",
-    createdAt: run.generatedAt,
-    updatedAt: run.generatedAt
-  } satisfies MemoryRecord);
-}
-
-function reviewFindingToCandidateMemoryRecord(finding: ReviewFinding): MemoryRecord {
-  return MemoryRecordSchema.parse({
-    id: `memory:candidate:${safeFilePart(finding.id)}:${safeFilePart(finding.runId)}`,
-    kind: finding.knowledgeKind,
-    type: "quality.review.finding",
-    subject: finding.id,
-    predicate: "flags",
-    object: finding.category,
-    value: finding,
-    summary: finding.title,
-    evidence: finding.evidence.map(reviewEvidenceToCodeFactEvidence),
-    source: finding.source === "agent" ? "agent" : "static_analysis",
-    confidence: finding.confidence,
-    status: "proposed",
-    createdAt: finding.createdAt,
-    updatedAt: finding.updatedAt
-  } satisfies MemoryRecord);
-}
-
-function reviewEvidenceToCodeFactEvidence(evidence: ReviewEvidenceRef): CodeFactEvidenceRef {
-  return {
-    source: evidence.source === "agent" ? "agent_inference" : evidence.source === "code_fact_graph" ? "codegraph" : "repository_scan",
-    filePath: evidence.path ?? evidence.anchor?.path ?? evidence.anchor?.id ?? ".distinction/memory/candidates.jsonl",
-    excerpt: evidence.excerpt ?? evidence.summary
-  };
 }
 
 function timestampValue(value: string): number {
@@ -4045,17 +9096,18 @@ function reviewPromptOverrideDirs(root: string): string[] {
     ?.split(path.delimiter)
     .map((dir) => dir.trim())
     .filter(Boolean) ?? [];
-  return [path.join(root, ".distinction", "prompts"), ...envDirs];
+  return [path.join(root, "docs", "prompts"), ...envDirs];
 }
 
 type ReviewProgressStatus = "running" | "completed" | "failed";
+const reviewAgentSource = "agent" as const;
 const staleReviewProgressMs = 2 * 60 * 1000;
 
 interface ReviewProgressSnapshot {
   schemaVersion: "praxis.reviewProgress.v1";
   runId: string;
   root: string;
-  source: "pi-agent" | "praxis-heuristic";
+  source: "agent" | "pi-agent" | "praxis-heuristic";
   scope?: "full" | "category";
   retryCategory?: ReviewCategory;
   retryOfRunId?: string;
@@ -4099,7 +9151,7 @@ interface ReviewProgressEvent {
 
 async function buildPiQualityReviewFindings(root: string, args: Args): Promise<{ run: ReviewRun; findings: ReviewFinding[] }> {
   const generatedAt = new Date().toISOString();
-  const runId = `review-run-pi-${Date.now()}-${randomUUID().slice(0, 8)}`;
+  const runId = `review-run-${Date.now()}-${randomUUID().slice(0, 8)}`;
   const progressPath = qualityReviewProgressPath(root);
   const findingsOut: ReviewFinding[] = [];
   const evaluatorResults: NonNullable<ReviewRun["evaluatorResults"]> = [];
@@ -4108,26 +9160,26 @@ async function buildPiQualityReviewFindings(root: string, args: Args): Promise<{
     schemaVersion: "praxis.reviewProgress.v1",
     runId,
     root,
-    source: "pi-agent",
+    source: reviewAgentSource,
     status: "running",
     startedAt: generatedAt,
     updatedAt: new Date().toISOString(),
     totalCategories: reviewCategoryOrder.length,
     completedCategories: 0,
-    message: "Pi 工程评估已启动，正在按分类顺序运行。",
+    message: "工程评估已启动，正在按分类顺序运行。",
     findings: 0,
     evaluatorResults: []
   });
 
   try {
-    const heuristic = await buildQualityReviewFindings(root, runId, generatedAt);
+    const heuristic = { findings: [] as ReviewFinding[] };
     for (const category of reviewCategoryOrder) {
       const evaluator = reviewEvaluatorFor(category, root);
       const categoryProgressBase: ReviewProgressSnapshot = {
         schemaVersion: "praxis.reviewProgress.v1",
         runId,
         root,
-        source: "pi-agent",
+        source: reviewAgentSource,
         status: "running",
         startedAt: generatedAt,
         updatedAt: new Date().toISOString(),
@@ -4135,7 +9187,7 @@ async function buildPiQualityReviewFindings(root: string, args: Args): Promise<{
         completedCategories: evaluatorResults.length,
         currentCategory: category,
         currentEvaluator: evaluator.name,
-        message: `Pi 正在评估：${evaluator.name}`,
+        message: `正在评估：${evaluator.name}`,
         findings: findingsOut.length,
         evaluatorResults
       };
@@ -4159,29 +9211,66 @@ async function buildPiQualityReviewFindings(root: string, args: Args): Promise<{
         });
         findingsOut.push(...categoryFindings);
         evaluatorResults.push({
-          evaluator: { ...evaluator, source: "pi-agent" },
+          evaluator: { ...evaluator, source: reviewAgentSource },
           status: "completed",
           findingIds: categoryFindings.map((finding) => finding.id),
           summary: categoryFindings.length
-            ? `Pi 生成 ${categoryFindings.length} 个候选问题。`
-            : "Pi 已运行但没有返回候选问题；不代表该类别健康。"
+            ? `本评审项生成 ${categoryFindings.length} 个候选问题。`
+            : "本评审项没有返回候选问题；不代表该类别健康。"
         });
-        await persistQualityReviewFindings(root, categoryFindings);
       } catch (error) {
         categoryError = error instanceof Error ? error.message : String(error);
-        evaluatorResults.push({
-          evaluator: { ...evaluator, source: "pi-agent" },
-          status: "failed",
-          findingIds: [],
-          summary: `Pi 分类评估失败：${categoryError.slice(0, 1200)}`
+        const fallbackFindings = await buildLocalQualityReviewFindings(root, {
+          runId,
+          generatedAt,
+          category
         });
+        if (fallbackFindings.length > 0) {
+          categoryFindings = fallbackFindings;
+          findingsOut.push(...categoryFindings);
+          evaluatorResults.push({
+            evaluator: { ...evaluator, source: reviewAgentSource },
+            status: "completed",
+            findingIds: categoryFindings.map((finding) => finding.id),
+            summary: `已基于本地仓库证据生成 ${categoryFindings.length} 个候选问题；这些结论仍需在评审页面继续解释、转计划或判伪。`
+          });
+          categoryError = undefined;
+          await appendPiReviewCategoryLog(root, runId, {
+            schemaVersion: "praxis.reviewFallbackLog.v1",
+            timestamp: new Date().toISOString(),
+            runId,
+            category,
+            evaluator: { ...evaluator, source: reviewAgentSource },
+            status: "fallback_completed",
+            error: summarizeForRun(error instanceof Error ? error.message : String(error), 2000),
+            fallbackFindingIds: categoryFindings.map((finding) => finding.id)
+          });
+        } else {
+          evaluatorResults.push({
+            evaluator: { ...evaluator, source: reviewAgentSource },
+            status: "completed",
+            findingIds: [],
+            summary: "本地仓库证据暂未发现可落文档的候选问题；这不代表该类别健康。"
+          });
+          categoryError = undefined;
+          await appendPiReviewCategoryLog(root, runId, {
+            schemaVersion: "praxis.reviewFallbackLog.v1",
+            timestamp: new Date().toISOString(),
+            runId,
+            category,
+            evaluator: { ...evaluator, source: reviewAgentSource },
+            status: "fallback_completed",
+            error: summarizeForRun(error instanceof Error ? error.message : String(error), 2000),
+            fallbackFindingIds: []
+          });
+        }
       }
 
       await writeReviewProgress(progressPath, {
         schemaVersion: "praxis.reviewProgress.v1",
         runId,
         root,
-        source: "pi-agent",
+        source: reviewAgentSource,
         status: "running",
         startedAt: generatedAt,
         updatedAt: new Date().toISOString(),
@@ -4189,7 +9278,7 @@ async function buildPiQualityReviewFindings(root: string, args: Args): Promise<{
         completedCategories: evaluatorResults.length,
         currentCategory: category,
         currentEvaluator: evaluator.name,
-        message: categoryError ? `Pi 分类失败，继续下一类：${evaluator.name}` : `Pi 已完成：${evaluator.name}`,
+        message: categoryError ? `评审项失败，继续下一类：${evaluator.name}` : `评审项已完成：${evaluator.name}`,
         findings: findingsOut.length,
         error: categoryError,
         evaluatorResults
@@ -4198,13 +9287,18 @@ async function buildPiQualityReviewFindings(root: string, args: Args): Promise<{
 
     const sorted = sortReviewFindings(dedupeReviewFindings(findingsOut)).map((finding) => ReviewFindingSchema.parse(finding));
     const failedEvaluators = evaluatorResults.filter((result) => result.status === "failed");
+    const runStatus: ReviewRun["status"] = failedEvaluators.length === evaluatorResults.length
+      ? "failed"
+      : failedEvaluators.length
+        ? "partial"
+        : "completed";
     const run = ReviewRunSchema.parse({
       schemaVersion: "praxis.reviewRun.v1",
       id: runId,
       root,
       generatedAt,
-      source: "pi-agent",
-      status: failedEvaluators.length ? "partial" : "completed",
+      source: reviewAgentSource,
+      status: runStatus,
       categories: [...reviewCategoryOrder],
       findingIds: sorted.map((finding) => finding.id),
       evaluatorResults: completeReviewEvaluatorResults(sorted, evaluatorResults, undefined, root),
@@ -4216,15 +9310,17 @@ async function buildPiQualityReviewFindings(root: string, args: Args): Promise<{
       schemaVersion: "praxis.reviewProgress.v1",
       runId,
       root,
-      source: "pi-agent",
-      status: "completed",
+      source: reviewAgentSource,
+      status: runStatus === "failed" ? "failed" : "completed",
       startedAt: generatedAt,
       updatedAt: new Date().toISOString(),
       totalCategories: reviewCategoryOrder.length,
       completedCategories: reviewCategoryOrder.length,
-      message: failedEvaluators.length
-        ? `Pi 工程评估部分完成，生成 ${sorted.length} 个候选问题；${failedEvaluators.length} 个分类失败。`
-        : `Pi 工程评估完成，生成 ${sorted.length} 个候选问题。`,
+      message: runStatus === "failed"
+        ? `工程评估失败：${failedEvaluators.length} 个分类全部失败。`
+        : runStatus === "partial"
+          ? `工程评估部分完成，生成 ${sorted.length} 个候选问题；${failedEvaluators.length} 个分类失败。`
+          : `工程评估完成，生成 ${sorted.length} 个候选问题。`,
       findings: sorted.length,
       error: failedEvaluators.length ? failedEvaluators.map((result) => result.summary).join("\n") : undefined,
       evaluatorResults
@@ -4237,13 +9333,13 @@ async function buildPiQualityReviewFindings(root: string, args: Args): Promise<{
       schemaVersion: "praxis.reviewProgress.v1",
       runId,
       root,
-      source: "pi-agent",
+      source: reviewAgentSource,
       status: "failed",
       startedAt: generatedAt,
       updatedAt: new Date().toISOString(),
       totalCategories: reviewCategoryOrder.length,
       completedCategories: evaluatorResults.length,
-      message: "Pi 工程评估失败。",
+      message: "工程评估失败。",
       findings: findingsOut.length,
       error: errorMessage,
       evaluatorResults
@@ -4258,11 +9354,13 @@ async function buildPiQualityReviewCategoryRetry(
   category: ReviewCategory
 ): Promise<{ run: ReviewRun; findings: ReviewFinding[] }> {
   const generatedAt = new Date().toISOString();
-  const runId = `review-run-pi-retry-${Date.now()}-${randomUUID().slice(0, 8)}`;
+  const runId = `review-run-retry-${Date.now()}-${randomUUID().slice(0, 8)}`;
   const progressPath = qualityReviewProgressPath(root);
   const evaluator = reviewEvaluatorFor(category, root);
-  const latestRun = await readLatestQualityReviewRunFromMemory(root);
-  const previousFindings = await readQualityReviewFindingsFromMemory(root);
+  const existingReviewDocuments = await readQualityReviewDocumentModel(root);
+  const latestRun = existingReviewDocuments?.run;
+  const previousFindings = existingReviewDocuments?.findings ?? [];
+  const previousCategoryFindings = previousFindings.filter((finding) => displayReviewCategory(finding.category) === category);
   const preservedFindings = previousFindings.filter((finding) => displayReviewCategory(finding.category) !== category);
   const previousEvaluatorResults = latestRun?.evaluatorResults?.length
     ? latestRun.evaluatorResults
@@ -4273,7 +9371,7 @@ async function buildPiQualityReviewCategoryRetry(
     schemaVersion: "praxis.reviewProgress.v1" as const,
     runId,
     root,
-    source: "pi-agent" as const,
+    source: reviewAgentSource,
     scope: "category" as const,
     retryCategory: category,
     retryOfRunId,
@@ -4284,24 +9382,19 @@ async function buildPiQualityReviewCategoryRetry(
     completedCategories: 0,
     currentCategory: category,
     currentEvaluator: evaluator.name,
-    message: `Pi 正在重试分类：${evaluator.name}`,
-    findings: preservedFindings.length,
-    evaluatorResults: replaceEvaluatorResult(
-      completeReviewEvaluatorResults(preservedFindings, previousEvaluatorResults, undefined, root),
-      category,
-      {
-        evaluator: { ...evaluator, source: "pi-agent" },
-        status: "partial",
-        findingIds: [],
-        summary: "Pi 正在重新评估这个分类，旧结果会在成功后被替换。"
-      },
-      root
-    )
+    message: `正在重试评审项：${evaluator.name}`,
+    findings: previousCategoryFindings.length,
+    evaluatorResults: [{
+      evaluator: { ...evaluator, source: reviewAgentSource },
+      status: "partial",
+      findingIds: previousCategoryFindings.map((finding) => finding.id),
+      summary: "正在重新评估这个分类，旧结果会在成功后被替换。"
+    }]
   } satisfies ReviewProgressSnapshot;
   await writeReviewProgress(progressPath, runningProgress);
 
   try {
-    const heuristic = await buildQualityReviewFindings(root, runId, generatedAt);
+    const heuristic = { findings: [] as ReviewFinding[] };
     const categoryFindings = await runPiQualityReviewCategory({
       root,
       args,
@@ -4313,20 +9406,18 @@ async function buildPiQualityReviewCategoryRetry(
       progressPath,
       progressBase: runningProgress
     });
-    await persistQualityReviewFindings(root, categoryFindings);
-
     const sorted = sortReviewFindings(dedupeReviewFindings([...preservedFindings, ...categoryFindings]))
       .map((finding) => ReviewFindingSchema.parse(finding));
     const evaluatorResults = replaceEvaluatorResult(
       completeReviewEvaluatorResults(sorted, previousEvaluatorResults, undefined, root),
       category,
       {
-        evaluator: { ...evaluator, source: "pi-agent" },
+        evaluator: { ...evaluator, source: reviewAgentSource },
         status: "completed",
         findingIds: categoryFindings.map((finding) => finding.id),
         summary: categoryFindings.length
-          ? `Pi 重新评估生成 ${categoryFindings.length} 个候选问题。`
-          : "Pi 已重新评估该分类，但没有返回候选问题；这不代表该类别健康。"
+          ? `本评审项重新评估生成 ${categoryFindings.length} 个候选问题。`
+          : "本评审项已重新评估，但没有返回候选问题；这不代表该类别健康。"
       },
       root
     );
@@ -4336,7 +9427,7 @@ async function buildPiQualityReviewCategoryRetry(
       id: runId,
       root,
       generatedAt,
-      source: "pi-agent",
+      source: reviewAgentSource,
       status: failedEvaluators.length ? "partial" : "completed",
       categories: [...reviewCategoryOrder],
       findingIds: sorted.map((finding) => finding.id),
@@ -4349,7 +9440,7 @@ async function buildPiQualityReviewCategoryRetry(
       schemaVersion: "praxis.reviewProgress.v1",
       runId,
       root,
-      source: "pi-agent",
+      source: reviewAgentSource,
       scope: "category",
       retryCategory: category,
       retryOfRunId,
@@ -4360,46 +9451,152 @@ async function buildPiQualityReviewCategoryRetry(
       completedCategories: 1,
       currentCategory: category,
       currentEvaluator: evaluator.name,
-      message: `Pi 已完成分类重试：${evaluator.name}，当前候选问题 ${sorted.length} 个。`,
-      findings: sorted.length,
-      evaluatorResults
+      message: `评审项已完成重试：${evaluator.name}，当前候选问题 ${categoryFindings.length} 个。`,
+      findings: categoryFindings.length,
+      evaluatorResults: [{
+        evaluator: { ...evaluator, source: reviewAgentSource },
+        status: "completed",
+        findingIds: categoryFindings.map((finding) => finding.id),
+        summary: categoryFindings.length
+          ? `本评审项重新评估生成 ${categoryFindings.length} 个候选问题。`
+          : "本评审项已重新评估，但没有返回候选问题；这不代表该类别健康。"
+      }]
     });
 
     return { run, findings: sorted };
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
+    const categoryFindings = await buildLocalQualityReviewFindings(root, {
+      runId,
+      generatedAt,
+      category
+    });
+    if (categoryFindings.length > 0) {
+      const sorted = sortReviewFindings(dedupeReviewFindings([...preservedFindings, ...categoryFindings]))
+        .map((finding) => ReviewFindingSchema.parse(finding));
+      const evaluatorResults = replaceEvaluatorResult(
+        completeReviewEvaluatorResults(sorted, previousEvaluatorResults, undefined, root),
+        category,
+        {
+          evaluator: { ...evaluator, source: reviewAgentSource },
+          status: "completed",
+          findingIds: categoryFindings.map((finding) => finding.id),
+          summary: `已基于本地仓库证据重新生成 ${categoryFindings.length} 个候选问题；这些结论仍需在评审页面继续解释、转计划或判伪。`
+        },
+        root
+      );
+      const failedEvaluators = evaluatorResults.filter((result) => result.status === "failed");
+      const run = ReviewRunSchema.parse({
+        schemaVersion: "praxis.reviewRun.v1",
+        id: runId,
+        root,
+        generatedAt,
+        source: reviewAgentSource,
+        status: failedEvaluators.length ? "partial" : "completed",
+        categories: [...reviewCategoryOrder],
+        findingIds: sorted.map((finding) => finding.id),
+        evaluatorResults,
+        summary: buildReviewRunSummary(sorted),
+        traceIds: []
+      } satisfies ReviewRun);
+      await appendPiReviewCategoryLog(root, runId, {
+        schemaVersion: "praxis.reviewFallbackLog.v1",
+        timestamp: new Date().toISOString(),
+        runId,
+        category,
+        evaluator: { ...evaluator, source: reviewAgentSource },
+        status: "fallback_completed",
+        error: summarizeForRun(errorMessage, 2000),
+        fallbackFindingIds: categoryFindings.map((finding) => finding.id)
+      });
+      await writeReviewProgress(progressPath, {
+        schemaVersion: "praxis.reviewProgress.v1",
+        runId,
+        root,
+        source: reviewAgentSource,
+        scope: "category",
+        retryCategory: category,
+        retryOfRunId,
+        status: "completed",
+        startedAt: generatedAt,
+        updatedAt: new Date().toISOString(),
+        totalCategories: 1,
+        completedCategories: 1,
+        currentCategory: category,
+        currentEvaluator: evaluator.name,
+        message: `评审项已使用本地仓库证据完成重试：${evaluator.name}，当前候选问题 ${categoryFindings.length} 个。`,
+        findings: categoryFindings.length,
+        evaluatorResults: [{
+          evaluator: { ...evaluator, source: reviewAgentSource },
+          status: "completed",
+          findingIds: categoryFindings.map((finding) => finding.id),
+          summary: `已基于本地仓库证据重新生成 ${categoryFindings.length} 个候选问题；这些结论仍需在评审页面继续解释、转计划或判伪。`
+        }]
+      });
+      return { run, findings: sorted };
+    }
+    const sorted = sortReviewFindings(dedupeReviewFindings(preservedFindings))
+      .map((finding) => ReviewFindingSchema.parse(finding));
     const evaluatorResults = replaceEvaluatorResult(
-      completeReviewEvaluatorResults(preservedFindings, previousEvaluatorResults, undefined, root),
+      completeReviewEvaluatorResults(sorted, previousEvaluatorResults, undefined, root),
       category,
       {
-        evaluator: { ...evaluator, source: "pi-agent" },
-        status: "failed",
+        evaluator: { ...evaluator, source: reviewAgentSource },
+        status: "completed",
         findingIds: [],
-        summary: `Pi 分类重试失败：${errorMessage.slice(0, 1200)}`
+        summary: "本地仓库证据暂未发现可落文档的候选问题；这不代表该类别健康。"
       },
       root
     );
+    const failedEvaluators = evaluatorResults.filter((result) => result.status === "failed");
+    const run = ReviewRunSchema.parse({
+      schemaVersion: "praxis.reviewRun.v1",
+      id: runId,
+      root,
+      generatedAt,
+      source: reviewAgentSource,
+      status: failedEvaluators.length ? "partial" : "completed",
+      categories: [...reviewCategoryOrder],
+      findingIds: sorted.map((finding) => finding.id),
+      evaluatorResults,
+      summary: buildReviewRunSummary(sorted),
+      traceIds: []
+    } satisfies ReviewRun);
+    await appendPiReviewCategoryLog(root, runId, {
+      schemaVersion: "praxis.reviewFallbackLog.v1",
+      timestamp: new Date().toISOString(),
+      runId,
+      category,
+      evaluator: { ...evaluator, source: reviewAgentSource },
+      status: "fallback_completed",
+      error: summarizeForRun(errorMessage, 2000),
+      fallbackFindingIds: []
+    });
     await writeReviewProgress(progressPath, {
       schemaVersion: "praxis.reviewProgress.v1",
       runId,
       root,
-      source: "pi-agent",
+      source: reviewAgentSource,
       scope: "category",
       retryCategory: category,
       retryOfRunId,
-      status: "failed",
+      status: "completed",
       startedAt: generatedAt,
       updatedAt: new Date().toISOString(),
       totalCategories: 1,
-      completedCategories: 0,
+      completedCategories: 1,
       currentCategory: category,
       currentEvaluator: evaluator.name,
-      message: `Pi 分类重试失败：${evaluator.name}`,
-      findings: preservedFindings.length,
-      error: errorMessage,
-      evaluatorResults
+      message: `评审项已完成重试：${evaluator.name}，当前候选问题 0 个。`,
+      findings: 0,
+      evaluatorResults: [{
+        evaluator: { ...evaluator, source: reviewAgentSource },
+        status: "completed",
+        findingIds: [],
+        summary: "本地仓库证据暂未发现可落文档的候选问题；这不代表该类别健康。"
+      }]
     });
-    throw error;
+    return { run, findings: sorted };
   }
 }
 
@@ -4422,7 +9619,7 @@ async function runPiQualityReviewCategory(input: {
     category: input.category,
     evaluator: input.evaluator,
     prompt,
-    timeoutMs: reviewPiTimeoutMsArg(input.args, 300_000),
+    timeoutMs: reviewPiTimeoutMsArg(input.args, 0),
     progressPath: input.progressPath,
     progressBase: input.progressBase
   });
@@ -4430,102 +9627,75 @@ async function runPiQualityReviewCategory(input: {
 }
 
 async function runPiReviewPrompt(input: PiReviewPromptRunInput): Promise<PiWorkerRunResult> {
-  const piCli = await resolvePiCliPath(input.args);
-  const modelRoute = await resolvePiModelRoute(input.root, "plan", { type: "project" }, input.args);
-  const tools = resolvePiToolAllowlist(input.args);
-  const codeGraphExtension = isPiCodeGraphEnabled(input.args) ? resolvePiCodeGraphExtensionPath() : undefined;
-  const piArgs = [
-    piCli.cliPath,
-    "--mode",
-    "json",
-    "--provider",
-    modelRoute.provider,
-    "--model",
-    modelRoute.model,
-    "--thinking",
-    stringArg(input.args, "review-pi-thinking") ?? loadPiRuntimeSettingsSync().reviewThinking ?? modelRoute.thinking,
-    "--system-prompt",
-    piSystemPrompt(),
-    "--no-session",
-    "--no-extensions",
-    ...(codeGraphExtension ? ["--extension", codeGraphExtension] : []),
-    "--tools",
-    tools.join(","),
-    "-p",
-    input.prompt
-  ];
-  const env = await piWorkerEnv(input.root, modelRoute.provider);
-  env.PRAXIS_PI_PROJECT_ROOT = input.root;
-  const diagnostics = piRuntimeDiagnostics(piCli, modelRoute, env);
   const startedAt = Date.now();
-  let finalAssistantText = "";
   const progressEvents: ReviewProgressEvent[] = [];
   const progressBase = input.progressBase;
-  let spawned: { stdout: string; stderr: string; exitCode: number; eventCount: number };
-  try {
-    if (input.progressPath && progressBase) {
-      const startProgress = reviewProgressWithPiStart(progressBase, {
-        route: modelRoute,
-        tools,
-        diagnostics
-      });
-      await writeReviewProgress(input.progressPath, startProgress);
-    }
-    spawned = await spawnStreamingJson(process.execPath, piArgs, {
-      cwd: input.root,
-      env,
-      timeoutMs: input.timeoutMs,
-      onJson: async (event) => {
-        const assistantText = piAssistantTextFromEvent(event);
-        if (assistantText) finalAssistantText = assistantText;
-        if (input.progressPath && progressBase) {
-          await writeReviewProgress(input.progressPath, reviewProgressWithPiEvent(progressBase, {
-            event,
-            eventCount: progressEvents.length + 1,
-            events: progressEvents,
-            route: modelRoute,
-            tools,
-            diagnostics,
-            assistantText
-          }));
-        }
+  const thinking = stringArg(input.args, "review-pi-thinking") ?? loadPiRuntimeSettingsSync().reviewThinking;
+  let launchMetadata: {
+    route: { provider: string; model: string };
+    tools: string[];
+    diagnostics: string[];
+  } | undefined;
+  const launched = await launchPiJsonWorker({
+    projectRoot: input.root,
+    args: input.args,
+    mode: "plan",
+    target: { type: "project" },
+    prompt: input.prompt,
+    thinking,
+    timeoutMs: input.timeoutMs,
+    tools: resolvePiReviewToolAllowlist(input.args),
+    onStart: async (metadata) => {
+      launchMetadata = metadata;
+      if (input.progressPath && progressBase) {
+        await writeReviewProgress(input.progressPath, reviewProgressWithPiStart(progressBase, metadata));
       }
-    });
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
-    throw new Error(formatPiFailureDetail(detail, diagnostics));
-  }
+    },
+    onJson: async (event, assistantText) => {
+      if (input.progressPath && progressBase) {
+        await writeReviewProgress(input.progressPath, reviewProgressWithPiEvent(progressBase, {
+          event,
+          eventCount: progressEvents.length + 1,
+          events: progressEvents,
+          route: launchMetadata?.route ?? { provider: "unknown", model: "unknown" },
+          tools: launchMetadata?.tools ?? [],
+          diagnostics: launchMetadata?.diagnostics ?? [],
+          assistantText
+        }));
+      }
+    }
+  });
 
-  const cleanStdout = sanitizePiOutput(finalAssistantText || spawned.stdout);
-  const cleanStderr = sanitizePiOutput(spawned.stderr);
+  const cleanStdout = sanitizePiOutput(launched.assistantText || launched.stdout);
+  const cleanStderr = sanitizePiOutput(launched.stderr);
   await appendPiReviewCategoryLog(input.root, input.runId, {
     schemaVersion: "praxis.piReviewCategoryLog.v1",
     timestamp: new Date().toISOString(),
     runId: input.runId,
     category: input.category,
-    evaluator: { ...input.evaluator, source: "pi-agent" },
-    status: spawned.exitCode === 0 ? "completed" : "failed",
-    diagnostics,
+    evaluator: { ...input.evaluator, source: reviewAgentSource },
+    status: launched.exitCode === 0 ? "completed" : "failed",
+    diagnostics: launched.diagnostics,
     stdout: cleanStdout,
     stderr: cleanStderr
   });
 
-  if (spawned.exitCode !== 0) {
+  if (launched.exitCode !== 0) {
     const detail = [cleanStderr, cleanStdout].filter(Boolean).join("\n\n").trim();
-    throw new Error(formatPiFailureDetail(detail || `Pi exited with code ${spawned.exitCode}.`, diagnostics));
+    throw new Error(formatPiFailureDetail(detail || `Pi exited with code ${launched.exitCode}.`, launched.diagnostics));
   }
 
   return {
     stdout: cleanStdout,
     stderr: cleanStderr,
-    exitCode: spawned.exitCode,
+    exitCode: launched.exitCode,
     durationMs: Date.now() - startedAt,
-    commandLine: renderCommandLine(process.execPath, piArgs),
-    provider: modelRoute.provider,
-    model: modelRoute.model,
-    modelRoute: `${modelRoute.provider}/${modelRoute.model}`,
-    tools,
-    diagnostics
+    commandLine: launched.commandLine,
+    provider: launched.provider,
+    model: launched.model,
+    modelRoute: launched.modelRoute,
+    tools: launched.tools,
+    diagnostics: launched.diagnostics
   };
 }
 
@@ -4544,8 +9714,8 @@ function reviewProgressWithPiEvent(base: ReviewProgressSnapshot, input: {
   const eventSummary = toolView
     ? `${toolView.name} ${toolView.status}: ${toolView.outputSummary ?? toolView.inputSummary}`
     : input.assistantText
-      ? `Pi message: ${summarizeForRun(input.assistantText, 260)}`
-      : `Pi event: ${eventType}`;
+      ? `评审消息：${summarizeForRun(input.assistantText, 260)}`
+      : `评审事件：${eventType}`;
   const eventRecord: ReviewProgressEvent = {
     timestamp: now,
     type: eventType,
@@ -4559,9 +9729,9 @@ function reviewProgressWithPiEvent(base: ReviewProgressSnapshot, input: {
     ...base,
     updatedAt: now,
     message: toolView
-      ? `Pi 正在执行工具：${toolView.name}`
+      ? `正在执行工具：${toolView.name}`
       : input.assistantText
-        ? "Pi 正在生成评估结果。"
+        ? "正在生成评估结果。"
         : base.message,
     pi: {
       provider: input.route.provider,
@@ -4649,6 +9819,16 @@ function buildPiQualityReviewPrompt(input: {
   });
 }
 
+function reviewTransportPayloadError(action: string, output: string, limit = 3000): string {
+  return [
+    `Review worker did not return a usable structured review payload while ${action}.`,
+    "This payload is only runtime transport; review memory must be written to docs/review Markdown/HTML documents.",
+    "",
+    "Worker output:",
+    output.slice(0, limit)
+  ].join("\n");
+}
+
 function renderPromptTemplate(template: string, variables: Record<string, string>): string {
   let rendered = template;
   for (const [key, value] of Object.entries(variables)) {
@@ -4665,16 +9845,16 @@ function buildPiFindingRefreshPrompt(root: string, args: Args, finding: ReviewFi
     excerpt: item.excerpt
   }));
   return [
-    "You are a Praxis Studio single-finding review worker running through Pi.",
+    "You are a Praxis Studio review finding agent.",
     `Respond in the user's language: ${responseLanguage}.`,
-    `All user-visible JSON string fields MUST use ${responseLanguage}: summary, rationale, evidence.excerpt.`,
-    "Return strict JSON only. No Markdown fences. No preface. No explanation outside JSON.",
+    `All user-visible payload string fields MUST use ${responseLanguage}: summary, rationale, evidence.excerpt.`,
+    "Return a strict machine-readable JSON payload only. This payload is transient transport; Praxis will render the result into docs/review documents. No Markdown fences. No preface. No explanation outside the payload.",
     "",
     "## Boundary",
     "- Re-check only the single finding below.",
     "- Do not run a whole-project review and do not create unrelated findings.",
     "- Do not edit files or write memory. Praxis will turn your result into a pending FindingStatusPatch.",
-    "- Inspect the current repository state with read-only tools. Use CodeGraph if useful.",
+    "- Inspect the current repository state with read-only tools. Use repository evidence tools if useful.",
     "- If the issue still exists, return status open.",
     "- If there is credible evidence that it is fixed, return status resolved or mitigated.",
     "- If evidence is insufficient, return status acknowledged and explain what evidence is missing.",
@@ -4695,7 +9875,7 @@ function buildPiFindingRefreshPrompt(root: string, args: Args, finding: ReviewFi
       affectedAnchors: finding.affectedAnchors
     }, null, 2),
     "",
-    "## Output JSON Schema",
+    "## Output Transport Payload Shape",
     JSON.stringify({
       status: "open",
       summary: "One-sentence current status of this finding.",
@@ -4727,7 +9907,7 @@ function parsePiReviewFindings(
 ): ReviewFinding[] {
   const parsed = parsePiReviewJson(stdout) ?? salvagePiReviewJson(stdout);
   if (!isRecord(parsed) || !Array.isArray(parsed.findings)) {
-    throw new Error(`Pi did not return review JSON for ${input.category}. Output was:\n${stdout.slice(0, 3000)}`);
+    throw new Error(reviewTransportPayloadError(`evaluating ${input.category}`, stdout));
   }
 
   const findings: ReviewFinding[] = [];
@@ -4752,30 +9932,33 @@ function parsePiReviewFindings(
       ? item.affectedPaths.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
       : [];
     const evidence: ReviewEvidenceRef[] = evidenceItems.length
-      ? evidenceItems.map((evidence) => ({
-        source: "agent" as const,
-        path: optionalString(evidence.path),
+      ? evidenceItems.map((evidence) => {
+        const evidencePath = optionalString(evidence.path);
+        return {
+        source: evidencePath ? "file" as const : "agent" as const,
+        path: evidencePath,
         summary: optionalString(evidence.summary)
           ?? optionalString(evidence.excerpt)?.slice(0, 260)
-          ?? (optionalString(evidence.path) ? `Evidence in ${optionalString(evidence.path)}` : `Pi returned evidence ${index + 1} without a summary.`),
+          ?? (evidencePath ? `该路径提供了本候选问题的证据：${evidencePath}` : `本候选问题缺少路径级证据摘要。`),
         excerpt: optionalString(evidence.excerpt)?.slice(0, 12_000)
-      }))
-      : [{ source: "agent" as const, summary: "Pi returned this candidate without path-level evidence." }];
+      };
+      })
+      : [{ source: "agent" as const, summary: "本候选问题缺少路径级证据，需要在接受前补充或复核证据。" }];
     const anchors = affectedPaths.length
       ? affectedPaths.slice(0, 12).map((filePath) => fileAnchor(filePath))
       : evidence.flatMap((evidence) => evidence.path ? [fileAnchor(evidence.path)] : []);
-    const evaluator: ReviewEvaluatorRef = { ...input.evaluator, source: "pi-agent" };
+    const evaluator: ReviewEvaluatorRef = { ...input.evaluator, source: reviewAgentSource };
     findings.push(ReviewFindingSchema.parse({
       schemaVersion: "praxis.reviewFinding.v1",
-      id: `review:${severity.toLowerCase()}:${input.category}:${safeFilePart(title)}:${index + 1}`,
+      id: `review:${severity.toLowerCase()}:${input.category}:${safeReviewIdPart(title)}:${index + 1}`,
       runId: input.runId,
       category: input.category,
       severity,
       status: "candidate",
       title,
       summary,
-      whyItMatters: whyItMatters ?? "Pi did not provide a separate impact explanation; review the summary and evidence before accepting this candidate.",
-      suggestedAction: suggestedAction ?? "Review the evidence, then create a follow-up task or mark this candidate as needing more evidence.",
+      whyItMatters: whyItMatters ?? "本候选问题没有单独影响说明；接受前需要先复核摘要和证据，确认它确实会影响理解、变更、测试、发布或安全。",
+      suggestedAction: suggestedAction ?? "先复核证据；证据成立时转入项目变更计划，证据不足时要求补证据或标记为需要复查。",
       confidence,
       source: "agent",
       evaluator,
@@ -4788,7 +9971,7 @@ function parsePiReviewFindings(
     } satisfies ReviewFinding));
   });
   if (!findings.length && rejected.length) {
-    throw new Error(`Pi returned review JSON for ${input.category}, but no usable findings could be normalized: ${rejected.slice(0, 5).join("; ")}`);
+    throw new Error(`Review worker returned a structured payload for ${input.category}, but no usable findings could be rendered into docs/review: ${rejected.slice(0, 5).join("; ")}`);
   }
   return findings;
 }
@@ -4801,7 +9984,7 @@ function parsePiFindingStatusPatch(
 ): FindingStatusPatch {
   const parsed = parsePiReviewJson(stdout);
   if (!isRecord(parsed)) {
-    throw new Error(`Pi did not return finding refresh JSON for ${finding.id}. Output was:\n${stdout.slice(0, 2000)}`);
+    throw new Error(reviewTransportPayloadError(`refreshing finding ${finding.id}`, stdout, 2000));
   }
   const rawStatus = optionalString(parsed.status)?.toLowerCase();
   const status = findingStatusValue(rawStatus);
@@ -4812,10 +9995,14 @@ function parsePiFindingStatusPatch(
   const evidence: CodeFactEvidenceRef[] = evidenceItems.length
     ? evidenceItems.map((item) => ({
       source: "agent_inference" as const,
-      filePath: optionalString(item.filePath) ?? optionalString(item.path) ?? ".distinction/memory/candidates.jsonl",
+      filePath: optionalString(item.filePath) ?? optionalString(item.path) ?? QUALITY_REVIEW_DOC_RELATIVE_PATH,
       excerpt: optionalString(item.excerpt) ?? optionalString(item.summary) ?? summary
     }))
-    : finding.evidence.slice(0, 3).map(reviewEvidenceToCodeFactEvidence);
+    : finding.evidence.slice(0, 3).map((item) => ({
+      source: item.source === "agent" ? "agent_inference" as const : item.source === "code_fact_graph" ? "codegraph" as const : "repository_scan" as const,
+      filePath: item.path ?? item.anchor?.path ?? QUALITY_REVIEW_DOC_RELATIVE_PATH,
+      excerpt: item.excerpt ?? item.summary
+    }));
   return FindingStatusPatchSchema.parse({
     schemaVersion: "praxis.findingStatusPatch.v1",
     id: `finding-status:${safeFilePart(finding.id)}:${safeFilePart(runId)}`,
@@ -5091,7 +10278,7 @@ function salvagePiReviewJson(stdout: string): unknown {
       .slice(1, 5)
       .map((match) => decodeJsonString(match[1] ?? ""))
       .filter((value): value is string => Boolean(value));
-    const fallbackEvidenceSummary = "Pi returned a finding, but the JSON evidence block was incomplete or truncated; inspect the Pi review log for the full text.";
+    const fallbackEvidenceSummary = "评审 Agent 返回了候选问题，但结构化证据载荷不完整或被截断；需要检查评审运行日志获取完整文本。";
     findings.push({
       severity: severity ?? "P2",
       title,
@@ -5243,7 +10430,7 @@ function reviewConfidenceValue(value: unknown): ReviewFinding["confidence"] {
 }
 
 function qualityReviewProgressPath(root: string): string {
-  return path.join(root, ".distinction", "reviews", "progress", "latest.json");
+  return path.join(root, QUALITY_REVIEW_RUNTIME_PROGRESS_RELATIVE_PATH);
 }
 
 async function writeReviewProgress(filePath: string, progress: ReviewProgressSnapshot): Promise<void> {
@@ -5254,6 +10441,7 @@ async function writeReviewProgress(filePath: string, progress: ReviewProgressSna
 
 function mergeReviewProgressVisibility(progress: ReviewProgressSnapshot, previous?: ReviewProgressSnapshot): ReviewProgressSnapshot {
   if (!previous || previous.runId !== progress.runId) return progress;
+  if (progress.status !== "running" && !progress.pi && !progress.events) return progress;
   return {
     ...progress,
     pi: progress.pi ?? previous.pi,
@@ -5262,95 +10450,9 @@ function mergeReviewProgressVisibility(progress: ReviewProgressSnapshot, previou
 }
 
 async function appendPiReviewCategoryLog(root: string, runId: string, entry: unknown): Promise<void> {
-  const filePath = path.join(root, ".distinction", "reviews", "logs", `${safeFilePart(runId)}.jsonl`);
+  const filePath = path.join(root, QUALITY_REVIEW_RUNTIME_LOG_DIR_RELATIVE_PATH, `${safeFilePart(runId)}.jsonl`);
   await mkdir(path.dirname(filePath), { recursive: true });
   await appendFile(filePath, `${JSON.stringify(entry)}\n`, "utf8");
-}
-
-async function buildQualityReviewFindings(root: string, forcedRunId?: string, forcedGeneratedAt?: string): Promise<{ run: ReviewRun; findings: ReviewFinding[] }> {
-  const generatedAt = forcedGeneratedAt ?? new Date().toISOString();
-  const runId = forcedRunId ?? `review-run-${Date.now()}-${randomUUID().slice(0, 8)}`;
-  const cacheDir = path.join(root, ".distinction", "cache");
-  const memoryDir = path.join(root, ".distinction", "memory");
-  const repositorySnapshotPath = path.join(cacheDir, "repository-snapshot.json");
-  const codeFactsPath = path.join(cacheDir, "code-fact-graph.json");
-  const profilePath = path.join(cacheDir, "project-profile.json");
-  const understandingPath = path.join(cacheDir, "repository-understanding-patch.json");
-  const factsPath = path.join(memoryDir, "facts.jsonl");
-  const architecturePath = path.join(cacheDir, "architecture-model-patch.json");
-  const findingsPath = path.join(cacheDir, "architecture-findings.json");
-  const manifestPath = path.join(cacheDir, "projection-manifest.json");
-
-  const [repositorySnapshot, codeFacts, profile, understanding, factRecords, architecture, findings, manifest, projectedViews] = await Promise.all([
-    tryReadJsonFile(repositorySnapshotPath),
-    tryReadJsonWithSchema(codeFactsPath, CodeFactGraphSnapshotSchema),
-    tryReadJsonFile(profilePath),
-    tryReadJsonWithSchema(understandingPath, RepositoryUnderstandingPatchSchema),
-    readMemoryRecordJsonl(factsPath),
-    tryReadJsonWithSchema(architecturePath, ArchitectureModelPatchSchema),
-    tryReadJsonWithSchema(findingsPath, ArchitectureFindingReportSchema),
-    tryReadJsonWithSchema(manifestPath, ProjectionManifestSchema),
-    readProjectedGraphViewRecords(root)
-  ]);
-
-  const snapshotFiles = isRecord(repositorySnapshot) && Array.isArray(repositorySnapshot.files)
-    ? repositorySnapshot.files.filter(isRecord)
-    : [];
-  const projectKinds = isRecord(profile) && Array.isArray(profile.projectKinds) ? profile.projectKinds.filter((item): item is string => typeof item === "string") : [];
-  const frameworks = isRecord(profile) && Array.isArray(profile.frameworks) ? profile.frameworks.filter((item): item is string => typeof item === "string") : [];
-  const languages = isRecord(profile) && Array.isArray(profile.languages) ? profile.languages.filter((item): item is string => typeof item === "string") : [];
-  const findingsOut: ReviewFinding[] = [];
-  const context: QualityReviewContext = {
-    root,
-    runId,
-    generatedAt,
-    repositorySnapshotPath,
-    codeFactsPath,
-    profilePath,
-    understandingPath,
-    factsPath,
-    architecturePath,
-    findingsPath,
-    manifestPath,
-    snapshotFiles,
-    codeFacts,
-    projectKinds,
-    frameworks,
-    languages,
-    understanding,
-    factRecords,
-    architecture,
-    findings,
-    manifest,
-    projectedViews
-  };
-
-  addFoundationIntegrityFindings(context, findingsOut);
-  addArchitectureQualityFindings(context, findingsOut);
-  addBuildReleaseFindings(context, findingsOut);
-  addTestingFindings(context, findingsOut);
-  addSecurityAndConfigFindings(context, findingsOut);
-  addMaintainabilityFindings(context, findingsOut);
-  addApiContractFindings(context, findingsOut);
-  addPerformanceResourceFindings(context, findingsOut);
-  addProjectionFindings(context, findingsOut);
-  addExternalDetectorFindings(context, findingsOut);
-
-  const sorted = sortReviewFindings(dedupeReviewFindings(findingsOut)).map((finding) => ReviewFindingSchema.parse(finding));
-  const run = ReviewRunSchema.parse({
-    schemaVersion: "praxis.reviewRun.v1",
-    id: runId,
-    root,
-    generatedAt,
-    source: "praxis-heuristic",
-    status: "completed",
-    categories: [...reviewCategoryOrder],
-    findingIds: sorted.map((finding) => finding.id),
-    evaluatorResults: buildReviewEvaluatorResults(sorted, root),
-    summary: buildReviewRunSummary(sorted),
-    traceIds: []
-  } satisfies ReviewRun);
-  return { run, findings: sorted };
 }
 
 interface QualityReviewContext {
@@ -5406,8 +10508,8 @@ function addFoundationIntegrityFindings(context: QualityReviewContext, findings:
       severity: ignoredLike.length >= 50 ? "P0" : "P1",
       title: "仓库扫描包含构建或发布产物",
       summary: `仓库快照包含 ${ignoredLike.length} 个生成/构建产物路径，例如 ${sample.slice(0, 3).join(", ")}。`,
-      whyItMatters: "生成产物会污染 FACT 记忆、CodeGraph 事实、架构推断和后续评审优先级。",
-      suggestedAction: "让扫描器遵守 .gitignore 或项目专属忽略规则，然后重新生成 intake、代码事实、记忆和投影视图。",
+      whyItMatters: "生成产物会污染项目记忆、仓库证据、架构推断和后续评审优先级。",
+      suggestedAction: "让扫描器遵守 .gitignore 或项目专属忽略规则，然后重新生成仓库证据、记忆和投影视图。",
       confidence: "high",
       evidence: [
         fileEvidence(context, context.repositorySnapshotPath, `快照包含疑似应忽略的构建路径：${sample.join(", ")}。`),
@@ -5471,7 +10573,7 @@ function addFoundationIntegrityFindings(context: QualityReviewContext, findings:
       title: "代码事实来自能力有限的 native provider",
       summary: "当前 provider 只记录文件和 import 事实，缺少符号、调用和引用级证据。",
       whyItMatters: "没有更强证据时，架构、影响面和工程评估项不能假装拥有符号级确定性。",
-      suggestedAction: "使用 CodeGraph 支撑更深的架构与依赖评估，或把相关候选项明确标为低深度证据。",
+      suggestedAction: "接入更强的符号级仓库分析能力，支撑更深的架构与依赖评估；否则把相关候选项明确标为低深度证据。",
       confidence: "high",
       evidence: [fileEvidence(context, context.codeFactsPath, `provider=${context.codeFacts.provider.name}；能力=${context.codeFacts.provider.capabilities.join(", ")}。`)],
       affectedAnchors: [{ kind: "code_fact_node", id: "provider:native", path: ".distinction/cache/code-fact-graph.json" }]
@@ -5515,25 +10617,6 @@ function addArchitectureQualityFindings(context: QualityReviewContext, findings:
     }));
   }
 
-  const importEdges = context.codeFacts?.statistics.edgesByKind?.imports ?? 0;
-  const dependencyCount = context.architecture?.dependencies.length ?? 0;
-  if (importEdges > 0 && dependencyCount === 0) {
-    findings.push(reviewFinding(context, {
-      slug: "imports-not-lifted-to-architecture-dependencies",
-      category: "dependencies_coupling",
-      severity: "P2",
-      title: "import 证据没有提升为架构依赖",
-      summary: `代码事实里有 ${importEdges} 条 import 关系，但架构模型没有任何依赖。`,
-      whyItMatters: "如果 import 证据没有映射到架构边界，依赖评估就无法判断耦合、循环或越界引用。",
-      suggestedAction: "先把项目专属命名空间/模块映射到架构模块，再重新生成依赖视图和 findings。",
-      confidence: "medium",
-      evidence: [
-        fileEvidence(context, context.codeFactsPath, `imports=${importEdges}。`),
-        fileEvidence(context, context.architecturePath, `dependencies=${dependencyCount}。`)
-      ],
-      affectedAnchors: [{ kind: "architecture_dependency", id: "missing-import-mapping", path: ".distinction/cache/architecture-model-patch.json" }]
-    }));
-  }
 }
 
 function addBuildReleaseFindings(context: QualityReviewContext, findings: ReviewFinding[]): void {
@@ -5545,7 +10628,7 @@ function addBuildReleaseFindings(context: QualityReviewContext, findings: Review
       severity: buildFiles.length >= 50 ? "P1" : "P2",
       title: "扫描范围中包含构建输出",
       summary: `当前快照包含 ${buildFiles.length} 个构建输出路径，例如 ${buildFiles.slice(0, 3).join(", ")}。`,
-      whyItMatters: "构建输出会放大项目体积、遮蔽源码所有权，也可能让 worker 上下文误读二进制或产物而不是源码。",
+      whyItMatters: "构建输出会放大项目体积、遮蔽源码所有权，也可能让评审上下文误读二进制或产物而不是源码。",
       suggestedAction: "从 intake 中排除生成目录，并确认是否确实需要把某些产物作为发布资产提交。",
       confidence: "high",
       evidence: [fileEvidence(context, context.repositorySnapshotPath, `构建输出样例：${buildFiles.slice(0, 8).join(", ")}。`)],
@@ -5593,7 +10676,7 @@ function addTestingFindings(context: QualityReviewContext, findings: ReviewFindi
       title: "非小型代码库没有检测到真实测试入口",
       summary: `当前快照包含 ${sourceFiles.length} 个可评审源码文件，但没有检测到真实 test/spec 文件、Tests 项目或测试目录。`,
       whyItMatters: "受控编码任务需要验证命令；没有测试时，回归只能依赖人工检查或仅构建检查。",
-      suggestedAction: "先补充至少一条可运行的测试入口，并把验证命令写入项目记忆；否则编码 worker 不能声称具备回归保护。",
+      suggestedAction: "先补充至少一条可运行的测试入口，并把验证命令写入项目记忆；否则后续开发计划不能声称具备回归保护。",
       confidence: "high",
       evidence: [
         fileEvidence(context, context.repositorySnapshotPath, `可评审源码=${sourceFiles.length}；真实测试入口=${realTestFiles.length}。`)
@@ -5664,7 +10747,7 @@ function addSecurityAndConfigFindings(context: QualityReviewContext, findings: R
       severity: "P0",
       title: "发布或构建产物中包含疑似密钥材料",
       summary: `构建/发布路径里发现 ${sensitiveBuildFiles.length} 个疑似敏感文件，例如 ${sensitiveBuildFiles.slice(0, 3).join(", ")}。`,
-      whyItMatters: "私钥、证书或凭据一旦进入发布产物、agent 上下文或项目记忆，后续 worker 可能无意扩散敏感信息。",
+      whyItMatters: "私钥、证书或凭据一旦进入发布产物、评审上下文或项目记忆，后续自动化流程可能无意扩散敏感信息。",
       suggestedAction: "立即确认这些文件是否是真实密钥；若是，轮换密钥并把构建输出、发布目录和密钥目录加入扫描与上下文过滤规则。",
       confidence: "high",
       evidence: [fileEvidence(context, context.repositorySnapshotPath, `敏感构建产物样例：${sensitiveBuildFiles.slice(0, 8).join(", ")}。`)],
@@ -5679,8 +10762,8 @@ function addSecurityAndConfigFindings(context: QualityReviewContext, findings: R
       severity: sensitiveBuildFiles.length > 0 ? "P1" : "P2",
       title: "扫描范围中存在疑似敏感文件",
       summary: `发现 ${sensitiveFiles.length} 个疑似敏感配置文件，例如 ${sensitiveFiles.slice(0, 3).join(", ")}。`,
-      whyItMatters: "凭据、私钥、证书和环境专属值在进入 agent 上下文、项目记忆或外部 worker 提示词前必须先评审。",
-      suggestedAction: "检查这些文件是否包含密钥；未来 agent 运行前应遮蔽、摘要化或忽略敏感值。",
+      whyItMatters: "凭据、私钥、证书和环境专属值在进入评审上下文、项目记忆或外部执行输入前必须先评审。",
+      suggestedAction: "检查这些文件是否包含密钥；未来自动化运行前应遮蔽、摘要化或忽略敏感值。",
       confidence: sensitiveBuildFiles.length > 0 ? "high" : "medium",
       evidence: [fileEvidence(context, context.repositorySnapshotPath, `敏感配置样例：${sensitiveFiles.slice(0, 8).join(", ")}。`)],
       affectedAnchors: sensitiveFiles.slice(0, 8).map((filePath) => fileAnchor(filePath))
@@ -5696,7 +10779,7 @@ function addSecurityAndConfigFindings(context: QualityReviewContext, findings: R
       severity: "P2",
       title: "配置面过大，需要明确环境所有权",
       summary: `项目中检测到 ${configFiles.length} 个配置文件。`,
-      whyItMatters: "配置扩散经常隐藏环境专属行为，agent 可能把这些行为误解为源码真相。",
+      whyItMatters: "配置扩散经常隐藏环境专属行为，评审过程可能把这些行为误解为源码真相。",
       suggestedAction: "在把配置内容写入长期项目记忆前，先区分生产、开发和生成配置文件。",
       confidence: "medium",
       evidence: [fileEvidence(context, context.repositorySnapshotPath, `配置样例：${configFiles.slice(0, 8).join(", ")}。`)],
@@ -5753,7 +10836,7 @@ function addMaintainabilityFindings(context: QualityReviewContext, findings: Rev
       title: "维护性评估缺少符号、调用和复杂度事实",
       summary: `当前有 ${sourceFiles.length} 个可评审源码文件，但代码事实 provider 只有 ${context.codeFacts.provider.capabilities.join(", ")} 能力。`,
       whyItMatters: "没有符号/调用/引用事实时，评审器无法可靠发现大类、长方法、隐藏耦合或影响面，不能把空结果解释成代码质量良好。",
-      suggestedAction: "接入 CodeGraph 或等价符号级事实后，再让维护性评估器生成复杂度、重复、调用链和影响面候选问题。",
+      suggestedAction: "接入符号级代码事实后，再让维护性评估器生成复杂度、重复、调用链和影响面候选问题。",
       confidence: "high",
       evidence: [
         fileEvidence(context, context.codeFactsPath, `provider=${context.codeFacts.provider.name}；capabilities=${context.codeFacts.provider.capabilities.join(", ")}。`),
@@ -5832,22 +10915,30 @@ function addPerformanceResourceFindings(context: QualityReviewContext, findings:
     .filter((file) => snapshotSizeBytes(file) >= 1_000_000)
     .map((file) => String(file.path ?? ""));
   const resourceHeavyPaths = snapshotFilePaths(context).filter((filePath) => resourceHeavyPath(filePath));
+  const criticalResourcePaths = resourceHeavyPaths.filter((filePath) => {
+    const normalized = filePath.replace(/\\/g, "/").toLowerCase();
+    return /(^|\/)(watcher|watchers|filesystemwatcher|hotreload|hot-reload|hot_reload|driver|drivers|native|jni)(\/|$)/.test(normalized)
+      || /\.(dll|exe|so|dylib|node)$/i.test(normalized);
+  });
   const performanceTests = snapshotFilePaths(context).filter((filePath) => realTestPath(filePath) && performanceTestPath(filePath));
 
   if (buildFiles.length >= 50 || unknownFiles.length >= 100 || binaryFiles.length >= 20) {
+    const evidence = [
+      buildFiles.length > 0 ? fileEvidence(context, context.repositorySnapshotPath, `构建产物样例：${buildFiles.slice(0, 8).join(", ")}。`) : undefined,
+      unknownFiles.length > 0 ? fileEvidence(context, context.repositorySnapshotPath, `未识别语言文件样例（用于修正扫描识别，不代表应排除源码）：${unknownFiles.slice(0, 8).join(", ")}。`) : undefined,
+      binaryFiles.length > 0 ? fileEvidence(context, context.repositorySnapshotPath, `二进制/原生文件样例：${binaryFiles.slice(0, 8).join(", ")}。`) : undefined,
+      fileEvidence(context, context.codeFactsPath, `files=${context.codeFacts?.statistics.fileCount ?? context.snapshotFiles.length}；Unknown=${context.codeFacts?.statistics.filesByLanguage?.Unknown ?? unknownFiles.length}。`)
+    ].filter((item): item is ReviewEvidenceRef => Boolean(item));
     findings.push(reviewFinding(context, {
       slug: "repository-scan-surface-too-large-for-agent-context",
       category: "performance_resources",
       severity: buildFiles.length >= 500 || unknownFiles.length >= 500 ? "P1" : "P2",
-      title: "扫描面包含大量产物/未知/二进制文件，会放大 agent 上下文",
-      summary: `快照中构建产物=${buildFiles.length}，Unknown 文件=${unknownFiles.length}，二进制/原生文件=${binaryFiles.length}。`,
-      whyItMatters: "过大的扫描面会拖慢 intake、CodeGraph、上下文构造和桌面评审，也会把 worker 注意力从源码转移到发布产物。",
-      suggestedAction: "先收紧扫描边界，排除构建输出、发布目录、日志和二进制库，再重新生成事实层和评审候选项。",
+      title: "本地仓库扫描范围和语言识别会放大评审范围",
+      summary: `快照中构建产物=${buildFiles.length}，未识别语言文件=${unknownFiles.length}，二进制/原生文件=${binaryFiles.length}。如果未识别样例里包含源码，应先修正语言识别，而不是排除源码。`,
+      whyItMatters: "过大的扫描面和不准确的语言识别会拖慢项目接入、仓库分析、上下文构造和桌面评审，也会让评审把注意力错误地放到发布产物、二进制依赖或扫描器识别缺口上。",
+      suggestedAction: "修正仓库扫描器的语言识别；保留真实源码，排除可重建输出、发布目录、日志和二进制依赖；再重新生成仓库证据和评审候选项。",
       confidence: "high",
-      evidence: [
-        fileEvidence(context, context.repositorySnapshotPath, `构建产物样例：${buildFiles.slice(0, 8).join(", ")}。`),
-        fileEvidence(context, context.codeFactsPath, `files=${context.codeFacts?.statistics.fileCount ?? context.snapshotFiles.length}；Unknown=${context.codeFacts?.statistics.filesByLanguage?.Unknown ?? unknownFiles.length}。`)
-      ],
+      evidence,
       affectedAnchors: [...buildFiles, ...unknownFiles, ...binaryFiles].slice(0, 8).map((filePath) => fileAnchor(filePath))
     }));
   }
@@ -5859,7 +10950,7 @@ function addPerformanceResourceFindings(context: QualityReviewContext, findings:
       severity: largeFiles.length >= 20 ? "P1" : "P2",
       title: "大文件进入评审范围，可能拖慢扫描和上下文构造",
       summary: `检测到 ${largeFiles.length} 个超过 1MB 的文件，例如 ${largeFiles.slice(0, 3).join(", ")}。`,
-      whyItMatters: "大文件和二进制资产通常不适合直接送入 agent 上下文；它们需要摘要、引用或资源清单，而不是全文扫描。",
+      whyItMatters: "大文件和二进制资产通常不适合直接进入评审上下文；它们需要摘要、引用或资源清单，而不是全文扫描。",
       suggestedAction: "为大文件建立资源清单和摘要策略，并从默认上下文包中排除原始内容。",
       confidence: "medium",
       evidence: [fileEvidence(context, context.repositorySnapshotPath, `大文件样例：${largeFiles.slice(0, 8).join(", ")}。`)],
@@ -5867,7 +10958,7 @@ function addPerformanceResourceFindings(context: QualityReviewContext, findings:
     }));
   }
 
-  if (resourceHeavyPaths.length > 0 && performanceTests.length === 0) {
+  if ((criticalResourcePaths.length > 0 || resourceHeavyPaths.length >= 20) && performanceTests.length === 0) {
     findings.push(reviewFinding(context, {
       slug: "resource-heavy-paths-without-performance-verification",
       category: "performance_resources",
@@ -5976,8 +11067,23 @@ function buildQualityReviewQueueSummary(root: string, findings: ReviewFinding[],
       ? completeReviewEvaluatorResults(findings, progress.evaluatorResults ?? [], progress, root)
       : latestRun?.evaluatorResults?.length
         ? completeReviewEvaluatorResults(findings, latestRun.evaluatorResults, undefined, root)
-        : buildReviewEvaluatorResults(findings, root)
+        : findings.length
+          ? buildReviewEvaluatorResults(findings, root)
+          : buildPendingReviewEvaluatorResults(root)
   };
+}
+
+function buildPendingReviewEvaluatorResults(root?: string): NonNullable<ReviewRun["evaluatorResults"]> {
+  return reviewCategoryOrder.map((category) => ({
+    evaluator: {
+      ...reviewEvaluatorProfiles[category],
+      category,
+      prompt: reviewEvaluatorProfiles[category].prompt
+    },
+    status: "partial" as const,
+    findingIds: [],
+    summary: "尚未生成 docs/review 评审文档；请运行评审，让十个评审项落入持久文档。"
+  }));
 }
 
 function buildReviewEvaluatorResults(findings: ReviewFinding[], root?: string): ReviewRun["evaluatorResults"] {
@@ -6016,7 +11122,7 @@ function completeReviewEvaluatorResults(
         evaluator: reviewEvaluatorFor(category, root),
         status: "partial",
         findingIds: categoryFindingIds,
-        summary: progress.message || "Pi is currently evaluating this category."
+        summary: progress.message || "评审项正在执行。"
       };
     }
     if (progress?.status === "running" && !completedCategories.has(category)) {
@@ -6024,7 +11130,7 @@ function completeReviewEvaluatorResults(
         evaluator: reviewEvaluatorFor(category, root),
         status: "partial",
         findingIds: categoryFindingIds,
-        summary: "Pi has not reached this category in the current run yet."
+        summary: "当前运行尚未执行到这个评审项。"
       };
     }
     if (progress?.status === "failed" && category === currentCategory) {
@@ -6032,7 +11138,7 @@ function completeReviewEvaluatorResults(
         evaluator: reviewEvaluatorFor(category, root),
         status: "failed",
         findingIds: categoryFindingIds,
-        summary: progress.error ?? progress.message ?? "Pi failed while evaluating this category."
+        summary: progress.error ?? progress.message ?? "评审项执行失败。"
       };
     }
     if (progress?.status === "failed" && !completedCategories.has(category)) {
@@ -6040,7 +11146,7 @@ function completeReviewEvaluatorResults(
         evaluator: reviewEvaluatorFor(category, root),
         status: "partial",
         findingIds: categoryFindingIds,
-        summary: "Pi did not complete before this category ran."
+        summary: "当前运行在执行到这个评审项之前已经结束。"
       };
     }
     return {
@@ -6228,11 +11334,50 @@ function integrationOrUiTestPath(filePath: string): boolean {
 
 function sensitiveConfigPath(filePath: string): boolean {
   const normalized = filePath.replace(/\\/g, "/").toLowerCase();
-  return /(^|\/)\.env($|\.)/.test(normalized)
-    || (/\/(keys?|secrets?|credentials?)\//.test(normalized) && !/\.(md|txt)$/i.test(normalized))
-    || /(secret|secrets|credential|credentials|private-key|private_key|apikey|api-key|access-token|access_token|refresh-token|refresh_token|password|passwd|token|auth)/.test(normalized)
-    || /(^|\/)[^/]*(priv|private)[^/]*\.(pem|key|pfx|p12|cer|crt)$/i.test(normalized)
-    || /\.(pem|pfx|p12|key|crt|cer)$/i.test(normalized)
+  const basename = path.basename(normalized);
+  const extension = path.extname(basename);
+  const sourceExtensions = new Set([
+    ".java",
+    ".kt",
+    ".kts",
+    ".scala",
+    ".ts",
+    ".tsx",
+    ".js",
+    ".jsx",
+    ".cs",
+    ".go",
+    ".rs",
+    ".py",
+    ".rb",
+    ".php",
+    ".c",
+    ".cc",
+    ".cpp",
+    ".h",
+    ".hpp"
+  ]);
+  const certificateOrKeyFile = /\.(pem|pfx|p12|key|crt|cer|jks|keystore)$/i.test(normalized)
+    || /(^|\/)[^/]*(priv|private)[^/]*\.(pem|key|pfx|p12|cer|crt|jks|keystore)$/i.test(normalized);
+  if (certificateOrKeyFile) return true;
+  if (/(^|\/)(\.env($|\.)|\.npmrc$|\.pypirc$|id_rsa$|id_dsa$)/.test(normalized)) return true;
+  if (sourceExtensions.has(extension)) return false;
+
+  const securityDirectory = /\/(keys?|secrets?|credentials?|certs?|certificates?)\//.test(normalized);
+  if (securityDirectory && !/\.(md|txt|adoc|rst)$/i.test(normalized)) return true;
+
+  const serviceProviderOrMigrationFile = /\/meta-inf\/services\//.test(normalized)
+    || /\/(changelog|migrations?|db\/migration)\//.test(normalized);
+  if (serviceProviderOrMigrationFile && !/(secret|secrets|credential|credentials|private-key|private_key|password|passwd|apikey|api-key)/.test(basename)) {
+    return false;
+  }
+
+  const configLike = configPath(filePath)
+    || /\/(config|conf|settings|env|environment)\//.test(normalized)
+    || /appsettings\.(production|prod|release)\.json$/.test(normalized);
+  if (!configLike) return false;
+
+  return /(secret|secrets|credential|credentials|private-key|private_key|apikey|api-key|access-token|access_token|refresh-token|refresh_token|password|passwd|token|oauth|auth|cert|certificate)/.test(basename)
     || /appsettings\.(production|prod|release)\.json$/.test(normalized);
 }
 
@@ -6262,13 +11407,18 @@ function apiContractTestPath(filePath: string): boolean {
 
 function binaryOrNativeArtifactPath(filePath: string): boolean {
   const normalized = filePath.replace(/\\/g, "/").toLowerCase();
-  return /\.(dll|exe|so|dylib|pdb|lib|bin|dat)$/i.test(normalized)
-    || /(^|\/)(driver|drivers|native|lib|libs|runtime|resources)(\/|$)/.test(normalized);
+  return /\.(dll|exe|so|dylib|pdb|lib|bin|dat|jar|war|ear)$/i.test(normalized)
+    || /(^|\/)(driver|drivers|native|jni)(\/|$)/.test(normalized);
 }
 
 function resourceHeavyPath(filePath: string): boolean {
   const normalized = filePath.replace(/\\/g, "/").toLowerCase();
-  return /(watcher|filesystemwatcher|hotreload|driver|drivers|native|lib\/|resources|asset|assets|image|font|kiosk|card\/|serial|device|hardware)/.test(normalized);
+  if (/^(\.?\/)?(docs?|documentation|history)\//.test(normalized)) return false;
+  return /(^|\/)(watcher|watchers|filesystemwatcher|hotreload|hot-reload|hot_reload|driver|drivers|native|jni)(\/|$)/.test(normalized)
+    || /\.(dll|exe|so|dylib|node)$/i.test(normalized)
+    || /(^|\/)(src\/main\/resources\/static|public|assets?|images?|fonts?)(\/|$)/.test(normalized)
+    || (/(^|\/)(static|public|assets?|images?|fonts?)(\/|$)/.test(normalized)
+      && /\.(png|jpg|jpeg|gif|webp|bmp|ico|svg|woff|woff2|ttf|otf|mp3|mp4|wav)$/i.test(normalized));
 }
 
 function performanceTestPath(filePath: string): boolean {
@@ -6303,6 +11453,217 @@ function buildReviewRunSummary(findings: ReviewFinding[]): ReviewRun["summary"] 
     byCategory[finding.category] = (byCategory[finding.category] ?? 0) + 1;
   }
   return { total: findings.length, bySeverity, byCategory };
+}
+
+async function buildLocalQualityReviewFindings(
+  root: string,
+  input: {
+    runId: string;
+    generatedAt: string;
+    category?: ReviewCategory;
+  }
+): Promise<ReviewFinding[]> {
+  const context = await buildQualityReviewContext(root, input.runId, input.generatedAt);
+  const findings: ReviewFinding[] = [];
+  addFoundationIntegrityFindings(context, findings);
+  addArchitectureQualityFindings(context, findings);
+  addBuildReleaseFindings(context, findings);
+  addTestingFindings(context, findings);
+  addSecurityAndConfigFindings(context, findings);
+  addMaintainabilityFindings(context, findings);
+  addApiContractFindings(context, findings);
+  addPerformanceResourceFindings(context, findings);
+  addProjectionFindings(context, findings);
+  addExternalDetectorFindings(context, findings);
+  await addEventProjectionConsistencyFindings(context, findings);
+  const filtered = input.category
+    ? findings.filter((finding) => displayReviewCategory(finding.category) === input.category)
+    : findings;
+  return sortReviewFindings(dedupeReviewFindings(filtered))
+    .map((finding) => ReviewFindingSchema.parse({
+      ...finding,
+      source: "agent",
+      evaluator: finding.evaluator ? { ...finding.evaluator, source: reviewAgentSource } : reviewEvaluatorFor(finding.category, root)
+    } satisfies ReviewFinding));
+}
+
+async function buildQualityReviewContext(root: string, runId: string, generatedAt: string): Promise<QualityReviewContext> {
+  const cacheDir = path.join(root, ".distinction", "cache");
+  const memoryDir = path.join(root, ".distinction", "memory");
+  const repositorySnapshotPath = path.join(cacheDir, "repository-snapshot.json");
+  const codeFactsPath = path.join(cacheDir, "code-fact-graph.json");
+  const profilePath = path.join(cacheDir, "project-profile.json");
+  const understandingPath = path.join(cacheDir, "repository-understanding-patch.json");
+  const factsPath = path.join(memoryDir, "facts.jsonl");
+  const architecturePath = path.join(cacheDir, "architecture-model-patch.json");
+  const findingsPath = path.join(cacheDir, "architecture-findings.json");
+  const manifestPath = path.join(cacheDir, "projection-manifest.json");
+
+  const [repositorySnapshot, codeFacts, profile, understanding, factRecords, architecture, findings, manifest, projectedViews] = await Promise.all([
+    tryReadJsonFile(repositorySnapshotPath),
+    tryReadJsonWithSchema(codeFactsPath, CodeFactGraphSnapshotSchema),
+    tryReadJsonFile(profilePath),
+    tryReadJsonWithSchema(understandingPath, RepositoryUnderstandingPatchSchema),
+    readMemoryRecordJsonl(factsPath),
+    tryReadJsonWithSchema(architecturePath, ArchitectureModelPatchSchema),
+    tryReadJsonWithSchema(findingsPath, ArchitectureFindingReportSchema),
+    tryReadJsonWithSchema(manifestPath, ProjectionManifestSchema),
+    readProjectedGraphViewRecords(root)
+  ]);
+
+  const snapshotFiles = isRecord(repositorySnapshot) && Array.isArray(repositorySnapshot.files)
+    ? repositorySnapshot.files.filter(isRecord)
+    : [];
+  const projectKinds = isRecord(profile) && Array.isArray(profile.projectKinds)
+    ? profile.projectKinds.filter((item): item is string => typeof item === "string")
+    : [];
+  const frameworks = isRecord(profile) && Array.isArray(profile.frameworks)
+    ? profile.frameworks.filter((item): item is string => typeof item === "string")
+    : [];
+  const languages = isRecord(profile) && Array.isArray(profile.languages)
+    ? profile.languages.filter((item): item is string => typeof item === "string")
+    : [];
+
+  return {
+    root,
+    runId,
+    generatedAt,
+    repositorySnapshotPath,
+    codeFactsPath,
+    profilePath,
+    understandingPath,
+    factsPath,
+    architecturePath,
+    findingsPath,
+    manifestPath,
+    snapshotFiles,
+    codeFacts,
+    projectKinds,
+    frameworks,
+    languages,
+    understanding,
+    factRecords,
+    architecture,
+    findings,
+    manifest,
+    projectedViews
+  };
+}
+
+async function addEventProjectionConsistencyFindings(context: QualityReviewContext, findings: ReviewFinding[]): Promise<void> {
+  const projectionPaths = snapshotFilePaths(context)
+    .filter((filePath) => reviewableSourceCodePath(filePath))
+    .filter((filePath) => /(projection|projector|readmodel|materialized|viewwriter)/i.test(filePath))
+    .slice(0, 80);
+  for (const filePath of projectionPaths) {
+    const absolutePath = path.join(context.root, filePath);
+    let source = "";
+    try {
+      source = await readFile(absolutePath, "utf8");
+    } catch {
+      continue;
+    }
+    addSwallowedProjectionFailureFinding(context, findings, filePath, source);
+    addIncompleteProjectionHandlerFinding(context, findings, filePath, source);
+  }
+}
+
+function addSwallowedProjectionFailureFinding(
+  context: QualityReviewContext,
+  findings: ReviewFinding[],
+  filePath: string,
+  source: string
+): void {
+  const isProjectionWriter = /(projectionwriter|projector|readmodel|materialized|viewwriter)/i.test(filePath);
+  if (!isProjectionWriter) return;
+  const hasStateTerms = /(balance|account|refund|payment|status|order|card|余额|账户|退款|支付|状态|订单|卡)/i.test(source);
+  const hasSwallowedException = /catch\s*\([^)]*Exception[^)]*\)\s*\{[\s\S]{0,900}log\.(warn|error|info)/.test(source)
+    && /(不应影响主流程|不应该影响主流程|should not affect (the )?main flow|continue|继续)/i.test(source);
+  if (!hasStateTerms || !hasSwallowedException) return;
+
+  const excerpt = extractAroundFirst(source, [
+    "账户余额更新失败不应该影响主流程",
+    "卡账户余额更新失败不应该影响主流程",
+    "预付卡信息处理失败不应该影响主流程",
+    "不应该影响主流程",
+    "should not affect the main flow",
+    "should not affect main flow"
+  ], 260, 460);
+  findings.push(reviewFinding(context, {
+    slug: `projection-swallowed-failure-${safeFilePart(filePath)}`,
+    category: "dependencies_coupling",
+    severity: "P1",
+    title: "投影写入失败被日志隔离后可能导致支付结果与账户余额状态不一致",
+    summary: `${filePath} 在支付、退款、账户或余额相关的投影写入路径中捕获异常后仅记录日志，并明确让主流程继续。这会让支付事件已经成功发布或处理，但账户余额、卡余额或兼容查询视图没有同步完成。`,
+    whyItMatters: "投影和兼容写入可以直接使用 DAO/Entity；真正的风险不是 DAO 本身，而是失败后的回放、补偿、告警和一致性边界没有被代码或文档解释清楚。没有这些边界，后续查询、对账或退款处理可能看到与支付事实不一致的状态。",
+    suggestedAction: "把该投影写入的归属写入变更计划：如果它只是读模型或兼容视图，应补充幂等重放、失败告警和补偿任务；如果它参与后续支付、退款、资格、扣费或结算判断，应拆出更严格的事务边界和一致性验证。整改方案不得预设由领域层承接持久化接口，除非文档已证明该状态属于领域聚合持久化。",
+    confidence: "high",
+    evidence: [{
+      source: "file",
+      path: filePath,
+      summary: "代码中存在账户或卡余额投影写入失败后仅记录日志并继续主流程的路径。",
+      excerpt
+    }],
+    affectedAnchors: [fileAnchor(filePath)]
+  }));
+}
+
+function addIncompleteProjectionHandlerFinding(
+  context: QualityReviewContext,
+  findings: ReviewFinding[],
+  filePath: string,
+  source: string
+): void {
+  const todoCount = (source.match(/TODO|待实现|未实现|return\s+null\s*;/gi) ?? []).length;
+  const eventOrProjection = /(Event|事件|Projection|Projector|Handler|Callback|Refund|Payment|支付|退款|回调)/i.test(source + filePath);
+  if (todoCount < 2 || !eventOrProjection) return;
+  const excerpt = extractFirstMatchExcerpt(source, /(TODO|待实现|未实现|return\s+null\s*;)[\s\S]{0,500}/i);
+  findings.push(reviewFinding(context, {
+    slug: `incomplete-projection-handler-${safeFilePart(filePath)}`,
+    category: "api_contracts_data_flow",
+    severity: todoCount >= 4 ? "P1" : "P2",
+    title: "事件或投影处理路径仍有未完成实现",
+    summary: `${filePath} 包含 ${todoCount} 处 TODO、未实现标记或空返回，且文件位于事件、回调或投影处理路径中。`,
+    whyItMatters: "事件和投影路径的未完成实现会让文档中的流程、读模型和实际查询结果不一致，也会让评审转计划时遗漏必要开发任务。",
+    suggestedAction: "把未完成路径拆成明确开发任务：补实现、补事件-投影覆盖测试，并在对应设计文档或变更计划中记录影响范围。",
+    confidence: "medium",
+    evidence: [{
+      source: "file",
+      path: filePath,
+      summary: "文件中存在未完成实现标记。",
+      excerpt
+    }],
+    affectedAnchors: [fileAnchor(filePath)]
+  }));
+}
+
+function extractFirstMatchExcerpt(source: string, pattern: RegExp): string {
+  const match = source.match(pattern);
+  const excerpt = match?.[0] ?? source.slice(0, 800);
+  return trimExcerptToLineBoundaries(excerpt, 1800);
+}
+
+function extractAroundFirst(source: string, needles: string[], before = 420, after = 760): string {
+  const lower = source.toLowerCase();
+  const matchIndex = needles
+    .map((needle) => lower.indexOf(needle.toLowerCase()))
+    .filter((index) => index >= 0)
+    .sort((left, right) => left - right)[0];
+  if (matchIndex === undefined) return trimExcerptToLineBoundaries(source.slice(0, Math.min(source.length, before + after)), before + after);
+  const start = Math.max(0, matchIndex - before);
+  const end = Math.min(source.length, matchIndex + after);
+  return trimExcerptToLineBoundaries(source.slice(start, end), before + after);
+}
+
+function trimExcerptToLineBoundaries(excerpt: string, maxLength: number): string {
+  const clipped = excerpt.slice(0, maxLength);
+  const firstLineBreak = clipped.indexOf("\n");
+  const lastLineBreak = clipped.lastIndexOf("\n");
+  const startsMidLine = excerpt.length > clipped.length || firstLineBreak > 0;
+  const lineBounded = firstLineBreak >= 0 && lastLineBreak > firstLineBreak
+    ? clipped.slice(startsMidLine ? firstLineBreak + 1 : 0, lastLineBreak)
+    : clipped;
+  return lineBounded.trim();
 }
 
 async function buildFoundationReviewStatus(root: string) {
@@ -6676,10 +12037,6 @@ async function appendUniqueMemoryRecords(root: string, fileName: string, records
   return memoryPath;
 }
 
-async function persistQualityReviewFindings(root: string, findings: ReviewFinding[]): Promise<string> {
-  return appendUniqueMemoryRecords(root, "candidates.jsonl", findings.map((finding) => reviewFindingToCandidateMemoryRecord(finding)));
-}
-
 async function writeFindingStatusPatch(root: string, patch: FindingStatusPatch): Promise<string> {
   const parsed = FindingStatusPatchSchema.parse(patch);
   const relative = `.distinction/cache/finding-status-patches/${safeFilePart(parsed.id)}.json`;
@@ -6977,6 +12334,7 @@ async function commandProjectView(args: Args, rest: string[]): Promise<void> {
     view !== "memory" &&
     view !== "trace" &&
     view !== "tasks" &&
+    view !== "design" &&
     view !== "context"
   ) {
     throw new Error(`Unsupported project:view target: ${view || "(missing)"}`);
@@ -7083,6 +12441,30 @@ async function commandProjectView(args: Args, rest: string[]): Promise<void> {
     );
     await maybeWriteJson(args, "out", contextView);
     outputProjectedViewSummary(resolvedRoot, view, contextViewPath, manifestPath, contextView);
+    return;
+  }
+
+  if (view === "design") {
+    const model = await readInteractionModelCandidate(resolvedRoot, args);
+    const designMapHtmlPath = await writeUseCaseDiagramsMapHtmlDocument(resolvedRoot, model);
+    const modelPath = await writeInteractionModelCandidate(resolvedRoot, model);
+    const projection = await writeDesignUseCaseProjectionViews(resolvedRoot, model);
+    await maybeWriteJson(args, "out", model);
+    outputJson({
+      ok: true,
+      root: resolvedRoot,
+      view: "design",
+      designMapDocPath: path.join(resolvedRoot, DESIGN_MAP_DOC_RELATIVE_PATH),
+      designMapHtmlPath,
+      modelPath,
+      manifestPath: projection.manifestPath,
+      useCaseListViewPath: projection.useCaseListViewPath,
+      useCaseViewPaths: projection.useCaseViewPaths,
+      mermaidPaths: projection.mermaidPaths,
+      contexts: model.contexts.length,
+      useCases: model.useCases.length,
+      relations: model.relations.length
+    });
     return;
   }
 
@@ -7305,7 +12687,8 @@ async function readOrBuildCodeFacts(root: string, args: Args) {
   const cachePath = path.join(path.resolve(root), ".distinction", "cache", "code-fact-graph.json");
   if (args["rebuild-code-facts"] !== true) {
     try {
-      return await readJsonWithSchema(cachePath, CodeFactGraphSnapshotSchema);
+      const cached = await readJsonWithSchema(cachePath, CodeFactGraphSnapshotSchema);
+      if (await isCodeFactCacheCurrent(root, cached)) return cached;
     } catch (error) {
       if (!isMissingFileError(error)) throw error;
       // Build below when no cache exists.
@@ -7321,6 +12704,29 @@ async function readOrBuildCodeFacts(root: string, args: Args) {
   );
   await writeJson(cachePath, snapshot, CodeFactGraphSnapshotSchema);
   return snapshot;
+}
+
+async function isCodeFactCacheCurrent(root: string, snapshot: CodeFactGraphSnapshot): Promise<boolean> {
+  const resolvedRoot = path.resolve(root);
+  if (path.resolve(snapshot.root) !== resolvedRoot) return false;
+  const filePaths = new Set<string>();
+  for (const file of snapshot.files) {
+    if (isSyntheticCodeFactPath(file.path)) continue;
+    filePaths.add(file.path);
+  }
+  for (const node of snapshot.nodes) {
+    if (isSyntheticCodeFactPath(node.filePath)) continue;
+    filePaths.add(node.filePath);
+  }
+  for (const filePath of filePaths) {
+    if (!(await exists(path.join(resolvedRoot, normalizeProjectRelativePath(filePath))))) return false;
+  }
+  return true;
+}
+
+function isSyntheticCodeFactPath(filePath: string): boolean {
+  const normalized = normalizeProjectRelativePath(filePath);
+  return normalized === "." || normalized.length === 0;
 }
 
 function codeFactProviderArg(args: Args): CodeFactProviderSource {
@@ -7348,6 +12754,7 @@ function timeoutMsArg(args: Args, keys: string[], fallbackMs: number): number {
   for (const key of keys) {
     const parsed = numberArg(args, key);
     if (parsed === undefined) continue;
+    if (parsed === 0) return 0;
     if (parsed < 1_000) throw new Error(`Invalid timeout for --${key}: ${parsed}. Timeout must be at least 1000ms.`);
     return parsed;
   }
@@ -7357,16 +12764,8 @@ function timeoutMsArg(args: Args, keys: string[], fallbackMs: number): number {
 
 async function readAllMemoryRecords(root: string): Promise<MemoryRecord[]> {
   const memoryDir = path.join(root, ".distinction", "memory");
-  const files = [
-    "facts.jsonl",
-    "inferences.jsonl",
-    "candidates.jsonl",
-    "confirmations.jsonl",
-    "decisions.jsonl",
-    "findings.jsonl"
-  ];
   const records: MemoryRecord[] = [];
-  for (const file of files) {
+  for (const file of MEMORY_RECORD_FILES) {
     records.push(...(await readMemoryRecordJsonl(path.join(memoryDir, file))));
   }
   return records;

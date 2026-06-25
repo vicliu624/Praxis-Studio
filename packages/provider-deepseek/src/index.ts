@@ -73,8 +73,9 @@ export class DeepSeekProvider implements ModelProvider {
 
     const baseUrl = this.options.baseUrl ?? "https://api.deepseek.com";
     const controller = new AbortController();
-    const timeoutMs = request.route.timeoutMs ?? this.options.timeoutMs ?? 180_000;
-    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    const configuredTimeoutMs = request.route.timeoutMs ?? this.options.timeoutMs ?? 180_000;
+    const timeoutMs = configuredTimeoutMs > 0 ? configuredTimeoutMs : 0;
+    const timeout = timeoutMs > 0 ? setTimeout(() => controller.abort(), timeoutMs) : undefined;
     let abortedByCaller = false;
     const abortFromCaller = () => {
       abortedByCaller = true;
@@ -124,12 +125,15 @@ export class DeepSeekProvider implements ModelProvider {
         if (abortedByCaller || request.signal?.aborted) {
           throw new Error("DeepSeek request aborted.");
         }
-        throw new Error(`DeepSeek request timed out after ${Math.round(timeoutMs / 1000)} seconds.`);
+        if (timeoutMs > 0) {
+          throw new Error(`DeepSeek request timed out after ${Math.round(timeoutMs / 1000)} seconds.`);
+        }
+        throw new Error("DeepSeek request aborted.");
       }
       throw error;
     } finally {
       request.signal?.removeEventListener("abort", abortFromCaller);
-      clearTimeout(timeout);
+      if (timeout) clearTimeout(timeout);
     }
   }
 }

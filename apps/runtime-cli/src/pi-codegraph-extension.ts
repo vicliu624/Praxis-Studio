@@ -44,27 +44,27 @@ const codegraphRelationsSchema = {
 export default function praxisCodeGraphExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: "codegraph_query",
-    label: "CodeGraph Query",
-    description: "Search the repository CodeGraph index for symbols. Read-only; does not write Praxis memory.",
-    promptSnippet: "Search CodeGraph for symbols and code facts.",
+    label: "Repository Evidence Query",
+    description: "Search the local repository evidence index for symbols. Read-only; does not write Praxis memory.",
+    promptSnippet: "Search local repository evidence for symbols and code facts.",
     promptGuidelines: [
-      "Use CodeGraph tools when symbol-level repo context would be more precise than grep/find.",
-      "Treat CodeGraph output as repository evidence, not confirmed Praxis memory."
+      "Use repository evidence tools when symbol-level repo context would be more precise than grep/find.",
+      "Treat repository evidence output as candidate evidence, not confirmed Praxis memory."
     ],
     parameters: codegraphQuerySchema,
     async execute(_toolCallId, params, signal) {
       const args = ["query", params.query, "--path", requiredProjectRoot(), "--limit", String(clampNumber(params.limit, 1, 50, 10)), "--json"];
       if (params.kind) args.push("--kind", params.kind);
       const result = await runCodeGraph(args, signal);
-      return textResult(formatOutput(result.stdout || result.stderr || "No CodeGraph query results."));
+      return textResult(formatOutput(result.stdout || result.stderr || "No repository evidence query results."));
     }
   });
 
   pi.registerTool({
     name: "codegraph_context",
-    label: "CodeGraph Context",
-    description: "Build focused CodeGraph context for a task. Read-only; Pi decides when this context is useful.",
-    promptSnippet: "Build task-scoped CodeGraph context.",
+    label: "Repository Evidence Context",
+    description: "Build focused repository evidence context for a task. Read-only; Pi decides when this context is useful.",
+    promptSnippet: "Build task-scoped repository evidence context.",
     parameters: codegraphContextSchema,
     async execute(_toolCallId, params, signal) {
       const args = [
@@ -81,15 +81,15 @@ export default function praxisCodeGraphExtension(pi: ExtensionAPI) {
       ];
       if (params.includeCode === false) args.push("--no-code");
       const result = await runCodeGraph(args, signal);
-      return textResult(formatOutput(result.stdout || result.stderr || "No CodeGraph context produced."));
+      return textResult(formatOutput(result.stdout || result.stderr || "No repository evidence context produced."));
     }
   });
 
   pi.registerTool({
     name: "codegraph_relations",
-    label: "CodeGraph Relations",
-    description: "Inspect callers, callees, or impact for a symbol through CodeGraph. Read-only.",
-    promptSnippet: "Inspect symbol callers, callees, and impact through CodeGraph.",
+    label: "Repository Evidence Relations",
+    description: "Inspect callers, callees, or impact for a symbol through local repository evidence. Read-only.",
+    promptSnippet: "Inspect symbol callers, callees, and impact through repository evidence.",
     parameters: codegraphRelationsSchema,
     async execute(_toolCallId, params, signal) {
       const direction = params.direction;
@@ -100,13 +100,13 @@ export default function praxisCodeGraphExtension(pi: ExtensionAPI) {
         args.push("--limit", String(clampNumber(params.limit, 1, 100, 20)));
       }
       const result = await runCodeGraph(args, signal);
-      return textResult(formatOutput(result.stdout || result.stderr || "No CodeGraph relation results."));
+      return textResult(formatOutput(result.stdout || result.stderr || "No repository evidence relation results."));
     }
   });
 }
 
 function requiredProjectRoot(): string {
-  if (!projectRoot) throw new Error("PRAXIS_PI_PROJECT_ROOT is required for Praxis CodeGraph tools.");
+  if (!projectRoot) throw new Error("PRAXIS_PI_PROJECT_ROOT is required for Praxis repository evidence tools.");
   return projectRoot;
 }
 
@@ -152,7 +152,7 @@ function runCodeGraph(args: string[], signal: AbortSignal | undefined): Promise<
         settle(() => resolve({ stdout, stderr }));
         return;
       }
-      const detail = formatOutput(stderr || stdout || `CodeGraph exited with code ${code ?? 1}.`);
+      const detail = formatOutput(stderr || stdout || `Repository evidence command exited with code ${code ?? 1}.`);
       settle(() => reject(new Error(detail)));
     });
   });

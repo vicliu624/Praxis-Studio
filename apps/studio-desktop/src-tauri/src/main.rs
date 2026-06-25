@@ -10,6 +10,30 @@ fn app_version() -> String {
 }
 
 #[tauri::command]
+fn read_startup_context() -> String {
+    let mut project_root: Option<String> = None;
+    let mut route: Option<String> = None;
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--project-root" => {
+                project_root = args.next();
+            }
+            "--route" => {
+                route = args.next();
+            }
+            _ => {}
+        }
+    }
+
+    serde_json::json!({
+        "projectRoot": project_root,
+        "route": route
+    })
+    .to_string()
+}
+
+#[tauri::command]
 async fn open_project_dialog(app: tauri::AppHandle) -> Result<Option<String>, String> {
     let folder = app
         .dialog()
@@ -26,8 +50,14 @@ async fn open_project_dialog(app: tauri::AppHandle) -> Result<Option<String>, St
 }
 
 #[tauri::command]
-fn run_runtime_command(app: tauri::AppHandle, command: String, args: Vec<String>) -> Result<String, String> {
-    run_runtime(&app, &command, &args)
+async fn run_runtime_command(
+    app: tauri::AppHandle,
+    command: String,
+    args: Vec<String>,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || run_runtime(&app, &command, &args))
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -46,18 +76,71 @@ fn write_file(project_root: String, relative_path: String, content: String) -> R
 }
 
 #[tauri::command]
-fn read_project_distinction_file(project_root: String, relative_path: String) -> Result<String, String> {
+fn read_project_distinction_file(
+    project_root: String,
+    relative_path: String,
+) -> Result<String, String> {
     read_file(project_root, relative_path)
 }
 
 #[tauri::command]
-fn write_project_distinction_file(project_root: String, relative_path: String, content: String) -> Result<(), String> {
+fn read_project_file(project_root: String, relative_path: String) -> Result<String, String> {
+    let allowed_path = ensure_project_read_path(&project_root, &relative_path)?;
+    fs::read_to_string(allowed_path).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn open_project_file_with(
+    project_root: String,
+    relative_path: String,
+    opener: String,
+    line: Option<u32>,
+) -> Result<(), String> {
+    let allowed_path = ensure_project_read_path(&project_root, &relative_path)?;
+    if !allowed_path.is_file() {
+        return Err(format!("Project file does not exist: {}", relative_path));
+    }
+
+    match opener.as_str() {
+        "notepad" => Command::new("notepad")
+            .arg(&allowed_path)
+            .spawn()
+            .map(|_| ())
+            .map_err(|error| error.to_string()),
+        "vscode" => {
+            let target = if let Some(line) = line {
+                format!("{}:{}", allowed_path.to_string_lossy(), line)
+            } else {
+                allowed_path.to_string_lossy().to_string()
+            };
+            Command::new("code")
+                .arg("-g")
+                .arg(target)
+                .spawn()
+                .map(|_| ())
+                .map_err(|error| format!("Unable to open VS Code with `code -g`. Make sure VS Code command-line launcher is on PATH. {error}"))
+        }
+        _ => Err("Unsupported opener. Expected `notepad` or `vscode`.".to_string()),
+    }
+}
+
+#[tauri::command]
+fn write_project_distinction_file(
+    project_root: String,
+    relative_path: String,
+    content: String,
+) -> Result<(), String> {
     write_file(project_root, relative_path, content)
 }
 
 #[tauri::command]
-fn initialize_project_memory(app: tauri::AppHandle, project_root: String, candidate_json: String) -> Result<String, String> {
-    let temp_path = std::env::temp_dir().join(format!("praxis-candidate-{}.json", chrono_like_stamp()));
+fn initialize_project_memory(
+    app: tauri::AppHandle,
+    project_root: String,
+    candidate_json: String,
+) -> Result<String, String> {
+    let temp_path =
+        std::env::temp_dir().join(format!("praxis-candidate-{}.json", chrono_like_stamp()));
     fs::write(&temp_path, candidate_json).map_err(|error| error.to_string())?;
     let result = run_runtime(
         &app,
@@ -76,7 +159,11 @@ fn initialize_project_memory(app: tauri::AppHandle, project_root: String, candid
 }
 
 #[tauri::command]
-fn generate_task_from_plan(app: tauri::AppHandle, project_root: String, plan_json: String) -> Result<String, String> {
+fn generate_task_from_plan(
+    app: tauri::AppHandle,
+    project_root: String,
+    plan_json: String,
+) -> Result<String, String> {
     let temp_path = std::env::temp_dir().join(format!("praxis-plan-{}.json", chrono_like_stamp()));
     fs::write(&temp_path, plan_json).map_err(|error| error.to_string())?;
     run_runtime(
@@ -92,8 +179,14 @@ fn generate_task_from_plan(app: tauri::AppHandle, project_root: String, plan_jso
 }
 
 #[tauri::command]
-fn apply_plan_actions(app: tauri::AppHandle, project_root: String, plan_json: String, action_ids: Vec<String>) -> Result<String, String> {
-    let temp_path = std::env::temp_dir().join(format!("praxis-apply-plan-{}.json", chrono_like_stamp()));
+fn apply_plan_actions(
+    app: tauri::AppHandle,
+    project_root: String,
+    plan_json: String,
+    action_ids: Vec<String>,
+) -> Result<String, String> {
+    let temp_path =
+        std::env::temp_dir().join(format!("praxis-apply-plan-{}.json", chrono_like_stamp()));
     fs::write(&temp_path, plan_json).map_err(|error| error.to_string())?;
     let mut args = vec![
         "--project-root".to_string(),
@@ -109,8 +202,13 @@ fn apply_plan_actions(app: tauri::AppHandle, project_root: String, plan_json: St
 }
 
 #[tauri::command]
-fn import_task_result(app: tauri::AppHandle, project_root: String, result_json: String) -> Result<String, String> {
-    let temp_path = std::env::temp_dir().join(format!("praxis-task-result-{}.json", chrono_like_stamp()));
+fn import_task_result(
+    app: tauri::AppHandle,
+    project_root: String,
+    result_json: String,
+) -> Result<String, String> {
+    let temp_path =
+        std::env::temp_dir().join(format!("praxis-task-result-{}.json", chrono_like_stamp()));
     fs::write(&temp_path, result_json).map_err(|error| error.to_string())?;
     run_runtime(
         &app,
@@ -125,8 +223,15 @@ fn import_task_result(app: tauri::AppHandle, project_root: String, result_json: 
 }
 
 #[tauri::command]
-fn create_project_from_plan(app: tauri::AppHandle, project_root: String, plan_json: String) -> Result<String, String> {
-    let temp_path = std::env::temp_dir().join(format!("praxis-new-project-plan-{}.json", chrono_like_stamp()));
+fn create_project_from_plan(
+    app: tauri::AppHandle,
+    project_root: String,
+    plan_json: String,
+) -> Result<String, String> {
+    let temp_path = std::env::temp_dir().join(format!(
+        "praxis-new-project-plan-{}.json",
+        chrono_like_stamp()
+    ));
     fs::write(&temp_path, plan_json).map_err(|error| error.to_string())?;
     let result = run_runtime(
         &app,
@@ -175,12 +280,17 @@ fn read_app_model_settings_path() -> Result<String, String> {
 
 #[tauri::command]
 fn write_app_model_settings(settings_json: String) -> Result<(), String> {
-    let value: serde_json::Value = serde_json::from_str(&settings_json).map_err(|error| error.to_string())?;
+    let value: serde_json::Value =
+        serde_json::from_str(&settings_json).map_err(|error| error.to_string())?;
     let path = app_model_settings_path()?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
-    fs::write(path, serde_json::to_string_pretty(&value).map_err(|error| error.to_string())?).map_err(|error| error.to_string())
+    fs::write(
+        path,
+        serde_json::to_string_pretty(&value).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())
 }
 
 fn run_runtime(app: &tauri::AppHandle, command: &str, args: &[String]) -> Result<String, String> {
@@ -191,21 +301,21 @@ fn run_runtime(app: &tauri::AppHandle, command: &str, args: &[String]) -> Result
             cli_path.display()
         ));
     }
-    let mut process = Command::new("node");
+    let node_command = resolve_runtime_node_command();
+    let mut process = Command::new(&node_command);
     process
         .arg(cli_path)
         .arg(command)
         .args(args)
         .current_dir(runtime_cwd);
+    apply_runtime_node_env(&mut process, &node_command);
     if let Some(settings_json) = read_app_model_settings_content() {
         process.env("PRAXIS_MODEL_SETTINGS_JSON", &settings_json);
         if let Some(api_key) = deepseek_api_key_from_settings(&settings_json) {
             process.env("DEEPSEEK_API_KEY", api_key);
         }
     }
-    let output = process
-        .output()
-        .map_err(|error| error.to_string())?;
+    let output = process.output().map_err(|error| error.to_string())?;
     if output.status.success() {
         String::from_utf8(output.stdout).map_err(|error| error.to_string())
     } else {
@@ -215,7 +325,11 @@ fn run_runtime(app: &tauri::AppHandle, command: &str, args: &[String]) -> Result
 
 fn locate_runtime_cli(app: &tauri::AppHandle) -> Result<(PathBuf, PathBuf), String> {
     if let Some(repo_root) = find_repo_root() {
-        let cli_path = repo_root.join("apps").join("runtime-cli").join("dist").join("index.js");
+        let cli_path = repo_root
+            .join("apps")
+            .join("runtime-cli")
+            .join("dist")
+            .join("index.js");
         if cli_path.exists() {
             return Ok((cli_path, repo_root));
         }
@@ -226,7 +340,10 @@ fn locate_runtime_cli(app: &tauri::AppHandle) -> Result<(PathBuf, PathBuf), Stri
         .resource_dir()
         .map_err(|error| format!("Could not locate app resource directory: {}", error))?;
     let candidates = [
-        resource_dir.join("runtime-cli").join("dist").join("index.js"),
+        resource_dir
+            .join("runtime-cli")
+            .join("dist")
+            .join("index.js"),
         resource_dir.join("dist").join("index.js"),
         resource_dir.join("index.js"),
     ];
@@ -246,15 +363,50 @@ fn locate_runtime_cli(app: &tauri::AppHandle) -> Result<(PathBuf, PathBuf), Stri
     ))
 }
 
+fn resolve_runtime_node_command() -> String {
+    if let Ok(path) =
+        std::env::var("PRAXIS_RUNTIME_NODE_PATH").or_else(|_| std::env::var("PRAXIS_PI_NODE_PATH"))
+    {
+        let trimmed = path.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+
+    if let Some(home) = user_home_dir().ok() {
+        let executable = if cfg!(windows) { "node.exe" } else { "node" };
+        let bundled = home
+            .join(".cache")
+            .join("codex-runtimes")
+            .join("codex-primary-runtime")
+            .join("dependencies")
+            .join("node")
+            .join("bin")
+            .join(executable);
+        if bundled.exists() {
+            return bundled.display().to_string();
+        }
+    }
+
+    "node".to_string()
+}
+
+fn apply_runtime_node_env(process: &mut Command, node_command: &str) {
+    process.env("PRAXIS_RUNTIME_NODE_PATH", node_command);
+    process.env("PRAXIS_PI_NODE_PATH", node_command);
+}
+
 fn ensure_distinction_path(project_root: &str, relative_path: &str) -> Result<PathBuf, String> {
     let relative = PathBuf::from(relative_path);
     if relative.is_absolute() {
         return Err("File access requires a project-relative path.".to_string());
     }
-    if relative
-        .components()
-        .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_) | Component::RootDir))
-    {
+    if relative.components().any(|component| {
+        matches!(
+            component,
+            Component::ParentDir | Component::Prefix(_) | Component::RootDir
+        )
+    }) {
         return Err("File access path cannot escape the project root.".to_string());
     }
     let mut components = relative.components();
@@ -295,6 +447,52 @@ fn ensure_distinction_path(project_root: &str, relative_path: &str) -> Result<Pa
     }
 }
 
+fn ensure_project_read_path(project_root: &str, relative_path: &str) -> Result<PathBuf, String> {
+    let relative = PathBuf::from(relative_path);
+    if relative.is_absolute() {
+        return Err("File access requires a project-relative path.".to_string());
+    }
+    if relative.components().any(|component| {
+        matches!(
+            component,
+            Component::ParentDir | Component::Prefix(_) | Component::RootDir
+        )
+    }) {
+        return Err("File access path cannot escape the project root.".to_string());
+    }
+    relative
+        .components()
+        .next()
+        .ok_or_else(|| "File access path cannot be empty.".to_string())?;
+    let root = fs::canonicalize(project_root).map_err(|error| error.to_string())?;
+    let path = root.join(relative);
+    let resolved = if path.exists() {
+        fs::canonicalize(&path).map_err(|error| error.to_string())?
+    } else {
+        let mut ancestor = path.as_path();
+        let mut missing_components = Vec::new();
+        while !ancestor.exists() {
+            let file_name = ancestor
+                .file_name()
+                .ok_or_else(|| "File path must include a file name.".to_string())?;
+            missing_components.push(file_name.to_os_string());
+            ancestor = ancestor
+                .parent()
+                .ok_or_else(|| "File path must have an existing ancestor.".to_string())?;
+        }
+        let mut resolved = fs::canonicalize(ancestor).map_err(|error| error.to_string())?;
+        for component in missing_components.iter().rev() {
+            resolved = resolved.join(component);
+        }
+        resolved
+    };
+    if resolved.starts_with(&root) {
+        Ok(resolved)
+    } else {
+        Err("File access path cannot escape the project root.".to_string())
+    }
+}
+
 fn record_recent_project(project_root: &str) -> Result<(), String> {
     let root = fs::canonicalize(project_root).unwrap_or_else(|_| PathBuf::from(project_root));
     let path = recent_projects_path()?;
@@ -308,8 +506,10 @@ fn record_recent_project(project_root: &str) -> Result<(), String> {
         "[]".to_string()
     };
     let mut projects: Vec<serde_json::Value> = serde_json::from_str(&existing).unwrap_or_default();
-    let root_string = root.to_string_lossy().to_string();
-    projects.retain(|project| project.get("root").and_then(|value| value.as_str()) != Some(root_string.as_str()));
+    let root_string = display_project_path(&root);
+    projects.retain(|project| {
+        project.get("root").and_then(|value| value.as_str()) != Some(root_string.as_str())
+    });
     projects.insert(
         0,
         serde_json::json!({
@@ -319,21 +519,45 @@ fn record_recent_project(project_root: &str) -> Result<(), String> {
         }),
     );
     projects.truncate(12);
-    fs::write(&path, serde_json::to_string_pretty(&projects).map_err(|error| error.to_string())?).map_err(|error| error.to_string())
+    fs::write(
+        &path,
+        serde_json::to_string_pretty(&projects).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn display_project_path(path: &Path) -> String {
+    let raw = path.to_string_lossy().to_string();
+    strip_windows_verbatim_prefix(&raw)
+}
+
+fn strip_windows_verbatim_prefix(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{}", rest)
+    } else if let Some(rest) = path.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        path.to_string()
+    }
 }
 
 fn recent_projects_path() -> Result<PathBuf, String> {
-    let home = std::env::var("USERPROFILE")
-        .or_else(|_| std::env::var("HOME"))
-        .map_err(|_| "Could not locate user home directory.".to_string())?;
-    Ok(Path::new(&home).join(".praxis-studio").join("recent-projects.json"))
+    Ok(user_home_dir()?
+        .join(".praxis-studio")
+        .join("recent-projects.json"))
 }
 
 fn app_model_settings_path() -> Result<PathBuf, String> {
+    Ok(user_home_dir()?
+        .join(".praxis-studio")
+        .join("model-settings.json"))
+}
+
+fn user_home_dir() -> Result<PathBuf, String> {
     let home = std::env::var("USERPROFILE")
         .or_else(|_| std::env::var("HOME"))
         .map_err(|_| "Could not locate user home directory.".to_string())?;
-    Ok(Path::new(&home).join(".praxis-studio").join("model-settings.json"))
+    Ok(Path::new(&home).to_path_buf())
 }
 
 fn read_app_model_settings_content() -> Option<String> {
@@ -354,7 +578,9 @@ fn deepseek_api_key_from_settings(settings_json: &str) -> Option<String> {
 fn find_repo_root() -> Option<PathBuf> {
     let mut current = std::env::current_dir().ok()?;
     loop {
-        if current.join("package.json").exists() && current.join("apps").join("runtime-cli").exists() {
+        if current.join("package.json").exists()
+            && current.join("apps").join("runtime-cli").exists()
+        {
             return Some(current);
         }
         if !current.pop() {
@@ -403,36 +629,55 @@ fn civil_from_days(days_since_epoch: i64) -> (i64, u32, u32) {
     (year, month as u32, day as u32)
 }
 
-
 #[tauri::command]
 fn cancel_agent_run(project_root: String) -> Result<String, String> {
-    let cancel_path = std::path::Path::new(&project_root).join(".distinction").join(".cancel-agent-run");
+    let cancel_path = std::path::Path::new(&project_root)
+        .join(".distinction")
+        .join(".cancel-agent-run");
     std::fs::write(&cancel_path, "cancel").map_err(|e| e.to_string())?;
     Ok("{\"ok\":true}".to_string())
 }
 
-
-
 #[tauri::command]
-fn respond_to_permission(project_root: String, permission_id: String, approval: String) -> Result<String, String> {
+fn respond_to_permission(
+    project_root: String,
+    permission_id: String,
+    approval: String,
+) -> Result<String, String> {
     let response_path = std::path::Path::new(&project_root)
         .join(".distinction")
         .join(format!(".perm-{}.json", permission_id));
-    let status = if approval == "approve" { "approved" } else { "rejected" };
-    let response = format!("{{\"status\":\"{}\",\"permId\":\"{}\"}}", status, permission_id);
+    let status = if approval == "approve" {
+        "approved"
+    } else {
+        "rejected"
+    };
+    let response = format!(
+        "{{\"status\":\"{}\",\"permId\":\"{}\"}}",
+        status, permission_id
+    );
     std::fs::write(&response_path, response).map_err(|e| e.to_string())?;
     Ok("{\"ok\":true}".to_string())
 }
 
-
 #[tauri::command]
-fn run_runtime_command_async(app: tauri::AppHandle, command: String, args: Vec<String>) -> Result<String, String> {
+fn run_runtime_command_async(
+    app: tauri::AppHandle,
+    command: String,
+    args: Vec<String>,
+) -> Result<String, String> {
     let (cli_path, runtime_cwd) = locate_runtime_cli(&app)?;
     if !cli_path.exists() {
         return Err(format!("runtime-cli not built at {}", cli_path.display()));
     }
-    let mut process = std::process::Command::new("node");
-    process.arg(&cli_path).arg(&command).args(&args).current_dir(&runtime_cwd);
+    let node_command = resolve_runtime_node_command();
+    let mut process = std::process::Command::new(&node_command);
+    process
+        .arg(&cli_path)
+        .arg(&command)
+        .args(&args)
+        .current_dir(&runtime_cwd);
+    apply_runtime_node_env(&mut process, &node_command);
     if let Some(settings_json) = read_app_model_settings_content() {
         process.env("PRAXIS_MODEL_SETTINGS_JSON", &settings_json);
         if let Some(api_key) = deepseek_api_key_from_settings(&settings_json) {
@@ -449,12 +694,17 @@ fn run_runtime_command_async(app: tauri::AppHandle, command: String, args: Vec<S
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             app_version,
+            read_startup_context,
             open_project_dialog,
             run_runtime_command,
             read_file,
             write_file,
+            read_project_file,
+            open_project_file_with,
             read_project_distinction_file,
             write_project_distinction_file,
             initialize_project_memory,

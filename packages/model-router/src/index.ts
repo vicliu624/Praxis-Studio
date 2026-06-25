@@ -4,15 +4,24 @@ import path from "node:path";
 
 export type ModelTaskType =
   | "project.intake.analyze"
+  | "project.overview.generate"
+  | "project.change_plan.generate"
   | "project.create.requirements"
   | "project.create.architecture"
   | "project.create.graph"
+  | "design.discovery.use_cases"
+  | "design.story_intake"
+  | "design.diagram_discussion"
+  | "design.version_decision"
+  | "engineering.diagram_discussion"
+  | "architecture.diagram_discussion"
   | "graph.node.explain"
   | "graph.edge.explain"
   | "graph.node.plan"
   | "graph.edge.plan"
   | "coding.task.generate"
   | "memory.summarize"
+  | "review.finding_discussion"
   | "report.generate";
 
 export interface ModelRoute {
@@ -51,11 +60,30 @@ export interface ModelRouterConfig {
   };
 }
 
+const legacyDefaultPiTools = "read,grep,find,ls,codegraph_query,codegraph_context,codegraph_relations,bash,edit,write";
+const defaultPiTools = [
+  "praxis_status",
+  "praxis_context_packet",
+  "praxis_projection_views",
+  "praxis_code_facts",
+  "praxis_findings",
+  "read",
+  "grep",
+  "find",
+  "ls",
+  "codegraph_query",
+  "codegraph_context",
+  "codegraph_relations",
+  "bash",
+  "edit",
+  "write"
+].join(",");
+
 const defaultPiAgentSettings = {
   provider: "deepseek",
   model: "deepseek-v4-pro",
   thinking: "high",
-  tools: "read,grep,find,ls,codegraph_query,codegraph_context,codegraph_relations,bash,edit,write",
+  tools: defaultPiTools,
   codeGraph: true,
   allowRead: true,
   allowShell: true,
@@ -76,15 +104,24 @@ export const defaultModelRouterConfig: ModelRouterConfig = {
   },
   routes: {
     "project.intake.analyze": { provider: "deepseek", model: "deepseek-v4-pro", reasoning: true, reasoningEffort: "medium" },
+    "project.overview.generate": { provider: "deepseek", model: "deepseek-v4-pro", reasoning: true, reasoningEffort: "medium" },
+    "project.change_plan.generate": { provider: "deepseek", model: "deepseek-v4-pro", reasoning: true, reasoningEffort: "high" },
     "project.create.requirements": { provider: "deepseek", model: "deepseek-v4-flash", reasoning: false },
     "project.create.architecture": { provider: "deepseek", model: "deepseek-v4-pro", reasoning: true, reasoningEffort: "medium" },
     "project.create.graph": { provider: "deepseek", model: "deepseek-v4-pro", reasoning: true, reasoningEffort: "medium" },
+    "design.discovery.use_cases": { provider: "deepseek", model: "deepseek-v4-pro", reasoning: true, reasoningEffort: "high", timeoutMs: 0 },
+    "design.story_intake": { provider: "deepseek", model: "deepseek-v4-pro", reasoning: true, reasoningEffort: "medium" },
+    "design.diagram_discussion": { provider: "deepseek", model: "deepseek-v4-flash", reasoning: false },
+    "design.version_decision": { provider: "deepseek", model: "deepseek-v4-pro", reasoning: true, reasoningEffort: "medium" },
+    "engineering.diagram_discussion": { provider: "deepseek", model: "deepseek-v4-flash", reasoning: false },
+    "architecture.diagram_discussion": { provider: "deepseek", model: "deepseek-v4-flash", reasoning: false },
     "graph.node.explain": { provider: "deepseek", model: "deepseek-v4-flash", reasoning: false },
     "graph.edge.explain": { provider: "deepseek", model: "deepseek-v4-pro", reasoning: true, reasoningEffort: "medium" },
     "graph.node.plan": { provider: "deepseek", model: "deepseek-v4-pro", reasoning: true, reasoningEffort: "high" },
     "graph.edge.plan": { provider: "deepseek", model: "deepseek-v4-pro", reasoning: true, reasoningEffort: "high" },
     "coding.task.generate": { provider: "deepseek", model: "deepseek-v4-pro", reasoning: true, reasoningEffort: "high" },
     "memory.summarize": { provider: "deepseek", model: "deepseek-v4-flash", reasoning: false },
+    "review.finding_discussion": { provider: "deepseek", model: "deepseek-v4-flash", reasoning: false },
     "report.generate": { provider: "deepseek", model: "deepseek-v4-flash", reasoning: false }
   },
   agent: {
@@ -143,7 +180,7 @@ function applyIdeModelSettings(config: ModelRouterConfig, settingsJson: string |
         provider: stringValue(settings.piProvider) ?? config.agent?.pi?.provider ?? defaultPiAgentSettings.provider,
         model: stringValue(settings.piModel) ?? config.agent?.pi?.model ?? defaultPiAgentSettings.model,
         thinking: stringValue(settings.piThinking) ?? config.agent?.pi?.thinking ?? defaultPiAgentSettings.thinking,
-        tools: stringValue(settings.piTools) ?? config.agent?.pi?.tools ?? defaultPiAgentSettings.tools,
+        tools: normalizePiToolsSetting(settings.piTools) ?? config.agent?.pi?.tools ?? defaultPiAgentSettings.tools,
         codeGraph: booleanValue(settings.piCodeGraph) ?? config.agent?.pi?.codeGraph ?? defaultPiAgentSettings.codeGraph,
         allowRead: booleanValue(settings.piAllowRead) ?? config.agent?.pi?.allowRead ?? defaultPiAgentSettings.allowRead,
         allowShell: booleanValue(settings.piAllowShell) ?? config.agent?.pi?.allowShell ?? defaultPiAgentSettings.allowShell,
@@ -166,6 +203,10 @@ function applyIdeModelSettings(config: ModelRouterConfig, settingsJson: string |
     routes: {
       ...config.routes,
       "project.intake.analyze": routeWithModel(config.routes["project.intake.analyze"], settings.intakeModel),
+      "design.discovery.use_cases": routeWithTimeout(
+        routeWithModel(config.routes["design.discovery.use_cases"], settings.designDiscoveryModel),
+        settings.designDiscoveryTimeoutMs
+      ),
       "graph.node.explain": routeWithModel(config.routes["graph.node.explain"], settings.nodeExplainModel),
       "graph.edge.explain": routeWithModel(config.routes["graph.edge.explain"], settings.edgeExplainModel),
       "graph.edge.plan": routeWithModel(config.routes["graph.edge.plan"], settings.edgePlanModel),
@@ -179,6 +220,19 @@ function routeWithModel(route: ModelRoute, value: unknown): ModelRoute {
     ...route,
     model: stringValue(value) ?? route.model
   };
+}
+
+function routeWithTimeout(route: ModelRoute, value: unknown): ModelRoute {
+  return {
+    ...route,
+    timeoutMs: numberValue(value) ?? route.timeoutMs
+  };
+}
+
+function normalizePiToolsSetting(value: unknown): string | undefined {
+  const raw = stringValue(value);
+  if (!raw) return undefined;
+  return raw === legacyDefaultPiTools ? defaultPiAgentSettings.tools : raw;
 }
 
 function safeJsonRecord(value: string): Record<string, unknown> | undefined {

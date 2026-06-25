@@ -4,14 +4,15 @@
 
 Praxis does not treat graph files as truth.
 
-It projects memory, models, rules and trace into view cache.
+It projects normalized project documents, parsed models, migration mirrors and trace into view cache.
 That process needs an explicit engine contract.
 
 ```text
-memory + models + specs + rules + tasks + trace
+formatted project docs + Git timeline + parsed/mirrored runtime state + trace
       ↓
 ProjectionEngine
       ↓
+docs/**/*.html
 views/**/*.json
 views/**/*.mmd
 reports/*.md
@@ -29,16 +30,23 @@ The rendered graph is not the architecture truth.
 A report is not the durable decision record.
 Regenerating all views every time is allowed for bootstrap, but not a sufficient long-term contract.
 Projection status belongs to projection cache management, not to durable memory semantics.
+Design surfaces must not be sourced only from .distinction cache/views.
 ```
 
 ### 2.2 Valid Distinctions
 
 ```text
+formatted project documents
+  are the durable authority for design-facing surfaces
+
 memory / models / rules / confirmed specs
-  are the inputs of projection
+  provide migration-era mirrors, confirmation indexes, constraints and structured runtime state
 
 views / reports
   are deterministic outputs of projection
+
+semantic HTML under docs
+  is a docs-backed rich design document when it follows the Semantic Design HTML contract
 
 projection-manifest
   records output status and source indexes
@@ -50,6 +58,7 @@ projection-manifest
 Do not let AI write views directly.
 Do not make stale projections appear fresh.
 Do not hide sourceMemoryIds or sourceModelIds behind visual output.
+Do not build a design UI whose source cannot be maintained as a normalized project document.
 ```
 
 ---
@@ -59,6 +68,12 @@ Do not hide sourceMemoryIds or sourceModelIds behind visual output.
 Projection inputs may include:
 
 ```text
+docs/**/*.md
+docs/**/*.html
+adr/**/*.md
+rfcs/**/*.md
+architecture/**/*.md
+design/**/*.md
 .distinction/memory/*.jsonl
 .distinction/models/*.json
 .distinction/specs/**/*.md
@@ -70,6 +85,8 @@ Projection inputs may include:
 
 Bootstrap implementations may also read cache files for convenience, but cache must not replace durable inputs.
 
+For design-facing projections, project documents are the durable inputs. `.distinction/cache/**`, `.distinction/memory/**` and `.distinction/models/**` may be used only as rebuildable acceleration layers, parsed mirrors or migration fallbacks.
+
 ---
 
 ## 4. Outputs
@@ -77,14 +94,19 @@ Bootstrap implementations may also read cache files for convenience, but cache m
 Projection outputs may include:
 
 ```text
+docs/design/**/*.html
 .distinction/views/architecture/*.json
 .distinction/views/architecture/*.mmd
+.distinction/views/design/*.json
+.distinction/views/design/**/*.mmd
 .distinction/views/project-plan/*.json
 .distinction/views/memory/*.json
 .distinction/views/trace/*.json
 .distinction/reports/*.md
 .distinction/cache/projection-manifest.json
 ```
+
+Design-facing Semantic HTML under `docs/**` is not `.distinction` view cache. It is a rich project document. It must be generated or patched through governed agent/runtime writes and must follow `docs/specs/29-semantic-design-html.md`.
 
 v0.1 first implementation starts with:
 
@@ -114,6 +136,13 @@ export interface ProjectionViewRecord {
     | "architecture_component"
     | "architecture_context"
     | "uml_class"
+    | "design_use_case_list"
+    | "design_use_case"
+    | "design_activity"
+    | "design_sequence"
+    | "design_state_machine"
+    | "design_class_collaboration"
+    | "design_pattern_map"
     | "project_plan"
     | "memory_map"
     | "trace_graph"
@@ -138,6 +167,7 @@ export interface ProjectionViewRecord {
 
 `authority` tells consumers whether a view was projected from confirmed durable model state or from intake/review cache artifacts.
 `sourceCachePaths` is required whenever `authority` is `review_cache`, so Desktop and MCP clients can label the view as review-derived instead of confirmed architecture truth.
+`sourceSpecPaths` is required for docs-backed design surfaces, so Desktop and MCP clients can link each rendered design view back to the normalized document section that produced it.
 
 ---
 
@@ -150,7 +180,7 @@ memory changed
   -> invalidate dependent memory / architecture / plan / trace views
 
 model changed
-  -> invalidate dependent architecture / UML / plan views
+  -> invalidate dependent design / architecture / UML / plan views
 
 finding changed
   -> invalidate annotation-bearing views and quality inbox
@@ -162,7 +192,7 @@ trace changed
   -> invalidate trace views and any runtime-linked projection surfaces
 
 spec changed
-  -> invalidate spec-backed plan / architecture / coverage views
+  -> invalidate spec-backed design / plan / architecture / coverage views
 ```
 
 The engine may initially over-invalidate.
@@ -209,7 +239,9 @@ Expected behavior:
 updates manifest status
 writes view files
 marks failed views with explicit error
-never writes durable memory as a side effect of projection
+never writes durable project memory as a side effect of projection
+never treats `.distinction` output as durable project memory
+never mutates Semantic HTML outside governed managed blocks unless the user requested full regeneration
 ```
 
 ---
@@ -224,4 +256,8 @@ The projection engine contract is implemented when:
 3. Views expose fresh / stale / regenerating / failed state.
 4. Memory/model/task/trace changes can invalidate affected views.
 5. Projection cache remains rebuildable and non-authoritative.
+6. Design-facing views can be rebuilt from formatted, normalized and complete project documents.
+7. A design-facing view without a document source is labeled migration/cache-derived and cannot be presented as durable design authority.
+8. Projection can run after deleting rebuildable `.distinction/cache/**` and `.distinction/views/**` when the normalized docs still exist.
+9. Design-facing Semantic HTML can be generated from the same source model as Markdown and can be rendered by Design Explorer.
 ```

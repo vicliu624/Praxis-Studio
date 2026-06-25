@@ -2,23 +2,25 @@ import { useEffect, useState } from "react";
 import { HomePage } from "./pages/HomePage";
 import { ProjectIntakeReviewPage } from "./pages/ProjectIntakeReviewPage";
 import { CreateProjectWizardPage } from "./pages/CreateProjectWizardPage";
-import { DevelopmentGraphWorkspacePage } from "./pages/DevelopmentGraphWorkspacePage";
 import { AgentWorkspacePage } from "./pages/AgentWorkspacePage";
 import { ModelSettingsPage } from "./pages/ModelSettingsPage";
 import { ReviewQueuePage } from "./pages/ReviewQueuePage";
-import { ProjectedGraphInspectorPage } from "./pages/ProjectedGraphInspectorPage";
+import { ModelExplorerPage } from "./pages/ModelExplorerPage";
+import { DesignExplorerPage } from "./pages/DesignExplorerPage";
+import { EngineeringExplorerPage } from "./pages/EngineeringExplorerPage";
+import { ArchitectureExplorerPage } from "./pages/ArchitectureExplorerPage";
+import { ProjectPlanPage } from "./pages/ProjectPlanPage";
 import { type AppRoute, routes } from "./routes";
 import { I18nProvider, type TranslationKey, useI18n } from "./i18n";
 import {
   openProjectDialog,
-  readGraph,
+  readStartupContext,
   readRecentProjects,
   recordRecentProject,
-  type RecentProject,
-  type RuntimeGraphAnchor,
-  type RuntimeGraph,
-  type RuntimeIntakeResult
+  type RecentProject
 } from "./runtimeClient";
+
+const praxisLogoNavMarkUrl = new URL("./assets/praxis-logo-nav-mark.svg", import.meta.url).href;
 
 export function App() {
   return (
@@ -31,60 +33,64 @@ export function App() {
 function AppContent() {
   const [route, setRoute] = useState<AppRoute>("home");
   const [projectRoot, setProjectRoot] = useState("");
-  const [intakeResult, setIntakeResult] = useState<RuntimeIntakeResult | null>(null);
-  const [graph, setGraph] = useState<RuntimeGraph | null>(null);
-  const [autoIntakeToken, setAutoIntakeToken] = useState(0);
   const [recentProjects, setRecentProjects] = useState<RecentProject[]>([]);
-  const [projectionFocus, setProjectionFocus] = useState<{ anchor: RuntimeGraphAnchor; token: number } | null>(null);
   const [reviewFocus, setReviewFocus] = useState<{ findingId: string; token: number } | null>(null);
   const [assistantDraft, setAssistantDraft] = useState<{ text: string; mode: "explain" | "plan"; token: number } | null>(null);
   const { locale, setLocale, t } = useI18n();
 
   useEffect(() => {
     void refreshRecentProjects();
+    void applyStartupContext();
   }, []);
+
+  function changeProjectRoot(root: string) {
+    const normalizedRoot = root.trim();
+    setProjectRoot(normalizedRoot);
+    setReviewFocus(null);
+    setAssistantDraft(null);
+  }
+
+  async function recordActiveProject(root: string) {
+    if (!root.trim()) return;
+    setRecentProjects(await recordRecentProject(root).catch(() => recentProjects));
+  }
 
   async function refreshRecentProjects() {
     const projects = await readRecentProjects().catch(() => []);
     setRecentProjects(projects);
   }
 
+  async function applyStartupContext() {
+    const startup = await readStartupContext().catch(() => null);
+    if (!startup) return;
+    if (startup.projectRoot) {
+      changeProjectRoot(startup.projectRoot);
+      await recordActiveProject(startup.projectRoot);
+    }
+    if (startup.route && isAppRoute(startup.route)) {
+      setRoute(startup.route);
+    }
+  }
+
   async function openExistingProject() {
     const selectedRoot = await openProjectDialog(t("home.openExisting"));
     if (selectedRoot) {
-      setProjectRoot(selectedRoot);
-      setIntakeResult(null);
-      setGraph(null);
-      setAutoIntakeToken(Date.now());
-    }
-    setRoute("project-intake");
-  }
-
-  async function openRecentProject(root: string) {
-    setProjectRoot(root);
-    setIntakeResult(null);
-    try {
-      const loadedGraph = await readGraph(root);
-      setGraph(loadedGraph);
-      setRecentProjects(await recordRecentProject(root).catch(() => recentProjects));
-      setRoute("agent-workspace");
-    } catch {
-      setGraph(null);
-      setAutoIntakeToken(Date.now());
+      changeProjectRoot(selectedRoot);
+      await recordActiveProject(selectedRoot);
       setRoute("project-intake");
     }
   }
 
-  async function finishProjectOpen(root: string, acceptedGraph: RuntimeGraph) {
-    setProjectRoot(root);
-    setGraph(acceptedGraph);
-    setRecentProjects(await recordRecentProject(root).catch(() => recentProjects));
-    setRoute("agent-workspace");
+  async function openRecentProject(root: string) {
+    changeProjectRoot(root);
+    await recordActiveProject(root);
+    setRoute("project-intake");
   }
 
-  function openProjectionAnchor(anchor: RuntimeGraphAnchor) {
-    setProjectionFocus({ anchor, token: Date.now() });
-    setRoute("projection-inspector");
+  async function finishProjectOpen(root: string, _acceptedGraph: unknown) {
+    changeProjectRoot(root);
+    await recordActiveProject(root);
+    setRoute("agent-workspace");
   }
 
   function openReviewFinding(findingId: string) {
@@ -101,12 +107,19 @@ function AppContent() {
     <main className="app-shell">
       <header className="app-header">
         <button className="brand-button" type="button" onClick={() => setRoute("home")}>
-          <span className="brand-mark">P</span>
+          <span className="brand-mark" aria-hidden="true">
+            <img className="brand-mark-image" src={praxisLogoNavMarkUrl} alt="" />
+          </span>
           <span>
             <strong>Praxis Studio</strong>
             <small>v0.1</small>
           </span>
         </button>
+        {projectRoot ? (
+          <span className="header-project-chip" title={projectRoot}>
+            {projectNameFromRoot(projectRoot)}
+          </span>
+        ) : null}
         <nav className="top-nav" aria-label={t("app.primaryNav")}>
           {routes.map((item) => (
             <button
@@ -130,16 +143,21 @@ function AppContent() {
 
       <section
         className={
-          route === "agent-workspace" || route === "projection-inspector" || route === "graph-workspace"
+          route === "agent-workspace"
+          || route === "project-plan"
+          || route === "model-explorer"
+          || route === "design-explorer"
+          || route === "engineering-explorer"
+          || route === "architecture-explorer"
             ? "app-content app-content-fill"
             : "app-content app-content-scroll"
         }
       >
         {route === "home" ? (
           <HomePage
+            projectRoot={projectRoot}
             onOpenExistingProject={openExistingProject}
             onCreateNewProject={() => setRoute("create-project")}
-            onOpenGraphWorkspace={() => setRoute("agent-workspace")}
             onOpenModelSettings={() => setRoute("model-settings")}
             recentProjects={recentProjects}
             onRefreshRecentProjects={refreshRecentProjects}
@@ -149,17 +167,6 @@ function AppContent() {
         {route === "project-intake" ? (
           <ProjectIntakeReviewPage
             projectRoot={projectRoot}
-            intakeResult={intakeResult}
-            onProjectRootChange={(root) => {
-              setProjectRoot(root);
-              setIntakeResult(null);
-            }}
-            onIntakeResult={setIntakeResult}
-            autoIntakeToken={autoIntakeToken}
-            onGraphAccepted={(acceptedGraph) => {
-              void finishProjectOpen(projectRoot, acceptedGraph);
-            }}
-            onFoundationAccepted={() => setRoute("projection-inspector")}
           />
         ) : null}
         {route === "create-project" ? (
@@ -176,7 +183,7 @@ function AppContent() {
             onDraftConsumed={(token) => {
               setAssistantDraft((current) => current?.token === token ? null : current);
             }}
-            onNavigateToGraph={() => setRoute("graph-workspace")}
+            onNavigateToPlan={() => setRoute("project-plan")}
             onNavigateToSettings={() => setRoute("model-settings")}
             onNavigateHome={() => setRoute("home")}
           />
@@ -184,30 +191,40 @@ function AppContent() {
         {route === "review-queue" ? (
           <ReviewQueuePage
             projectRoot={projectRoot}
-            onProjectRootChange={setProjectRoot}
+            onProjectRootChange={changeProjectRoot}
             focusFindingId={reviewFocus?.findingId}
             focusToken={reviewFocus?.token}
-            onOpenProjectionAnchor={openProjectionAnchor}
-            onOpenAssistantDraft={openAssistantDraft}
           />
         ) : null}
-        {route === "projection-inspector" ? (
-          <ProjectedGraphInspectorPage
+        {route === "model-explorer" ? (
+          <ModelExplorerPage
             projectRoot={projectRoot}
-            onProjectRootChange={setProjectRoot}
-            focusAnchor={projectionFocus?.anchor}
-            focusToken={projectionFocus?.token}
-            onOpenReviewFinding={openReviewFinding}
-            onOpenAssistantDraft={openAssistantDraft}
           />
         ) : null}
-        {route === "graph-workspace" ? (
-          <DevelopmentGraphWorkspacePage
+        {route === "design-explorer" ? (
+          <DesignExplorerPage
             projectRoot={projectRoot}
-            graph={graph}
-            onGraphLoaded={setGraph}
-            onProjectRootChange={setProjectRoot}
-            onOpenAssistantDraft={openAssistantDraft}
+            onProjectRootChange={changeProjectRoot}
+            onOpenEngineeringViews={() => setRoute("architecture-explorer")}
+          />
+        ) : null}
+        {route === "engineering-explorer" ? (
+          <EngineeringExplorerPage
+            projectRoot={projectRoot}
+            onProjectRootChange={changeProjectRoot}
+            onOpenDesignExplorer={() => setRoute("design-explorer")}
+          />
+        ) : null}
+        {route === "architecture-explorer" ? (
+          <ArchitectureExplorerPage
+            projectRoot={projectRoot}
+            onOpenDesignExplorer={() => setRoute("design-explorer")}
+            onOpenEngineeringExplorer={() => setRoute("engineering-explorer")}
+          />
+        ) : null}
+        {route === "project-plan" ? (
+          <ProjectPlanPage
+            projectRoot={projectRoot}
           />
         ) : null}
         {route === "model-settings" ? <ModelSettingsPage projectRoot={projectRoot} /> : null}
@@ -221,8 +238,27 @@ const routeLabelKeys: Record<AppRoute, TranslationKey> = {
   "project-intake": "route.projectIntake",
   "create-project": "route.createProject",
   "agent-workspace": "route.agentWorkspace",
+  "model-explorer": "route.modelExplorer",
+  "design-explorer": "route.designExplorer",
+  "engineering-explorer": "route.engineeringExplorer",
+  "architecture-explorer": "route.architectureExplorer",
   "review-queue": "route.reviewQueue",
-  "projection-inspector": "route.projectionInspector",
-  "graph-workspace": "route.graphWorkspace",
+  "project-plan": "route.projectPlan",
   "model-settings": "route.modelSettings"
 };
+
+function projectNameFromRoot(root: string): string {
+  const normalized = normalizeProjectRootForUi(root).replace(/[\\/]+$/, "");
+  const parts = normalized.split(/[\\/]/).filter(Boolean);
+  return parts[parts.length - 1] ?? "Project";
+}
+
+function isAppRoute(value: string): value is AppRoute {
+  return routes.some((route) => route.id === value);
+}
+
+function normalizeProjectRootForUi(root: string): string {
+  if (root.startsWith("\\\\?\\UNC\\")) return `\\\\${root.slice("\\\\?\\UNC\\".length)}`;
+  if (root.startsWith("\\\\?\\")) return root.slice("\\\\?\\".length);
+  return root;
+}

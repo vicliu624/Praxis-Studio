@@ -27,7 +27,7 @@ runtime -> file system
 runtime -> Desktop UI
 runtime -> MCP client
 provider -> core normalization layer
-cache -> durable memory
+cache -> docs-backed Project Memory / transition mirror
 ```
 
 Purely internal helper objects may remain package-local.
@@ -164,7 +164,7 @@ ProjectionManifestSchema
 ```
 
 These schemas have minimal JSON fixtures and round-trip tests.
-The remaining governed structures, especially durable memory/task/context packet shapes, still require Zod schemas, fixtures and round-trip tests before the full schema contract is complete.
+The remaining governed structures, especially docs-backed memory, transition mirror, task and context packet shapes, still require Zod schemas, fixtures and round-trip tests before the full schema contract is complete.
 
 ---
 
@@ -199,9 +199,22 @@ timestamp string presence where required
 cross-reference shape sanity
 knowledge kind constraints
 source evidence presence where required
+Use Case drilldown coverage shape
 ```
 
 Additional semantic validation may live outside Zod, but shape validation must live in the shared schema package.
+
+Use Case drilldown diagrams must include a required coverage object:
+
+```text
+scenario
+coveredUseCaseFlows
+boundary
+notCovered
+rationale
+```
+
+The coverage object is required because drilldown UML quality is judged by explanatory coverage, not by the mere existence of Activity, Sequence, State Machine or Class / Structural Collaboration diagrams.
 
 Examples:
 

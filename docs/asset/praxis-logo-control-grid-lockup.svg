@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 180" role="img" aria-labelledby="title desc">
+  <title id="title">Praxis Studio control grid logo lockup</title>
+  <desc id="desc">Praxis Studio wordmark with an ordered project memory control grid mark.</desc>
+  <g transform="translate(14 18) scale(0.5625)">
+    <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+      <path
+        d="M62 74V182M62 74H98M62 128H98M62 182H98M184 74H206V182H184"
+        stroke="#0C1116"
+        stroke-width="34"
+      />
+      <path
+        d="M62 74V182M62 74H98M62 128H98M62 182H98M184 74H206V182H184"
+        stroke="#E7A23C"
+        stroke-width="18"
+      />
+    </g>
+    <rect x="96" y="70" width="88" height="116" rx="14" fill="#111820" stroke="#263241" stroke-width="8" />
+    <g fill="none" stroke-linecap="round">
+      <path d="M116 104H164" stroke="#EDF2F7" stroke-width="7" />
+      <path d="M116 128H164" stroke="#6EE7D8" stroke-width="7" />
+      <path d="M116 152H150" stroke="#8EA0B5" stroke-width="7" />
+    </g>
+    <g>
+      <circle cx="62" cy="74" r="23" fill="#0C1116" />
+      <circle cx="62" cy="74" r="13" fill="#6EE7D8" />
+      <circle cx="62" cy="128" r="23" fill="#0C1116" />
+      <circle cx="62" cy="128" r="13" fill="#6EE7D8" />
+      <circle cx="62" cy="182" r="23" fill="#0C1116" />
+      <circle cx="62" cy="182" r="13" fill="#6EE7D8" />
+      <circle cx="206" cy="128" r="16" fill="#0C1116" />
+      <circle cx="206" cy="128" r="8" fill="#E7A23C" />
+    </g>
+  </g>
+  <text
+    x="170"
+    y="78"
+    fill="#EDF2F7"
+    font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif"
+    font-size="52"
+    font-weight="780"
+    letter-spacing="0"
+  >Praxis</text>
+  <text
+    x="170"
+    y="126"
+    fill="#8EA0B5"
+    font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif"
+    font-size="38"
+    font-weight="560"
+    letter-spacing="0"
+  >Studio</text>
+  <path d="M386 113h118" stroke="#263241" stroke-width="2" stroke-linecap="round" />
+  <circle cx="524" cy="113" r="6" fill="#6EE7D8" />
+  <circle cx="548" cy="113" r="6" fill="#E7A23C" />
+</svg>

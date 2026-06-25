@@ -38,7 +38,7 @@ export interface ReviewEvaluatorRef {
   name: string;
   category: ReviewCategory;
   prompt: string;
-  source: "praxis-heuristic" | "pi-agent" | "hybrid";
+  source: "praxis-heuristic" | "agent" | "pi-agent" | "hybrid";
 }
 
 export interface ReviewEvidenceRef {
@@ -76,7 +76,7 @@ export interface ReviewRun {
   id: string;
   root: string;
   generatedAt: string;
-  source: "praxis-heuristic" | "pi-agent" | "hybrid";
+  source: "praxis-heuristic" | "agent" | "pi-agent" | "hybrid";
   status: "completed" | "partial" | "failed";
   categories: ReviewCategory[];
   findingIds: string[];

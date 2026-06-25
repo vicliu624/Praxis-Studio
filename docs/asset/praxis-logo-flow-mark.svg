@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">Praxis Studio flow mark</title>
+  <desc id="desc">A governed amber development path connecting cyan memory nodes around a structured project memory core.</desc>
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path
+      d="M58 166C69 107 101 70 140 63C180 56 207 88 199 126C191 164 153 187 106 178C85 174 69 170 58 166"
+      stroke="#0C1116"
+      stroke-width="44"
+    />
+    <path
+      d="M58 166C69 107 101 70 140 63C180 56 207 88 199 126C191 164 153 187 106 178C85 174 69 170 58 166"
+      stroke="#E7A23C"
+      stroke-width="28"
+    />
+  </g>
+  <path
+    d="M101 88H151L182 121L151 154H101L70 121Z"
+    fill="#111820"
+    stroke="#263241"
+    stroke-width="8"
+    stroke-linejoin="round"
+  />
+  <g fill="none" stroke-linecap="round">
+    <path d="M95 111H145" stroke="#EDF2F7" stroke-width="7" />
+    <path d="M102 124H160" stroke="#6EE7D8" stroke-width="7" />
+    <path d="M95 137H137" stroke="#8EA0B5" stroke-width="7" />
+  </g>
+  <g>
+    <circle cx="140" cy="63" r="24" fill="#0C1116" />
+    <circle cx="140" cy="63" r="13" fill="#6EE7D8" />
+    <circle cx="199" cy="126" r="24" fill="#0C1116" />
+    <circle cx="199" cy="126" r="13" fill="#6EE7D8" />
+    <circle cx="58" cy="166" r="24" fill="#0C1116" />
+    <circle cx="58" cy="166" r="13" fill="#6EE7D8" />
+    <circle cx="106" cy="178" r="15" fill="#0C1116" />
+    <circle cx="106" cy="178" r="8" fill="#E7A23C" />
+  </g>
+</svg>

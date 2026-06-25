@@ -18,6 +18,7 @@
     "tauri:build": "npm run package:desktop",
     "package:desktop": "npm run build:packages && npm run build -w @praxis/runtime-cli && npm run tauri:build -w @praxis/studio-desktop",
     "package:desktop:windows": "node scripts/package-desktop-windows.mjs",
+    "package:desktop:macos": "node scripts/package-desktop-macos.mjs",
     "package:desktop:debug": "npm run build:packages && npm run build -w @praxis/runtime-cli && npm run tauri:build:debug -w @praxis/studio-desktop",
     "dist:desktop": "npm run package:desktop",
     "test:schemas": "npm run test:roundtrip -w @praxis/schema",

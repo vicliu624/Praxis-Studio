@@ -14,6 +14,7 @@ import type {
   CodeFactNode,
   ContextPacket,
   GraphAnchor,
+  InteractionModelCandidate,
   MemoryRecord,
   ProjectArchitectureDependencyViewInput,
   ProjectedGraphAnnotation,
@@ -106,6 +107,14 @@ export interface ProjectContextGraphViewInput {
   generatedAt?: string;
   authority?: "review_cache" | "durable_model";
   sourceCachePaths?: string[];
+}
+
+export interface ProjectDesignUseCaseViewsInput {
+  model: InteractionModelCandidate;
+  generatedAt?: string;
+  authority?: "review_cache" | "durable_model";
+  sourceCachePaths?: string[];
+  sourceSpecPaths?: string[];
 }
 
 export function projectArchitectureDependencyView(input: ProjectArchitectureDependencyViewInput): ArchitectureDependencyView {
@@ -618,6 +627,539 @@ export function projectContextGraphView(input: ProjectContextGraphViewInput): Pr
     sourceSpecPaths: [],
     status: "fresh"
   };
+}
+
+export function projectDesignUseCaseListView(input: ProjectDesignUseCaseViewsInput): ProjectedGraphView {
+  return projectDesignUseCaseView(input, {
+    id: "view:design:use-case-list",
+    kind: "design_use_case_list",
+    contextId: undefined
+  });
+}
+
+export function projectDesignUseCaseGraphViews(input: ProjectDesignUseCaseViewsInput): ProjectedGraphView[] {
+  return input.model.contexts.filter((context) => hasUseCaseInContextScope(input.model, context.id)).map((context) =>
+    projectDesignUseCaseView(input, {
+      id: `view:design:use-case:${context.id}`,
+      kind: "design_use_case",
+      contextId: context.id
+    })
+  );
+}
+
+export function renderUseCaseDiagramMermaid(model: InteractionModelCandidate, contextId?: string): string {
+  const contextById = new Map(model.contexts.map((context) => [context.id, context]));
+  const scopeContextIds = contextId ? designContextScopeIds(model, contextId) : new Set(model.contexts.map((context) => context.id));
+  const useCases = contextId ? model.useCases.filter((useCase) => scopeContextIds.has(useCase.contextId)) : model.useCases;
+  const useCaseIds = new Set(useCases.map((useCase) => useCase.id));
+  const actorIds = new Set(useCases.flatMap((useCase) => [...useCase.primaryActorIds, ...useCase.supportingActorIds]));
+  const externalSystemIds = new Set(useCases.flatMap((useCase) => useCase.externalSystemIds));
+  const lines = ["flowchart LR"];
+  const childrenByContext = designContextChildrenByParent(model);
+  const visibleContextIds = new Set<string>();
+  for (const useCase of useCases) {
+    visibleContextIds.add(useCase.contextId);
+    for (const ancestorId of designContextAncestorIds(model, useCase.contextId)) visibleContextIds.add(ancestorId);
+  }
+  if (contextId) {
+    visibleContextIds.add(contextId);
+    for (const ancestorId of designContextAncestorIds(model, contextId)) visibleContextIds.add(ancestorId);
+  }
+  const useCasesByContext = groupBy(useCases, (useCase) => useCase.contextId);
+
+  for (const actor of model.actors.filter((item) => actorIds.has(item.id))) {
+    lines.push(`  ${mermaidId("actor", actor.id)}["${mermaidLabel(`&laquo;Actor&raquo;<br/>${actor.title}`)}"]`);
+  }
+  for (const external of model.externalSystems.filter((item) => externalSystemIds.has(item.id))) {
+    lines.push(`  ${mermaidId("external", external.id)}["${mermaidLabel(`&laquo;External System&raquo;<br/>${external.title}`)}"]`);
+  }
+  const rootContextIds = contextId
+    ? [designTopContextId(model, contextId)]
+    : model.contexts.filter((context) => !context.parentContextId).map((context) => context.id);
+  for (const rootContextId of unique(rootContextIds).filter((id) => visibleContextIds.has(id) && contextById.has(id))) {
+    renderUseCaseContextBoundary({
+      lines,
+      contextId: rootContextId,
+      contextById,
+      childrenByContext,
+      visibleContextIds,
+      useCasesByContext,
+      depth: 1
+    });
+  }
+  for (const [currentContextId, contextUseCases] of useCasesByContext) {
+    if (contextById.has(currentContextId)) continue;
+    const boundaryId = mermaidId("system", currentContextId || "boundary");
+    lines.push(`  subgraph ${boundaryId}["${mermaidLabel(currentContextId || "System Boundary")}"]`);
+    for (const useCase of contextUseCases) {
+      lines.push(`    ${mermaidId("useCase", useCase.id)}(["${mermaidLabel(useCase.title)}"])`);
+    }
+    lines.push("  end");
+  }
+  for (const useCase of useCases) {
+    for (const actorId of useCase.primaryActorIds) {
+      if (actorIds.has(actorId)) lines.push(`  ${mermaidId("actor", actorId)} --- ${mermaidId("useCase", useCase.id)}`);
+    }
+    for (const actorId of useCase.supportingActorIds) {
+      if (actorIds.has(actorId)) lines.push(`  ${mermaidId("actor", actorId)} --- ${mermaidId("useCase", useCase.id)}`);
+    }
+    for (const externalId of useCase.externalSystemIds) {
+      if (externalSystemIds.has(externalId)) lines.push(`  ${mermaidId("external", externalId)} --- ${mermaidId("useCase", useCase.id)}`);
+    }
+  }
+  for (const relation of model.relations) {
+    if (!useCaseIds.has(relation.sourceId) || !useCaseIds.has(relation.targetId)) continue;
+    lines.push(`  ${mermaidId("useCase", relation.sourceId)} ${useCaseRelationArrow(relation.kind)} ${mermaidId("useCase", relation.targetId)}`);
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+function renderUseCaseContextBoundary(input: {
+  lines: string[];
+  contextId: string;
+  contextById: Map<string, InteractionModelCandidate["contexts"][number]>;
+  childrenByContext: Map<string, string[]>;
+  visibleContextIds: Set<string>;
+  useCasesByContext: Map<string, InteractionModelCandidate["useCases"]>;
+  depth: number;
+}): void {
+  const context = input.contextById.get(input.contextId);
+  if (!context) return;
+  const contextUseCases = input.useCasesByContext.get(input.contextId) ?? [];
+  const childIds = (input.childrenByContext.get(input.contextId) ?? [])
+    .filter((childId) => input.visibleContextIds.has(childId) && hasVisibleUseCaseInSubtree(childId, input.childrenByContext, input.useCasesByContext));
+  if (!contextUseCases.length && !childIds.length) return;
+  const indent = "  ".repeat(input.depth);
+  input.lines.push(`${indent}subgraph ${mermaidId("system", input.contextId)}["${mermaidLabel(context.title)}"]`);
+  for (const childId of childIds) {
+    renderUseCaseContextBoundary({ ...input, contextId: childId, depth: input.depth + 1 });
+  }
+  for (const useCase of contextUseCases) {
+    input.lines.push(`${indent}  ${mermaidId("useCase", useCase.id)}(["${mermaidLabel(useCase.title)}"])`);
+  }
+  input.lines.push(`${indent}end`);
+}
+
+function hasVisibleUseCaseInSubtree(
+  contextId: string,
+  childrenByContext: Map<string, string[]>,
+  useCasesByContext: Map<string, InteractionModelCandidate["useCases"]>
+): boolean {
+  if ((useCasesByContext.get(contextId) ?? []).length) return true;
+  return (childrenByContext.get(contextId) ?? []).some((childId) => hasVisibleUseCaseInSubtree(childId, childrenByContext, useCasesByContext));
+}
+
+function useCaseRelationArrow(kind: InteractionModelCandidate["relations"][number]["kind"]): string {
+  if (kind === "includes") return `-.->|${mermaidLabel("&laquo;include&raquo;")}|`;
+  if (kind === "extends") return `-.->|${mermaidLabel("&laquo;extend&raquo;")}|`;
+  if (kind === "depends_on") return `-.->|${mermaidLabel("depends on")}|`;
+  if (kind === "triggers") return `-.->|${mermaidLabel("triggers")}|`;
+  if (kind === "conflicts_with") return `-.->|${mermaidLabel("conflicts")}|`;
+  if (kind === "out_of_scope_for") return `-.->|${mermaidLabel("out of scope")}|`;
+  return `---|${mermaidLabel(kind)}|`;
+}
+
+function projectDesignUseCaseView(
+  input: ProjectDesignUseCaseViewsInput,
+  options: { id: string; kind: "design_use_case_list" | "design_use_case"; contextId?: string }
+): ProjectedGraphView {
+  const generatedAt = input.generatedAt ?? new Date().toISOString();
+  const model = input.model;
+  const scopedContextIds = options.contextId ? designContextScopeIds(model, options.contextId) : new Set(model.contexts.map((context) => context.id));
+  const visibleContextIds = new Set(scopedContextIds);
+  for (const contextId of Array.from(scopedContextIds)) {
+    for (const ancestorId of designContextAncestorIds(model, contextId)) visibleContextIds.add(ancestorId);
+  }
+  const contexts = model.contexts.filter((context) => visibleContextIds.has(context.id));
+  const useCases = model.useCases.filter((useCase) => scopedContextIds.has(useCase.contextId));
+  const contextIds = new Set(contexts.map((context) => context.id));
+  const useCaseIds = new Set(useCases.map((useCase) => useCase.id));
+  const actorIds = new Set(useCases.flatMap((useCase) => [...useCase.primaryActorIds, ...useCase.supportingActorIds]));
+  const externalSystemIds = new Set(useCases.flatMap((useCase) => useCase.externalSystemIds));
+  const actors = model.actors.filter((actor) => actorIds.has(actor.id));
+  const externalSystems = model.externalSystems.filter((external) => externalSystemIds.has(external.id));
+  const relationCandidates = model.relations.filter((relation) => useCaseIds.has(relation.sourceId) && useCaseIds.has(relation.targetId));
+  const drilldownCandidates = model.useCaseDrilldowns.filter((diagram) => useCaseIds.has(diagram.useCaseId));
+
+  const nodes: ProjectedGraphNode[] = [
+    ...contexts.map((context) => ({
+      id: designNodeId("context", context.id),
+      kind: "design_context",
+      label: context.title,
+      source: { type: "model" as const, id: context.id },
+      anchor: { kind: "design_context" as const, id: context.id },
+      summary: context.summary,
+      status: context.status,
+      metadata: {
+        ...designMetadata(context),
+        contextKind: context.kind,
+        parentContextId: context.parentContextId,
+        scope: context.scope,
+        responsibility: context.responsibility,
+        businessTerms: context.businessTerms
+      }
+    })),
+    ...actors.map((actor) => ({
+      id: designNodeId("actor", actor.id),
+      kind: "design_actor",
+      label: actor.title,
+      source: { type: "model" as const, id: actor.id },
+      anchor: { kind: "design_actor" as const, id: actor.id },
+      summary: actor.summary,
+      status: actor.status,
+      metadata: { ...designMetadata(actor), actorType: actor.type }
+    })),
+    ...externalSystems.map((external) => ({
+      id: designNodeId("external-system", external.id),
+      kind: "design_external_system",
+      label: external.title,
+      source: { type: "model" as const, id: external.id },
+      anchor: { kind: "design_external_system" as const, id: external.id },
+      summary: external.summary,
+      status: external.status,
+      metadata: designMetadata(external)
+    })),
+    ...useCases.map((useCase) => ({
+      id: designNodeId("use-case", useCase.id),
+      kind: "design_use_case",
+      label: useCase.title,
+      source: { type: "model" as const, id: useCase.id },
+      anchor: { kind: "design_use_case" as const, id: useCase.id },
+      summary: useCase.summary,
+      status: useCase.status,
+      metadata: {
+        ...designMetadata(useCase),
+        contextId: useCase.contextId,
+        trigger: useCase.trigger,
+        primaryActorIds: useCase.primaryActorIds,
+        supportingActorIds: useCase.supportingActorIds,
+        externalSystemIds: useCase.externalSystemIds,
+        entryPointIds: useCase.entryPointIds
+      }
+    })),
+    ...drilldownCandidates.map((diagram) => ({
+      id: designNodeId(designDrilldownNodeKind(diagram.kind), diagram.id),
+      kind: designDrilldownGraphKind(diagram.kind),
+      label: diagram.title,
+      source: { type: "model" as const, id: diagram.id },
+      anchor: { kind: designDrilldownAnchorKind(diagram.kind), id: diagram.id },
+      summary: diagram.summary,
+      status: diagram.status,
+      metadata: {
+        ...designMetadata(diagram),
+        useCaseId: diagram.useCaseId,
+        diagramKind: diagram.kind,
+        coverage: diagram.coverage,
+        coverageScenario: diagram.coverage.scenario,
+        coverageBoundary: diagram.coverage.boundary,
+        coverageRationale: diagram.coverage.rationale,
+        coveredUseCaseFlows: diagram.coverage.coveredUseCaseFlows,
+        notCovered: diagram.coverage.notCovered,
+        implementationScope: diagram.coverage.implementationScope,
+        explanation: diagram.explanation,
+        markdownPath: designDrilldownMarkdownPath(diagram),
+        htmlPath: designDrilldownHtmlPath(diagram)
+      }
+    }))
+  ];
+  const edges: ProjectedGraphEdge[] = [];
+
+  for (const context of contexts) {
+    if (!context.parentContextId || !contextIds.has(context.parentContextId)) continue;
+    edges.push({
+      id: designEdgeId("context-contains", `${context.parentContextId}:${context.id}`),
+      kind: "contains",
+      sourceId: designNodeId("context", context.parentContextId),
+      targetId: designNodeId("context", context.id),
+      source: { type: "model", id: context.id },
+      anchor: { kind: "design_context", id: context.id },
+      confidence: context.confidence,
+      summary: `${context.parentContextId} contains ${context.title}`,
+      metadata: { contextKind: context.kind }
+    });
+  }
+
+  for (const useCase of useCases) {
+    if (contextIds.has(useCase.contextId)) {
+      edges.push({
+        id: designEdgeId("context-contains", `${useCase.contextId}:${useCase.id}`),
+        kind: "contains",
+        sourceId: designNodeId("context", useCase.contextId),
+        targetId: designNodeId("use-case", useCase.id),
+        source: { type: "model", id: useCase.id },
+        anchor: { kind: "design_use_case", id: useCase.id },
+        confidence: useCase.confidence,
+        summary: `${useCase.contextId} contains ${useCase.title}`
+      });
+    }
+    for (const actorId of useCase.primaryActorIds) {
+      if (!actorIds.has(actorId)) continue;
+      edges.push(designParticipationEdge(actorId, useCase, "primary_actor"));
+    }
+    for (const actorId of useCase.supportingActorIds) {
+      if (!actorIds.has(actorId)) continue;
+      edges.push(designParticipationEdge(actorId, useCase, "supporting_actor"));
+    }
+    for (const externalSystemId of useCase.externalSystemIds) {
+      if (!externalSystemIds.has(externalSystemId)) continue;
+      edges.push({
+        id: designEdgeId("external-system-participates", `${externalSystemId}:${useCase.id}`),
+        kind: "external_system_participates",
+        sourceId: designNodeId("external-system", externalSystemId),
+        targetId: designNodeId("use-case", useCase.id),
+        source: { type: "model", id: useCase.id },
+        anchor: { kind: "design_use_case", id: useCase.id },
+        confidence: useCase.confidence,
+        summary: `${externalSystemId} participates in ${useCase.title}`,
+        metadata: { participation: "external_system" }
+      });
+    }
+  }
+
+  for (const relation of relationCandidates) {
+    edges.push({
+      id: designEdgeId("relation", relation.id),
+      kind: relation.kind,
+      sourceId: designNodeId("use-case", relation.sourceId),
+      targetId: designNodeId("use-case", relation.targetId),
+      source: { type: "model", id: relation.id },
+      anchor: { kind: "design_use_case", id: relation.sourceId },
+      confidence: relation.confidence,
+      summary: relation.summary,
+      metadata: designMetadata(relation)
+    });
+  }
+
+  for (const diagram of drilldownCandidates) {
+    edges.push({
+      id: designEdgeId("use-case-drilldown", `${diagram.useCaseId}:${diagram.id}`),
+      kind: "drilldown",
+      sourceId: designNodeId("use-case", diagram.useCaseId),
+      targetId: designNodeId(designDrilldownNodeKind(diagram.kind), diagram.id),
+      source: { type: "model", id: diagram.id },
+      anchor: { kind: designDrilldownAnchorKind(diagram.kind), id: diagram.id },
+      confidence: diagram.confidence,
+      summary: diagram.summary,
+      metadata: {
+        useCaseId: diagram.useCaseId,
+        diagramKind: diagram.kind
+      }
+    });
+  }
+
+  const annotations = model.questions.map((question) => ({
+    id: `annotation:${question.id}`,
+    kind: "design_question",
+    targetNodeIds: question.targetId ? [designTargetNodeId(question.targetId)].filter(Boolean) : [],
+    targetEdgeIds: [],
+    severity: designQuestionSeverity(question.severity),
+    status: "open",
+    summary: question.question,
+    anchor: question.targetId ? designTargetAnchor(question.targetId) : undefined
+  }));
+
+  return {
+    schemaVersion: "praxis.projectedGraphView.v1",
+    id: options.id,
+    kind: options.kind,
+    root: model.root,
+    generatedAt,
+    authority: input.authority ?? "review_cache",
+    nodes,
+    edges,
+    annotations,
+    sourceCachePaths: input.sourceCachePaths ?? [".distinction/cache/design/interaction-model-candidate.json"],
+    sourceMemoryIds: unique(designCandidates(model).flatMap((candidate) => candidate.sourceMemoryIds)),
+    sourceModelIds: unique(["cache:design-interaction-model", ...designCandidates(model).flatMap((candidate) => candidate.sourceModelIds)]),
+    sourceFindingIds: [],
+    sourceTaskIds: [],
+    sourceTraceIds: [],
+    sourceSpecPaths: unique([...(input.sourceSpecPaths ?? []), ...designCandidates(model).flatMap((candidate) => candidate.sourceSpecPaths)]),
+    status: "fresh"
+  };
+}
+
+function designParticipationEdge(actorId: string, useCase: InteractionModelCandidate["useCases"][number], participation: "primary_actor" | "supporting_actor"): ProjectedGraphEdge {
+  return {
+    id: designEdgeId("actor-participates", `${actorId}:${useCase.id}:${participation}`),
+    kind: "actor_participates",
+    sourceId: designNodeId("actor", actorId),
+    targetId: designNodeId("use-case", useCase.id),
+    source: { type: "model", id: useCase.id },
+    anchor: { kind: "design_use_case", id: useCase.id },
+    confidence: useCase.confidence,
+    summary: `${actorId} participates in ${useCase.title}`,
+    metadata: { participation }
+  };
+}
+
+function hasUseCaseInContextScope(model: InteractionModelCandidate, contextId: string): boolean {
+  const scopeContextIds = designContextScopeIds(model, contextId);
+  return model.useCases.some((useCase) => scopeContextIds.has(useCase.contextId));
+}
+
+function designContextScopeIds(model: InteractionModelCandidate, contextId: string): Set<string> {
+  const childrenByContext = designContextChildrenByParent(model);
+  const ids = new Set<string>();
+  const visit = (id: string) => {
+    if (ids.has(id)) return;
+    ids.add(id);
+    for (const childId of childrenByContext.get(id) ?? []) visit(childId);
+  };
+  visit(contextId);
+  return ids;
+}
+
+function designContextChildrenByParent(model: InteractionModelCandidate): Map<string, string[]> {
+  const childrenByContext = new Map<string, string[]>();
+  for (const context of model.contexts) {
+    if (!context.parentContextId) continue;
+    const next = childrenByContext.get(context.parentContextId) ?? [];
+    next.push(context.id);
+    childrenByContext.set(context.parentContextId, next);
+  }
+  return childrenByContext;
+}
+
+function designContextAncestorIds(model: InteractionModelCandidate, contextId: string): string[] {
+  const contextById = new Map(model.contexts.map((context) => [context.id, context]));
+  const ancestors: string[] = [];
+  let current = contextById.get(contextId);
+  const visited = new Set<string>();
+  while (current?.parentContextId && !visited.has(current.parentContextId)) {
+    visited.add(current.parentContextId);
+    ancestors.unshift(current.parentContextId);
+    current = contextById.get(current.parentContextId);
+  }
+  return ancestors;
+}
+
+function designTopContextId(model: InteractionModelCandidate, contextId: string): string {
+  const ancestors = designContextAncestorIds(model, contextId);
+  return ancestors[0] ?? contextId;
+}
+
+function designMetadata(candidate: {
+  confidence: string;
+  sourceMemoryIds: string[];
+  sourceModelIds: string[];
+  sourceSpecPaths: string[];
+  sourceCodeFactIds: string[];
+  evidence: unknown[];
+  questions: string[];
+}): Record<string, unknown> {
+  return {
+    confidence: candidate.confidence,
+    sourceMemoryIds: candidate.sourceMemoryIds,
+    sourceModelIds: candidate.sourceModelIds,
+    sourceSpecPaths: candidate.sourceSpecPaths,
+    sourceCodeFactIds: candidate.sourceCodeFactIds,
+    evidenceCount: candidate.evidence.length,
+    questions: candidate.questions
+  };
+}
+
+function designCandidates(model: InteractionModelCandidate) {
+  return [
+    ...model.contexts,
+    ...model.actors,
+    ...model.externalSystems,
+    ...model.useCases,
+    ...model.relations,
+    ...model.useCaseDrilldowns
+  ];
+}
+
+function designNodeId(kind: string, id: string): string {
+  return projectedNodeId(`design-${kind}`, id);
+}
+
+function designEdgeId(kind: string, id: string): string {
+  return projectedEdgeId(`design-${kind}`, id);
+}
+
+function designTargetNodeId(id: string): string {
+  if (id.startsWith("actor:")) return designNodeId("actor", id);
+  if (id.startsWith("external-system:")) return designNodeId("external-system", id);
+  if (id.startsWith("context:")) return designNodeId("context", id);
+  if (id.startsWith("activity:")) return designNodeId("activity", id);
+  if (id.startsWith("sequence:")) return designNodeId("sequence", id);
+  if (id.startsWith("state-machine:")) return designNodeId("state-machine", id);
+  if (id.startsWith("class-collaboration:")) return designNodeId("class-collaboration", id);
+  return designNodeId("use-case", id);
+}
+
+function designTargetAnchor(id: string): GraphAnchor {
+  if (id.startsWith("actor:")) return { kind: "design_actor", id };
+  if (id.startsWith("external-system:")) return { kind: "design_external_system", id };
+  if (id.startsWith("context:")) return { kind: "design_context", id };
+  if (id.startsWith("activity:")) return { kind: "design_activity", id };
+  if (id.startsWith("sequence:")) return { kind: "design_sequence", id };
+  if (id.startsWith("state-machine:")) return { kind: "design_state_machine", id };
+  if (id.startsWith("class-collaboration:")) return { kind: "design_class_collaboration", id };
+  if (id.startsWith("interaction-overview:")) return { kind: "design_interaction_overview", id };
+  if (id.startsWith("communication:")) return { kind: "design_communication", id };
+  if (id.startsWith("timing:")) return { kind: "design_timing", id };
+  if (id.startsWith("object-snapshot:")) return { kind: "design_object_snapshot", id };
+  if (id.startsWith("composite-structure:")) return { kind: "design_composite_structure", id };
+  return { kind: "design_use_case", id };
+}
+
+function designDrilldownNodeKind(kind: InteractionModelCandidate["useCaseDrilldowns"][number]["kind"]): string {
+  if (kind === "activity") return "activity";
+  if (kind === "sequence") return "sequence";
+  if (kind === "state_machine") return "state-machine";
+  if (kind === "class_collaboration") return "class-collaboration";
+  return kind.replace(/_/g, "-");
+}
+
+function designDrilldownGraphKind(kind: InteractionModelCandidate["useCaseDrilldowns"][number]["kind"]): string {
+  if (kind === "activity") return "design_activity";
+  if (kind === "sequence") return "design_sequence";
+  if (kind === "state_machine") return "design_state_machine";
+  if (kind === "class_collaboration") return "design_class_collaboration";
+  return `design_${kind}`;
+}
+
+function designDrilldownAnchorKind(kind: InteractionModelCandidate["useCaseDrilldowns"][number]["kind"]): GraphAnchor["kind"] {
+  if (kind === "activity") return "design_activity";
+  if (kind === "sequence") return "design_sequence";
+  if (kind === "state_machine") return "design_state_machine";
+  if (kind === "class_collaboration") return "design_class_collaboration";
+  return `design_${kind}` as GraphAnchor["kind"];
+}
+
+function designDrilldownMarkdownPath(diagram: InteractionModelCandidate["useCaseDrilldowns"][number]): string {
+  const base = `docs/design/use-case-diagrams/${designUseCaseDocumentSlug(diagram.useCaseId)}`;
+  if (diagram.kind === "activity") return `${base}/activity.md`;
+  if (diagram.kind === "sequence") return `${base}/sequences/${designUseCaseDocumentSlug(diagram.id)}.md`;
+  if (diagram.kind === "state_machine") return `${base}/state-machines/${designUseCaseDocumentSlug(diagram.id)}.md`;
+  if (diagram.kind === "class_collaboration") return `${base}/realization/class-collaboration.md`;
+  if (diagram.kind === "interaction_overview") return `${base}/interaction-overviews/${designUseCaseDocumentSlug(diagram.id)}.md`;
+  if (diagram.kind === "communication") return `${base}/communications/${designUseCaseDocumentSlug(diagram.id)}.md`;
+  if (diagram.kind === "timing") return `${base}/timing/${designUseCaseDocumentSlug(diagram.id)}.md`;
+  if (diagram.kind === "object_snapshot") return `${base}/object-snapshots/${designUseCaseDocumentSlug(diagram.id)}.md`;
+  return `${base}/composite-structures/${designUseCaseDocumentSlug(diagram.id)}.md`;
+}
+
+function designDrilldownHtmlPath(diagram: InteractionModelCandidate["useCaseDrilldowns"][number]): string {
+  return designDrilldownMarkdownPath(diagram).replace(/\.md$/, ".html");
+}
+
+function designUseCaseDocumentSlug(value: string): string {
+  return value.replace(/^use-case:/, "").replace(/[^A-Za-z0-9_.-]+/g, "-").replace(/^-|-$/g, "").toLowerCase() || "diagram";
+}
+
+function designQuestionSeverity(severity: "info" | "warning"): "info" | "medium" {
+  return severity === "warning" ? "medium" : "info";
+}
+
+function mermaidId(prefix: string, id: string): string {
+  return `${prefix}_${id.replace(/[^A-Za-z0-9_]/g, "_")}`;
+}
+
+function mermaidLabel(value: string): string {
+  return value.replace(/"/g, '\\"');
 }
 
 export async function readProjectedGraphViewRecords(root: string): Promise<{ view: ProjectedGraphView; path: string }[]> {

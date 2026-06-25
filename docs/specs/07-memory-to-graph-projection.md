@@ -55,6 +55,11 @@ architecture.c4.container
 architecture.component
 architecture.dependency
 architecture.symbol
+design.use_case_list
+design.use_case_diagram
+design.sequence
+design.class_collaboration
+design.pattern_map
 project.task_dependency
 project.gantt
 project.progress
@@ -151,6 +156,8 @@ MemoryPatch / ModelPatch / PlanPatch
 
 UML diagrams are projections from `UmlModel`.
 Architecture diagrams are projections from `ArchitectureModel`.
+Use Case diagrams are projections from `InteractionModel`.
+Sequence diagrams, Class Collaboration diagrams and Pattern Maps are projections from `DesignModel`.
 Gantt diagrams are projections from `PlanModel`.
 
 ## 9. Context Anchor Rule

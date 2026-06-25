@@ -8,9 +8,9 @@
     "build": "tsc -p tsconfig.json && vite build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build",
-    "tauri:build:debug": "tauri build --debug",
-    "package": "tauri build"
+    "tauri:build": "node ../../scripts/tauri-build-fixed.mjs",
+    "tauri:build:debug": "node ../../scripts/tauri-build-fixed.mjs --debug",
+    "package": "node ../../scripts/tauri-build-fixed.mjs"
   },
   "dependencies": {
     "@praxis/agent-runtime": "0.1.0-alpha.0",
@@ -20,6 +20,8 @@
     "@praxis/ui-kit": "0.1.0-alpha.0",
     "@tauri-apps/api": "^2.0.0",
     "@tauri-apps/plugin-dialog": "^2.7.1",
+    "@tauri-apps/plugin-process": "^2.3.1",
+    "@tauri-apps/plugin-updater": "^2.10.1",
     "@xyflow/react": "^12.10.2",
     "mermaid": "^11.15.0",
     "react": "^19.0.0",

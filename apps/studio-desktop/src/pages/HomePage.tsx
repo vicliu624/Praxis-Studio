@@ -2,9 +2,9 @@ import type { RecentProject } from "../runtimeClient";
 import { useI18n } from "../i18n";
 
 interface HomePageProps {
+  projectRoot: string;
   onOpenExistingProject: () => void;
   onCreateNewProject: () => void;
-  onOpenGraphWorkspace: () => void;
   onOpenModelSettings: () => void;
   recentProjects: RecentProject[];
   onRefreshRecentProjects: () => void;
@@ -12,15 +12,16 @@ interface HomePageProps {
 }
 
 export function HomePage({
+  projectRoot,
   onOpenExistingProject,
   onCreateNewProject,
-  onOpenGraphWorkspace,
   onOpenModelSettings,
   recentProjects,
   onRefreshRecentProjects,
   onOpenRecentProject
 }: HomePageProps) {
   const { t } = useI18n();
+  const currentProjectName = projectRoot ? projectNameFromRoot(projectRoot) : "";
 
   return (
     <section className="home-layout" aria-labelledby="home-title">
@@ -35,6 +36,13 @@ export function HomePage({
             {t("home.createNew")}
           </button>
         </div>
+        {projectRoot ? (
+          <div className="current-project-card" aria-label={t("home.currentProject")}>
+            <span>{t("home.currentProject")}</span>
+            <strong>{currentProjectName}</strong>
+            <code>{projectRoot}</code>
+          </div>
+        ) : null}
       </section>
 
       <section className="home-grid">
@@ -48,18 +56,29 @@ export function HomePage({
           <div className="recent-list">
             {recentProjects.length ? (
               recentProjects.map((project) => (
-                <button className="recent-project" type="button" key={project.root} onClick={() => onOpenRecentProject(project.root)}>
-                  <strong>{project.name}</strong>
-                  <span>{project.root}</span>
-                  <small>{formatRecentTime(project.lastOpenedAt)}</small>
+                <button
+                  className={sameRoot(project.root, projectRoot) ? "recent-project active" : "recent-project"}
+                  type="button"
+                  key={project.root}
+                  onClick={() => onOpenRecentProject(project.root)}
+                >
+                  <span className="recent-project-topline">
+                    <strong className="recent-project-name">{project.name || projectNameFromRoot(project.root)}</strong>
+                    {sameRoot(project.root, projectRoot) ? <span className="project-badge">{t("home.currentBadge")}</span> : null}
+                  </span>
+                  <span className="recent-project-path">{project.root}</span>
+                  <small>{project.lastOpenedAt ? formatRecentTime(project.lastOpenedAt) : t("home.openedUnknown")}</small>
                 </button>
               ))
             ) : (
-              <button className="recent-project" type="button" onClick={onOpenGraphWorkspace}>
+              <div className="recent-empty-state">
                 <strong>{t("home.noRecentTitle")}</strong>
                 <span>{t("home.noRecentDescription")}</span>
                 <small>{t("home.noRecentStorage")}</small>
-              </button>
+                <button className="secondary-action compact-action" type="button" onClick={onOpenExistingProject}>
+                  {t("home.openExisting")}
+                </button>
+              </div>
             )}
           </div>
         </section>
@@ -118,4 +137,24 @@ function formatRecentTime(value: string): string {
   if (Number.isFinite(numeric)) return new Date(numeric).toLocaleString();
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+}
+
+function projectNameFromRoot(root: string): string {
+  const normalized = normalizeProjectRootForUi(root).replace(/[\\/]+$/, "");
+  const parts = normalized.split(/[\\/]/).filter(Boolean);
+  return parts[parts.length - 1] ?? "Project";
+}
+
+function sameRoot(left: string, right: string): boolean {
+  return normalizeRoot(left) === normalizeRoot(right);
+}
+
+function normalizeRoot(root: string): string {
+  return normalizeProjectRootForUi(root).replace(/[\\/]+$/, "").toLowerCase();
+}
+
+function normalizeProjectRootForUi(root: string): string {
+  if (root.startsWith("\\\\?\\UNC\\")) return `\\\\${root.slice("\\\\?\\UNC\\".length)}`;
+  if (root.startsWith("\\\\?\\")) return root.slice("\\\\?\\".length);
+  return root;
 }

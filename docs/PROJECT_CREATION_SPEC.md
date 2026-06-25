@@ -2,12 +2,17 @@
 
 ## 1. Goal
 
-Project Creation turns a real product intent into a new project directory with requirements, architecture, a Development Graph, docs, and `.distinction` memory.
+Project Creation turns a real product story into a new project directory with use cases, requirements, architecture, a Development Graph, and docs-backed Project Memory.
+
+`.distinction` may be generated as transitional runtime state for cache, trace, views and task handoff, but it is not the final project-memory authority.
 
 It is not a template picker. It is the second required v0.1 product loop:
 
 ```text
-Product Intent
+Story Canvas
+→ Interaction Agent
+→ Use Case Diagram Review
+→ Normalized design documents
 → Requirement Agent
 → Architecture Agent
 → Graph Generator
@@ -20,14 +25,30 @@ Product Intent
 ## 2. Wizard Flow
 
 ```text
-Step 1 Product Intent
-Step 2 Project Type
-Step 3 Stack Preference
-Step 4 Generated Plan Review
-Step 5 Apply
+Step 1 Story Canvas
+Step 2 Use Case Diagram Review
+Step 3 Project Type / Constraints
+Step 4 Requirements Review
+Step 5 Architecture & Design Views Review
+Step 6 Generated Plan Review
+Step 7 Apply
 ```
 
+The user must review the story baseline before requirements and architecture generation.
 The user must confirm the generated plan before files are written.
+
+Project Creation must follow the design surface document rule:
+
+```text
+story and interaction candidates
+  -> formatted, normalized, complete design docs
+  -> Markdown and Semantic HTML design maps
+  -> projected Use Case / Sequence / Collaboration views
+  -> Design Explorer preview
+```
+
+The preview must not be backed only by UI state or `.distinction/views/**`.
+If the preview renders Semantic HTML, that HTML must be generated or patched by the agent through governed document writes. Project Creation must not provide direct drawing, canvas editing or freeform DOM editing tools.
 
 ## 3. Project Types
 
@@ -47,10 +68,12 @@ tauri_desktop
 ```ts
 export interface NewProjectPlan {
   projectName: string;
+  story: string;
   productIdea: string;
   projectKind: ProjectKind;
   stack: string[];
 
+  interaction: InteractionModelCandidate;
   requirements: RequirementItem[];
   architecture: ArchitectureComponentCandidate[];
   graph: DevelopmentGraph;
@@ -61,7 +84,7 @@ export interface NewProjectPlan {
 }
 ```
 
-All AI-generated requirements, architecture components, graph nodes, and graph edges start as `candidate` or `inference`. User confirmation is required before writing confirmed memory.
+All AI-generated actors, use cases, requirements, architecture components, graph nodes, and graph edges start as `candidate` or `inference`. User confirmation is required before writing confirmed memory.
 
 ## 5. Required Files
 
@@ -70,15 +93,26 @@ v0.1 must generate:
 ```text
 README.md
 docs/PRODUCT_SPEC.md
+docs/INTERACTION_MODEL.md
+docs/USE_CASES.md
+docs/design/use-case-diagrams-maps.md
+docs/design/use-case-diagrams-maps.html
 docs/ARCHITECTURE.md
 docs/ROADMAP.md
+docs/decisions/README.md
+docs/tasks/README.md
 .distinction/project.json
 .distinction/memory/candidates.jsonl
+.distinction/models/interaction-model.json
 .distinction/models/architecture-model.json
+.distinction/views/design/use-case-list.json
+.distinction/views/design/use-case-diagram.mmd
 .distinction/views/architecture/component-view.json
 .distinction/rules/ai-constraints.md
 .distinction/memory/decisions.jsonl
 ```
+
+The docs above are the durable Project Memory. The `.distinction` files are transition/runtime artifacts and must be rebuildable or explainable from docs and trace wherever possible.
 
 When useful, it may also generate:
 
@@ -94,12 +128,42 @@ When useful, it may also generate:
 
 ## 6. Agent Responsibilities
 
+### Interaction Agent
+
+Input:
+
+```text
+story
+known actors
+known external systems
+non-goals
+constraints
+```
+
+Output:
+
+```text
+InteractionModelCandidate
+actors
+external systems
+use cases
+use case relations
+assumptions
+questions
+normalized design document patch
+Use Case Diagram projection derived from that document
+Semantic HTML design map patch when rich preview is requested
+```
+
+The Interaction Agent must not generate final requirements or architecture. It only structures the story and exposes uncertainty.
+
 ### Requirement Agent
 
 Input:
 
 ```text
-product intent
+confirmed or reviewed story baseline
+interaction model candidates
 project type
 stack preference
 known constraints
@@ -119,6 +183,8 @@ questions
 Input:
 
 ```text
+reviewed story baseline
+interaction model candidates
 requirements
 project type
 stack preference
@@ -140,6 +206,7 @@ questions
 Input:
 
 ```text
+interaction model candidates
 requirements
 architecture component candidates
 generated docs
@@ -195,7 +262,10 @@ The review step must show:
 
 ```text
 requirements
+use cases and actors
 architecture candidates
+Design Explorer preview
+Use Case Diagram preview
 Development Graph preview
 files to be generated
 assumptions
@@ -208,13 +278,17 @@ v0.1 may support only simple field editing. Full graph editing is not required f
 ## 9. Acceptance Criteria
 
 ```text
-1. User enters a product intent.
-2. User chooses Documentation-first or Tauri Desktop.
-3. Agent generates requirements.
-4. Agent generates architecture.
-5. Agent generates Development Graph.
-6. Praxis shows files and assumptions before writing.
-7. User confirms.
-8. Praxis writes docs and .distinction.
-9. Praxis opens the new project graph in Development Graph Workspace.
+1. User describes a story in Story Canvas.
+2. Agent generates Interaction Model candidates and a Use Case Diagram projection.
+3. User reviews the story baseline and unresolved questions.
+4. User chooses Documentation-first or Tauri Desktop and confirms constraints.
+5. Agent generates requirements from the reviewed story baseline.
+6. Agent generates architecture and design view candidates.
+7. Agent generates Development Graph.
+8. Praxis shows files, assumptions, Design Explorer preview and Development Graph preview before writing.
+9. User confirms.
+10. Praxis writes docs-backed Project Memory and transitional .distinction runtime state.
+11. Praxis opens the new project in Development Graph Workspace with Design Explorer available.
+12. Deleting `.distinction/cache/design/**` does not destroy the design baseline because Design Explorer can rebuild from docs.
+13. Rich Design Explorer preview renders Semantic HTML when available, and that HTML is maintained by agent chat rather than UI drawing tools.
 ```

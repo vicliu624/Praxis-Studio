@@ -43,6 +43,17 @@ a source-editing bypass in v0.1
 
 External agents may use Praxis through MCP without using Praxis Desktop UI.
 
+Praxis's built-in Pi Agent Engine may also consume the same MCP tool definitions through a Pi extension. This keeps Pi from inventing a parallel memory/context channel:
+
+```text
+Pi Agent Engine
+  -> Praxis MCP bridge extension
+  -> shared MCP tool definitions
+  -> Praxis schemas / .distinction / docs-backed memory
+```
+
+The bridge is a tool adapter, not a new authority layer. Read-only tools may be enabled by default to reduce token-heavy repository rediscovery. Governed artifact write tools remain opt-in and still only write Praxis artifacts, never source files or confirmed memory.
+
 ---
 
 ## 3. Startup Contract
@@ -194,10 +205,10 @@ praxis-runtime accept-external-result
   -> materializes MemorySuggestionPatch and FindingStatusPatch review artifacts
 
 praxis-runtime accept-memory-suggestion
-  -> converts selected MemorySuggestionPatch records into CONFIRMED durable memory
+  -> converts selected MemorySuggestionPatch records into confirmed docs-backed Project Memory and optional transition mirrors
 
 praxis-runtime accept-finding-status
-  -> confirms selected FindingStatusPatch, writes finding status memory, and reruns detector reconciliation
+  -> confirms selected FindingStatusPatch, writes finding status docs/mirror records, and reruns detector reconciliation
 ```
 
 v0.1 MCP must not:

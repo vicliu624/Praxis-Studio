@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-labelledby="title desc">
+  <title id="title">Praxis Studio compact memory gate mark</title>
+  <desc id="desc">A compact docs-first memory gate logo mark optimized for 24 to 32 pixel navigation use.</desc>
+  <rect x="2" y="2" width="28" height="28" rx="8" fill="#0C1116" stroke="#263241" stroke-width="1.5" />
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M6.7 20.1C7.5 12.5 11.7 8.2 17.5 8.7C22 9.1 24.4 12.8 23 17.3C21.5 21.9 15.6 23.9 9.7 21" stroke="#0C1116" stroke-width="5" />
+    <path d="M6.7 20.1C7.5 12.5 11.7 8.2 17.5 8.7C22 9.1 24.4 12.8 23 17.3C21.5 21.9 15.6 23.9 9.7 21" stroke="#E7A23C" stroke-width="3.2" />
+  </g>
+  <rect x="11.2" y="11.2" width="9.6" height="10.8" rx="2" fill="#111820" stroke="#263241" stroke-width="1.2" />
+  <path d="M13.2 14.2H18.8" stroke="#EDF2F7" stroke-width="1.4" stroke-linecap="round" />
+  <path d="M13.2 16.4H18.3" stroke="#6EE7D8" stroke-width="1.4" stroke-linecap="round" />
+  <path d="M10.2 12.8L11.2 11.8V21.2L10.2 22.1" stroke="#6EE7D8" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round" />
+  <path d="M21.8 11.8L20.8 12.8V22.1L21.8 21.2" stroke="#6EE7D8" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round" />
+  <circle cx="6.7" cy="20.1" r="2.3" fill="#6EE7D8" stroke="#0C1116" stroke-width="1.2" />
+  <circle cx="17.5" cy="8.7" r="2.3" fill="#6EE7D8" stroke="#0C1116" stroke-width="1.2" />
+  <circle cx="23" cy="17.3" r="2.3" fill="#6EE7D8" stroke="#0C1116" stroke-width="1.2" />
+</svg>

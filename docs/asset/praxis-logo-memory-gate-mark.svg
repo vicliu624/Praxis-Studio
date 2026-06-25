@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">Praxis Studio memory gate mark</title>
+  <desc id="desc">A docs-first project memory gate surrounded by a governed amber development path and cyan memory checkpoints.</desc>
+  <g transform="translate(18 20)">
+    <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M42 170C50 99 91 58 152 64C200 69 225 105 209 150C193 197 132 218 70 188" stroke="#0C1116" stroke-width="42" />
+      <path d="M42 170C50 99 91 58 152 64C200 69 225 105 209 150C193 197 132 218 70 188" stroke="#E7A23C" stroke-width="26" />
+    </g>
+    <rect x="78" y="82" width="98" height="104" rx="16" fill="#111820" stroke="#263241" stroke-width="8" />
+    <path d="M98 108H154" stroke="#EDF2F7" stroke-width="7" stroke-linecap="round" />
+    <path d="M98 128H150" stroke="#6EE7D8" stroke-width="7" stroke-linecap="round" />
+    <path d="M98 148H137" stroke="#8EA0B5" stroke-width="7" stroke-linecap="round" />
+    <path d="M68 98L78 88V176L68 186" fill="none" stroke="#6EE7D8" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" />
+    <path d="M186 88L176 98V186L186 176" fill="none" stroke="#6EE7D8" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" />
+    <circle cx="42" cy="170" r="23" fill="#0C1116" />
+    <circle cx="42" cy="170" r="13" fill="#6EE7D8" />
+    <circle cx="152" cy="64" r="23" fill="#0C1116" />
+    <circle cx="152" cy="64" r="13" fill="#6EE7D8" />
+    <circle cx="209" cy="150" r="23" fill="#0C1116" />
+    <circle cx="209" cy="150" r="13" fill="#6EE7D8" />
+    <circle cx="70" cy="188" r="15" fill="#0C1116" />
+    <circle cx="70" cy="188" r="8" fill="#E7A23C" />
+  </g>
+</svg>

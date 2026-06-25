@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">Praxis Studio control grid mark</title>
+  <desc id="desc">Three governed memory checkpoints feed an ordered project memory core through amber control rails.</desc>
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path
+      d="M62 74V182M62 74H98M62 128H98M62 182H98M184 74H206V182H184"
+      stroke="#0C1116"
+      stroke-width="34"
+    />
+    <path
+      d="M62 74V182M62 74H98M62 128H98M62 182H98M184 74H206V182H184"
+      stroke="#E7A23C"
+      stroke-width="18"
+    />
+  </g>
+  <rect x="96" y="70" width="88" height="116" rx="14" fill="#111820" stroke="#263241" stroke-width="8" />
+  <g fill="none" stroke-linecap="round">
+    <path d="M116 104H164" stroke="#EDF2F7" stroke-width="7" />
+    <path d="M116 128H164" stroke="#6EE7D8" stroke-width="7" />
+    <path d="M116 152H150" stroke="#8EA0B5" stroke-width="7" />
+  </g>
+  <g>
+    <circle cx="62" cy="74" r="23" fill="#0C1116" />
+    <circle cx="62" cy="74" r="13" fill="#6EE7D8" />
+    <circle cx="62" cy="128" r="23" fill="#0C1116" />
+    <circle cx="62" cy="128" r="13" fill="#6EE7D8" />
+    <circle cx="62" cy="182" r="23" fill="#0C1116" />
+    <circle cx="62" cy="182" r="13" fill="#6EE7D8" />
+    <circle cx="206" cy="128" r="16" fill="#0C1116" />
+    <circle cx="206" cy="128" r="8" fill="#E7A23C" />
+  </g>
+</svg>

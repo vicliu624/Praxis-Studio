@@ -15,7 +15,7 @@ Praxis owns:
 
 ```text
 Development Graph
-Project Memory
+Project Memory as docs plus Git timeline
 Agent Runtime
 Tool Registry
 Context Builder
@@ -43,7 +43,7 @@ Agentic Loop
 Tool Registry
 Context Builder
 Permission / Plan Mode
-Project Memory / Rules
+Project Memory docs / Rules
 Trace System
 MCP / ACP external protocol ideas
 Sub-Agent Role Pipeline
@@ -99,7 +99,7 @@ Praxis uses clean-room borrowing:
 ```text
 1. Read and understand the design.
 2. Extract the abstract mechanism.
-3. Write Praxis-owned interfaces around Development Graph and Project Memory.
+3. Write Praxis-owned interfaces around Development Graph and docs-backed Project Memory.
 4. Reimplement the mechanism in Praxis packages.
 5. Keep questionable experiments outside the main build.
 6. Treat external agents as adapters, not as the runtime foundation.
@@ -157,7 +157,8 @@ Whenever code or docs mention CCB, check:
 
 ```text
 Is Praxis still centered on Development Graph?
-Does .distinction remain the project memory authority?
+Does docs plus Git history remain the project memory authority?
+Is .distinction still limited to transition/runtime state?
 Is the external agent still a worker?
 Is the task boundary explicit?
 Is v0.1 still avoiding automatic source modification?

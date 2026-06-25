@@ -24,19 +24,20 @@ import {
   type RuntimePlanAction,
   type RuntimeProjectTreeNode,
   type RuntimeProjectTreeResult,
+  type RuntimeScopedAgentHistoryEntry,
   type RuntimeToolCallView
 } from "../runtimeClient";
 import { useI18n } from "../i18n";
 import { CommandMenu, useCommands, type Command } from "../chat/CommandMenu";
 import { SessionSidebar } from "../chat/SessionSidebar";
-import { Markdown } from "../chat/Markdown";
-import { ReasoningBlock } from "../chat/ReasoningBlock";
+import { AgentConversationPanel, type AgentConversationEvent } from "../chat/AgentConversationPanel";
+import { appendScopedAgentHistoryEntries, readScopedAgentHistory } from "../chat/scopedAgentHistory";
 
 interface AgentWorkspacePageProps {
   projectRoot: string;
   initialDraft?: { text: string; mode: "explain" | "plan"; token: number } | null;
   onDraftConsumed?: (token: number) => void;
-  onNavigateToGraph: () => void;
+  onNavigateToPlan: () => void;
   onNavigateToSettings: () => void;
   onNavigateHome: () => void;
 }
@@ -75,11 +76,12 @@ function runStatusFromTerminalMessage(message: RuntimeChatMessage): RuntimeAgent
   return "completed";
 }
 
-export function AgentWorkspacePage({ projectRoot, initialDraft, onDraftConsumed, onNavigateToGraph, onNavigateToSettings, onNavigateHome }: AgentWorkspacePageProps) {
+export function AgentWorkspacePage({ projectRoot, initialDraft, onDraftConsumed, onNavigateToPlan, onNavigateToSettings, onNavigateHome }: AgentWorkspacePageProps) {
   const { t } = useI18n();
   const [graph, setGraph] = useState<RuntimeGraph | null>(null);
   const [session, setSession] = useState<RuntimeChatSession | null>(null);
   const [messages, setMessages] = useState<RuntimeChatMessage[]>([]);
+  const [sharedAgentHistory, setSharedAgentHistory] = useState<RuntimeScopedAgentHistoryEntry[]>([]);
   const [input, setInput] = useState("");
   const [mode, setMode] = useState<"explain" | "plan">("explain");
   const [isRunning, setIsRunning] = useState(false);
@@ -135,6 +137,20 @@ export function AgentWorkspacePage({ projectRoot, initialDraft, onDraftConsumed,
       .then((g) => { if (active) setGraph(g); })
       .catch(() => {});
     return () => { active = false; };
+  }, [projectRoot]);
+
+  useEffect(() => {
+    let active = true;
+    readScopedAgentHistory(projectRoot)
+      .then((entries) => { if (active) setSharedAgentHistory(entries); })
+      .catch(() => { if (active) setSharedAgentHistory([]); });
+    return () => { active = false; };
+  }, [projectRoot]);
+
+  const persistGlobalAgentHistory = useCallback(async (entries: RuntimeScopedAgentHistoryEntry[]) => {
+    const next = await appendScopedAgentHistoryEntries(projectRoot, entries);
+    setSharedAgentHistory(next);
+    return next;
   }, [projectRoot]);
 
   // ── Create or load session ───────────────────────────────
@@ -202,6 +218,19 @@ export function AgentWorkspacePage({ projectRoot, initialDraft, onDraftConsumed,
     };
     setMessages(prev => [...prev, userMsg]);
     setIsRunning(true);
+    let conversationHistoryForRun = sharedAgentHistory;
+    try {
+      conversationHistoryForRun = await persistGlobalAgentHistory([
+        createPraxisAssistantHistoryEntry("user", text, {
+          id: `praxis-assistant:${userMsg.id}`,
+          projectRoot,
+          intent: mode,
+          status: "done"
+        })
+      ]);
+    } catch (err) {
+      setError(err instanceof Error ? `Unable to persist shared agent history: ${err.message}` : String(err));
+    }
 
     const sid = session.id;
     const poll: ActiveAgentPoll = {
@@ -221,12 +250,22 @@ export function AgentWorkspacePage({ projectRoot, initialDraft, onDraftConsumed,
         : { type: "project" };
 
     // Fire-and-forget: start agent via async spawn (returns immediately)
-    startAgentRun(projectRoot, target, mode, text, sid)
+    startAgentRun(projectRoot, target, mode, text, sid, conversationHistoryForRun.slice(-40))
       .then((result) => { if (result.runStatus !== "running") setRunResult(result); })
-      .catch((err) => {
+      .catch(async (err) => {
         if (activePollRef.current !== poll || poll.cancelled) return;
         const message = err instanceof Error ? err.message : String(err);
         setError(message);
+        try {
+          await persistGlobalAgentHistory([
+            createPraxisAssistantHistoryEntry("assistant", message, {
+              id: `praxis-assistant:${sid}:spawn-error:${Date.now()}`,
+              projectRoot,
+              intent: mode,
+              status: "failed"
+            })
+          ]);
+        } catch {}
         finishActivePoll(poll, {
           ok: false,
           sessionId: sid,
@@ -263,6 +302,18 @@ export function AgentWorkspacePage({ projectRoot, initialDraft, onDraftConsumed,
             if (poll.cancelled || activePollRef.current !== poll) return;
             const finalTerminal = findTerminalRunMessage(finalMessages, poll.baselineCount) ?? terminal;
             const runStatus = runStatusFromTerminalMessage(finalTerminal);
+            try {
+              await persistGlobalAgentHistory([
+                createPraxisAssistantHistoryEntry("assistant", finalTerminal.content, {
+                  id: `praxis-assistant:${finalTerminal.id}`,
+                  projectRoot,
+                  intent: mode,
+                  status: runStatus === "completed" ? "done" : runStatus
+                })
+              ]);
+            } catch (err) {
+              setError(err instanceof Error ? `Unable to persist shared agent history: ${err.message}` : String(err));
+            }
             finishActivePoll(poll, {
               ok: runStatus === "completed",
               sessionId: sid,
@@ -308,7 +359,7 @@ export function AgentWorkspacePage({ projectRoot, initialDraft, onDraftConsumed,
       }
     };
     poll.timeoutId = setTimeout(doPoll, 150);
-  }, [input, session, messages.length, selectedNode, selectedEdge, mode, projectRoot, stopActivePoll, finishActivePoll]);
+  }, [input, session, messages.length, selectedNode, selectedEdge, mode, projectRoot, sharedAgentHistory, persistGlobalAgentHistory, stopActivePoll, finishActivePoll]);
 
   // ── Permission response ──────────────────────────────────
   const handlePermission = useCallback(async (permissionId: string, approval: "approve" | "reject") => {
@@ -352,6 +403,12 @@ export function AgentWorkspacePage({ projectRoot, initialDraft, onDraftConsumed,
   const nodeList = useMemo(() => graph?.nodes ?? [], [graph]);
   const edgeList = useMemo(() => graph?.edges ?? [], [graph]);
   const isWaitingForPermission = isRunning && messages[messages.length - 1]?.role === "permission";
+  const conversationEvents = useMemo(() => {
+    const sharedEvents = sharedAgentHistory.map(sharedHistoryEntryToConversationEvent);
+    const runtimeEvents = runtimeMessagesToConversationEvents(messages, handlePermission)
+      .filter((event) => event.kind !== "user_message" && event.kind !== "assistant_message");
+    return mergeAgentConversationEvents(sharedEvents, runtimeEvents);
+  }, [messages, sharedAgentHistory, handlePermission]);
 
   // ── Render ───────────────────────────────────────────────
   return (
@@ -413,7 +470,7 @@ export function AgentWorkspacePage({ projectRoot, initialDraft, onDraftConsumed,
               selectedEdge={selectedEdge}
               onSelectNode={(id) => { setSelectedNode(id); setSelectedEdge(null); }}
               onSelectEdge={(id) => { setSelectedEdge(id); setSelectedNode(null); }}
-              onOpenGraph={onNavigateToGraph}
+              onOpenGraph={onNavigateToPlan}
             />
           )}
           {leftView === "memory" && (
@@ -425,8 +482,8 @@ export function AgentWorkspacePage({ projectRoot, initialDraft, onDraftConsumed,
           <button className="small-btn" onClick={onNavigateToSettings} style={{ flex: 1, padding: "6px 8px", fontSize: 11, background: "#161b22", border: "1px solid #1a2332", color: "#96a3b5", borderRadius: 4, cursor: "pointer" }}>
             {t("settings.title")}
           </button>
-          <button className="small-btn" onClick={onNavigateToGraph} style={{ flex: 1, padding: "6px 8px", fontSize: 11, background: "#161b22", border: "1px solid #1a2332", color: "#96a3b5", borderRadius: 4, cursor: "pointer" }}>
-            {t("nav.graphFocus")}
+          <button className="small-btn" onClick={onNavigateToPlan} style={{ flex: 1, padding: "6px 8px", fontSize: 11, background: "#161b22", border: "1px solid #1a2332", color: "#96a3b5", borderRadius: 4, cursor: "pointer" }}>
+            {t("route.projectPlan")}
           </button>
         </div>
       </aside>
@@ -499,7 +556,7 @@ export function AgentWorkspacePage({ projectRoot, initialDraft, onDraftConsumed,
           onScroll={handleMessagesScroll}
           style={{ flex: 1, overflow: "auto", padding: 16 }}
         >
-          {messages.length === 0 && !isRunning && (
+          {conversationEvents.length === 0 && !isRunning && (
             <div style={{ textAlign: "center", color: "#96a3b5", marginTop: 80 }}>
               <div style={{ fontSize: 32, marginBottom: 12 }}>&#x1F4AC;</div>
               <div style={{ fontSize: 14 }}>{t("chat.emptyHint")}</div>
@@ -509,7 +566,15 @@ export function AgentWorkspacePage({ projectRoot, initialDraft, onDraftConsumed,
             </div>
           )}
 
-          {renderMessages(messages, handlePermission)}
+          {conversationEvents.length ? (
+            <AgentConversationPanel
+              events={conversationEvents}
+              compact
+              className="workspace-agent-conversation"
+              emptyTitle={t("chat.projectChat")}
+              emptyCopy={t("chat.emptyHint")}
+            />
+          ) : null}
 
           {/* Running indicator */}
           {isRunning && (
@@ -898,175 +963,232 @@ function groupNodesByKind(nodes: RuntimeNode[]): { kind: string; nodes: RuntimeN
     .sort((left, right) => right.nodes.length - left.nodes.length);
 }
 
-// ─── AgentChatMessage (Claude Code style: user right, thinking collapsed) ──
-
-function AgentChatMessage({
-  message,
-  onApprovePermission,
-  onRejectPermission,
-  toolGroup,
-  groupIndex,
-  totalInGroup
-}: {
-  message: RuntimeChatMessage;
-  onApprovePermission: (id: string) => void;
-  onRejectPermission: (id: string) => void;
-  toolGroup?: RuntimeChatMessage[];
-  groupIndex?: number;
-  totalInGroup?: number;
-}) {
-  const isUser = message.role === "user";
-
-  // Tool messages are rendered via toolGroup, not individually
-  if (message.role === "tool" && toolGroup && groupIndex !== 0) return null;
-  if (message.role === "tool" && !toolGroup) return null;
-
-  return (
-    <div style={{
-      marginBottom: 10, display: "flex", gap: 10,
-      flexDirection: isUser ? "row-reverse" : "row"
-    }}>
-      {/* Role label */}
-      <div style={{ width: 50, flexShrink: 0, textAlign: isUser ? "left" : "right", paddingTop: 4 }}>
-        <div style={{ fontSize: 10, fontWeight: 600, color: isUser ? "#eba341" : "#58a6ff" }}>
-          {isUser ? "You" : "Praxis"}
-        </div>
-        <div style={{ fontSize: 9, color: "#96a3b5" }}>
-          {new Date(message.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-        </div>
-      </div>
-
-      <div style={{ flex: 1, minWidth: 0 }}>
-        {/* Tool group — collapsed thinking block */}
-        {toolGroup && groupIndex === 0 && (
-          <ThinkingBlock messages={toolGroup} />
-        )}
-
-        {/* Permission request */}
-        {message.permissionRequest && (
-          <PermissionCard
-            permission={message.permissionRequest}
-            onApprove={() => onApprovePermission(message.permissionRequest!.id)}
-            onReject={() => onRejectPermission(message.permissionRequest!.id)}
-          />
-        )}
-
-        {/* Plan */}
-        {message.plan && (
-          <PlanCard plan={message.plan} />
-        )}
-
-        {/* Reasoning block */}
-        {message.reasoning && (
-          <ReasoningBlock
-            content={message.reasoning.content}
-            durationMs={message.reasoning.durationMs}
-          />
-        )}
-
-        {/* Text content (non-tool) */}
-        {message.content && message.role !== "tool" && (
-          <div style={{ position: "relative", maxWidth: "85%", marginLeft: isUser ? "auto" : 0, marginRight: isUser ? 0 : "auto" }}>
-            <div style={{
-              padding: isUser ? "8px 14px" : "10px 16px",
-              borderRadius: 12,
-              background: isUser ? "#1a3350" : "#161b22",
-              color: "#e8edf2", fontSize: 13, lineHeight: 1.55,
-              whiteSpace: isUser ? "pre-wrap" : "normal",
-              wordBreak: "break-word"
-            }}>
-              {isUser ? message.content : <Markdown content={message.content} />}
-            </div>
-            {!isUser && (
-              <button
-                onClick={() => { navigator.clipboard.writeText(message.content).catch(() => {}); }}
-                title="Copy"
-                style={{
-                  position: "absolute", top: 4, right: 4,
-                  width: 24, height: 24, borderRadius: 4,
-                  border: "none", background: "transparent",
-                  color: "#96a3b5", cursor: "pointer", fontSize: 12,
-                  opacity: 0.3, display: "flex", alignItems: "center", justifyContent: "center"
-                }}
-                onMouseEnter={(e) => { e.currentTarget.style.opacity = "1"; }}
-                onMouseLeave={(e) => { e.currentTarget.style.opacity = "0.3"; }}
-              >
-                ⎘
-              </button>
-            )}
-          </div>
-        )}
-
-        {message.status === "failed" && (
-          <div style={{ fontSize: 11, color: "#f87171", marginTop: 2 }}>Failed</div>
-        )}
-      </div>
-    </div>
-  );
+function createPraxisAssistantHistoryEntry(
+  role: RuntimeScopedAgentHistoryEntry["role"],
+  text: string,
+  options: {
+    id: string;
+    projectRoot: string;
+    intent?: string;
+    status?: RuntimeScopedAgentHistoryEntry["status"];
+  }
+): RuntimeScopedAgentHistoryEntry {
+  return {
+    id: options.id,
+    role,
+    text,
+    timestamp: new Date().toISOString(),
+    scopeId: "global:praxis-assistant",
+    scopeTitle: "Praxis Assistant",
+    scopeKind: "global",
+    contextTitle: "Global Project",
+    contextPath: options.projectRoot,
+    intent: options.intent,
+    status: options.status
+  };
 }
 
-// ─── ThinkingBlock — collapsible group of tool calls ─────────
+function sharedHistoryEntryToConversationEvent(entry: RuntimeScopedAgentHistoryEntry): AgentConversationEvent {
+  return {
+    id: entry.id,
+    kind: entry.role === "user" ? "user_message" : "assistant_message",
+    role: entry.role,
+    title: entry.role === "user" ? "You" : entry.scopeTitle,
+    content: entry.text,
+    status: entry.status ?? "done",
+    timestamp: entry.timestamp,
+    metadata: compactMetadata([
+      entry.scopeKind ?? "global",
+      entry.contextTitle ?? "",
+      entry.intent ?? "",
+      entry.contextPath ?? ""
+    ])
+  };
+}
 
-function ThinkingBlock({ messages }: { messages: RuntimeChatMessage[] }) {
-  const [expanded, setExpanded] = useState(true);
-  const toolMsgs = latestToolMessages(messages);
-  const toolNames = [...new Set(toolMsgs.map(m => m.toolCall?.name).filter(Boolean))];
-  const successes = toolMsgs.filter(m => m.toolCall?.status === "success").length;
-  const failed = toolMsgs.filter(m => m.toolCall?.status === "failed").length;
-  const running = toolMsgs.filter(m => m.toolCall?.status === "running").length;
+function mergeAgentConversationEvents(...groups: AgentConversationEvent[][]): AgentConversationEvent[] {
+  const byId = new Map<string, AgentConversationEvent>();
+  for (const event of groups.flat()) {
+    if (!byId.has(event.id)) byId.set(event.id, event);
+  }
+  return [...byId.values()].sort((left, right) => timestampSortValue(left.timestamp) - timestampSortValue(right.timestamp));
+}
 
-  return (
-    <div style={{ marginBottom: 8 }}>
-      <button
-        type="button"
-        onClick={() => setExpanded(!expanded)}
-        style={{
-          width: "100%", textAlign: "left", padding: "6px 12px", borderRadius: 6,
-          border: "1px solid #1a2332", background: "#0d1117",
-          color: "#96a3b5", cursor: "pointer", fontSize: 12,
-          display: "flex", alignItems: "center", gap: 8,
-          fontFamily: "inherit"
-        }}
-      >
-        <span style={{ fontSize: 10, transition: "transform 0.15s", transform: expanded ? "rotate(90deg)" : "rotate(0deg)" }}>
-          ▶
-        </span>
-        <span style={{ color: "#e8edf2" }}>
-          运行过程 / 工具调用：{toolNames.join(", ")}
-        </span>
-        {running > 0 && <span style={{ color: "#eba341", fontSize: 10 }}>▶ running</span>}
-        {successes > 0 && <span style={{ color: "#7ee787", fontSize: 10 }}>✓ {successes}</span>}
-        {failed > 0 && <span style={{ color: "#f87171", fontSize: 10 }}>✗ {failed}</span>}
-      </button>
+function timestampSortValue(value: string | undefined): number {
+  if (!value) return Number.MAX_SAFE_INTEGER;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : Number.MAX_SAFE_INTEGER;
+}
 
-      {expanded && (
-        <div style={{ marginTop: 4, padding: "4px 8px", borderRadius: 4, background: "#0d1117", border: "1px solid #1a2332" }}>
-          {toolMsgs.map((m, i) => (
-            m.toolCall && (
-              <div key={m.id} style={{
-                padding: "4px 8px", borderTop: i > 0 ? "1px solid #1a2332" : "none",
-                display: "flex", justifyContent: "space-between", alignItems: "center"
-              }}>
-                <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                  <span style={{
-                    color: m.toolCall.status === "success" ? "#7ee787" : m.toolCall.status === "failed" ? "#f87171" : m.toolCall.status === "running" ? "#eba341" : "#96a3b5",
-                    fontSize: 10
-                  }}>
-                    {m.toolCall.status === "running" ? "▶" : m.toolCall.status === "success" ? "✓" : m.toolCall.status === "failed" ? "✗" : "○"}
-                  </span>
-                  <span style={{ color: "#e8edf2", fontSize: 12, fontWeight: 500 }}>{m.toolCall.name}</span>
-                  <span style={{ color: "#96a3b5", fontSize: 10 }}>{m.toolCall.riskLevel}</span>
-                </span>
-                <span style={{ fontSize: 11, color: "#96a3b5", maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {m.toolCall.inputSummary}
-                </span>
-              </div>
-            )
-          ))}
-        </div>
-      )}
-    </div>
-  );
+function runtimeMessagesToConversationEvents(
+  messages: RuntimeChatMessage[],
+  handlePermission: (pid: string, approval: "approve" | "reject") => void
+): AgentConversationEvent[] {
+  return messages.map((message, index) => {
+    if (message.toolCall) return toolCallMessageToConversationEvent(message, index);
+    if (message.permissionRequest) return permissionMessageToConversationEvent(message, handlePermission);
+    if (message.plan) return planMessageToConversationEvent(message);
+    if (message.task) return taskMessageToConversationEvent(message);
+    return plainMessageToConversationEvent(message);
+  });
+}
+
+function plainMessageToConversationEvent(message: RuntimeChatMessage): AgentConversationEvent {
+  const isError = message.role === "error" || message.status === "failed";
+  const isUser = message.role === "user";
+  const isAssistant = message.role === "assistant" || message.role === "result";
+  return {
+    id: message.id,
+    kind: isError ? "error" : isUser ? "user_message" : isAssistant ? "assistant_message" : "runtime_event",
+    role: isUser ? "user" : isAssistant ? "assistant" : message.role === "system" ? "system" : "runtime",
+    title: conversationTitleForRole(message.role),
+    content: message.content,
+    status: conversationStatus(message.status),
+    timestamp: message.createdAt,
+    reasoning: message.reasoning
+      ? {
+        content: message.reasoning.content,
+        durationMs: message.reasoning.durationMs,
+        isStreaming: message.status === "streaming"
+      }
+      : undefined,
+    metadata: message.traceIds?.length ? message.traceIds.map((traceId) => `trace: ${traceId}`) : undefined
+  };
+}
+
+function toolCallMessageToConversationEvent(message: RuntimeChatMessage, index: number): AgentConversationEvent {
+  const tool = message.toolCall!;
+  const content = [
+    tool.inputSummary ? `Input: ${tool.inputSummary}` : "",
+    tool.outputSummary ? `Output: ${tool.outputSummary}` : "",
+    message.content
+  ].filter(Boolean).join("\n\n");
+  return {
+    id: message.id || `${tool.id}-${index}`,
+    kind: "tool_call",
+    role: "runtime",
+    title: tool.name,
+    content,
+    status: conversationStatus(tool.status),
+    timestamp: message.createdAt,
+    metadata: compactMetadata([
+      `risk: ${tool.riskLevel}`,
+      `tool: ${tool.id}`,
+      ...(message.traceIds ?? []).map((traceId) => `trace: ${traceId}`)
+    ])
+  };
+}
+
+function permissionMessageToConversationEvent(
+  message: RuntimeChatMessage,
+  handlePermission: (pid: string, approval: "approve" | "reject") => void
+): AgentConversationEvent {
+  const permission = message.permissionRequest!;
+  return {
+    id: message.id,
+    kind: "permission",
+    role: "runtime",
+    title: permission.title,
+    content: [permission.description, message.content].filter(Boolean).join("\n\n"),
+    status: conversationStatus(message.status) ?? "pending",
+    timestamp: message.createdAt,
+    metadata: compactMetadata([
+      permission.actionType,
+      ...permission.affectedPaths.map((path) => `path: ${path}`),
+      ...permission.affectedNodeIds.map((id) => `node: ${id}`),
+      ...permission.affectedEdgeIds.map((id) => `edge: ${id}`)
+    ]),
+    actions: permission.options
+      .filter((option): option is { id: "approve" | "reject"; label: string } => option.id === "approve" || option.id === "reject")
+      .map((option) => ({
+        label: option.label,
+        tone: option.id === "approve" ? "primary" : "danger",
+        onClick: () => handlePermission(permission.id, option.id)
+      }))
+  };
+}
+
+function planMessageToConversationEvent(message: RuntimeChatMessage): AgentConversationEvent {
+  const plan = message.plan!;
+  return {
+    id: message.id,
+    kind: "plan",
+    role: "assistant",
+    title: "Plan",
+    content: [
+      message.content,
+      plan.summary,
+      formatPlanActionList(plan.actions),
+      formatStringList("Questions", plan.questions)
+    ].filter(Boolean).join("\n\n"),
+    status: conversationStatus(message.status),
+    timestamp: message.createdAt,
+    reasoning: message.reasoning ? { content: message.reasoning.content, durationMs: message.reasoning.durationMs } : undefined,
+    metadata: compactMetadata([
+      `${plan.actions.length} actions`,
+      `${plan.codingTasks.length} coding tasks`,
+      `${plan.missingGluePoints.length} missing glue points`
+    ])
+  };
+}
+
+function taskMessageToConversationEvent(message: RuntimeChatMessage): AgentConversationEvent {
+  const task = message.task!;
+  return {
+    id: message.id,
+    kind: "final_summary",
+    role: "assistant",
+    title: task.title,
+    content: [
+      message.content,
+      task.instruction,
+      formatStringList("Acceptance criteria", task.acceptanceCriteria),
+      formatStringList("Verification", task.verificationCommands)
+    ].filter(Boolean).join("\n\n"),
+    status: conversationStatus(message.status),
+    timestamp: message.createdAt,
+    metadata: compactMetadata([
+      `task: ${task.id}`,
+      ...task.scope.allowedPaths.map((path) => `allow: ${path}`),
+      ...task.scope.forbiddenPaths.map((path) => `deny: ${path}`)
+    ])
+  };
+}
+
+function conversationTitleForRole(role: RuntimeChatMessage["role"]): string {
+  if (role === "user") return "You";
+  if (role === "assistant") return "Praxis";
+  if (role === "result") return "Result";
+  if (role === "system") return "System";
+  if (role === "error") return "Error";
+  return "Runtime";
+}
+
+function conversationStatus(status: RuntimeChatMessage["status"] | RuntimeToolCallView["status"] | undefined): AgentConversationEvent["status"] {
+  if (status === "streaming" || status === "running") return "running";
+  if (status === "success") return "done";
+  return status;
+}
+
+function formatPlanActionList(actions: RuntimePlanAction[]): string {
+  if (!actions.length) return "";
+  return [
+    "Actions:",
+    ...actions.map((action) => `- ${action.title}: ${action.description}`)
+  ].join("\n");
+}
+
+function formatStringList(title: string, values: string[]): string {
+  if (!values.length) return "";
+  return [
+    `${title}:`,
+    ...values.map((value) => `- ${value}`)
+  ].join("\n");
+}
+
+function compactMetadata(values: string[]): string[] | undefined {
+  const compacted = values.map((value) => value.trim()).filter(Boolean);
+  return compacted.length ? compacted.slice(0, 12) : undefined;
 }
 
 function latestToolMessages(messages: RuntimeChatMessage[]): RuntimeChatMessage[] {
@@ -1076,52 +1198,6 @@ function latestToolMessages(messages: RuntimeChatMessage[]): RuntimeChatMessage[
     byToolCall.set(message.toolCall.id, message);
   }
   return [...byToolCall.values()];
-}
-
-
-// ─── Message grouping helper ────────────────────────────────
-
-function renderMessages(
-  messages: RuntimeChatMessage[],
-  handlePermission: (pid: string, approval: "approve" | "reject") => void
-) {
-  const result: React.ReactNode[] = [];
-  let toolGroup: RuntimeChatMessage[] = [];
-  const latestToolMessageIds = new Set(latestToolMessages(messages).map((message) => message.id));
-  const visibleMessages = messages.filter((message) => !message.toolCall || latestToolMessageIds.has(message.id));
-
-  for (let i = 0; i < visibleMessages.length; i++) {
-    const msg = visibleMessages[i];
-
-    if (msg.role === "tool") {
-      toolGroup.push(msg);
-      // If next message is not tool or this is the last, render group
-      if (i === visibleMessages.length - 1 || visibleMessages[i + 1]?.role !== "tool") {
-        result.push(
-          <AgentChatMessage
-            key={toolGroup[0].id}
-            message={toolGroup[0]}
-            onApprovePermission={(pid) => handlePermission(pid, "approve")}
-            onRejectPermission={(pid) => handlePermission(pid, "reject")}
-            toolGroup={toolGroup}
-            groupIndex={0}
-            totalInGroup={toolGroup.length}
-          />
-        );
-        toolGroup = [];
-      }
-    } else {
-      result.push(
-        <AgentChatMessage
-          key={msg.id}
-          message={msg}
-          onApprovePermission={(pid) => handlePermission(pid, "approve")}
-          onRejectPermission={(pid) => handlePermission(pid, "reject")}
-        />
-      );
-    }
-  }
-  return result;
 }
 
 // ─── Right Panels ───────────────────────────────────────────

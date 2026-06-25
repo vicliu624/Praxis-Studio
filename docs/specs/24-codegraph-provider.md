@@ -44,14 +44,15 @@ replace Praxis local-knowledge policy
   Praxis-normalized provider output
 
 .distinction/memory/*.jsonl
-  Praxis durable memory
+  legacy mirror during Project Memory migration
 ```
 
 ### 3.2 Invalid Distinctions
 
 ```text
 Do not treat CodeGraph schema as Praxis schema.
-Do not persist provider-native payloads as durable project memory.
+Do not persist provider-native payloads as durable Project Memory.
+Do not treat `.distinction/memory/*.jsonl` as the final Project Memory authority.
 Do not make CodeGraph availability a prerequisite for Praxis intake.
 Do not make Praxis a wrapper shell around CodeGraph.
 ```

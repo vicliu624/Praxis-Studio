@@ -37,6 +37,8 @@ Symbol / UML-like views
   projected from UmlModel
 ```
 
+Design Explorer is a separate story-first surface. It owns recovered Use Case Diagram lists, Sequence Diagrams, Class Collaboration Diagrams and Pattern Maps. Architecture Graph View may link to those projections, but it must not treat them as architecture dependency truth.
+
 ## 3. Architecture nodes
 
 ```text

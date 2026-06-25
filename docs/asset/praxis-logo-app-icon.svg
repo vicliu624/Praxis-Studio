@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Praxis Studio app icon</title>
+  <desc id="desc">A dark app icon containing the Praxis Studio graph-memory logo mark.</desc>
+  <rect width="512" height="512" rx="96" fill="#0C1116" />
+  <rect x="52" y="52" width="408" height="408" rx="72" fill="#111820" stroke="#263241" stroke-width="10" />
+  <g transform="translate(128 112) scale(1.12)">
+    <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+      <path
+        d="M80 202V58h65c35 0 57 23 57 58s-24 57-59 57H80"
+        stroke="#0C1116"
+        stroke-width="48"
+      />
+      <path
+        d="M80 202V58h65c35 0 57 23 57 58s-24 57-59 57H80"
+        stroke="#E7A23C"
+        stroke-width="32"
+      />
+      <path d="M112 121h42" stroke="#0C1116" stroke-width="22" />
+      <path d="M112 121h42" stroke="#6EE7D8" stroke-width="10" />
+    </g>
+    <g>
+      <circle cx="80" cy="58" r="21" fill="#0C1116" />
+      <circle cx="80" cy="58" r="11" fill="#6EE7D8" />
+      <circle cx="202" cy="116" r="21" fill="#0C1116" />
+      <circle cx="202" cy="116" r="11" fill="#6EE7D8" />
+      <circle cx="80" cy="202" r="21" fill="#0C1116" />
+      <circle cx="80" cy="202" r="11" fill="#E7A23C" />
+      <circle cx="80" cy="173" r="17" fill="#0C1116" />
+      <circle cx="80" cy="173" r="8" fill="#EDF2F7" />
+      <circle cx="112" cy="121" r="11" fill="#0C1116" />
+      <circle cx="112" cy="121" r="5" fill="#EDF2F7" />
+      <circle cx="133" cy="121" r="11" fill="#0C1116" />
+      <circle cx="133" cy="121" r="5" fill="#6EE7D8" />
+      <circle cx="154" cy="121" r="11" fill="#0C1116" />
+      <circle cx="154" cy="121" r="5" fill="#EDF2F7" />
+    </g>
+  </g>
+</svg>

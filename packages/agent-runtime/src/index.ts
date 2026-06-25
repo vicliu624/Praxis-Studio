@@ -158,6 +158,10 @@ function promptForTask(taskType: ModelTaskType): PromptName {
   if (taskType === "project.create.requirements") return "project-create-requirements";
   if (taskType === "project.create.architecture") return "project-create-architecture";
   if (taskType === "project.create.graph") return "project-create-graph";
+  if (taskType === "design.discovery.use_cases") return "design-discovery-use-cases";
+  if (taskType === "design.story_intake") return "design-story-intake";
+  if (taskType === "design.diagram_discussion") return "design-diagram-discussion";
+  if (taskType === "design.version_decision") return "design-version-decision";
   if (taskType === "memory.summarize") return "memory-summarize";
   return "project-intake-analyze";
 }

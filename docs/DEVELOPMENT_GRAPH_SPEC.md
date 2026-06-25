@@ -165,7 +165,7 @@ export interface DevelopmentGraphCandidate {
 }
 ```
 
-用户确认后，候选图谱才能写入 `.distinction/memory/`、`.distinction/models/`，并投影到 `.distinction/views/`。
+用户确认后，候选图谱必须先写入 docs-backed Project Memory，并由 Git 形成版本时间线。`.distinction/memory/`、`.distinction/models/` 只可作为迁移期镜像或运行时索引，`.distinction/views/` 只是可重建投影。
 
 ---
 
