@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import { ScopedAgentPanel, type ScopedAgentSubmitResult } from "../chat/ScopedAgentPanel";
-import { renderSemanticMermaidBlocks, useUmlFullscreenViewer } from "../components/SemanticMermaidRenderer";
+import { findSemanticMermaidBlocks, renderSemanticMermaidBlocks, useUmlFullscreenViewer } from "../components/SemanticMermaidRenderer";
 import { normalizeInternalTermsInHtmlDocument } from "../components/userFacingText";
 import {
   discussArchitectureDiagram,
   discussDesignDiagram,
   discussEngineeringDiagram,
+  readProjectFile,
   readModelDocumentHtml,
   readModelDocumentMarkdown,
   readModelMapMarkdown,
@@ -126,7 +127,9 @@ export function ModelExplorerPage({ projectRoot }: ModelExplorerPageProps) {
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
   const [sideTab, setSideTab] = useState<"models" | "agent">("models");
-  const registry = useMemo(() => parseModelRegistry(rootHtml), [rootHtml]);
+  const [inspectedRegistry, setInspectedRegistry] = useState<UmlModelRegistry | null>(null);
+  const embeddedRegistry = useMemo(() => parseModelRegistry(rootHtml), [rootHtml]);
+  const registry = inspectedRegistry ?? embeddedRegistry;
 
   useEffect(() => {
     if (projectRoot) {
@@ -139,6 +142,7 @@ export function ModelExplorerPage({ projectRoot }: ModelExplorerPageProps) {
     setActiveMarkdown("");
     setActiveDocumentPath("");
     setActiveDocumentTitle("UML Model Registry");
+    setInspectedRegistry(null);
     setState("idle");
     setStatus("");
     setError("");
@@ -149,7 +153,13 @@ export function ModelExplorerPage({ projectRoot }: ModelExplorerPageProps) {
     setStatus("正在读取 docs/models 模型注册表");
     setError("");
     try {
-      const [html, markdown] = await Promise.all([readModelSemanticHtml(root), readModelMapMarkdown(root)]);
+      const [html, markdown, inspected] = await Promise.all([
+        readModelSemanticHtml(root),
+        readModelMapMarkdown(root),
+        readProjectFile(root, "docs/models/model-registry.json")
+          .then((content) => JSON.parse(content) as unknown)
+          .catch(() => null)
+      ]);
       if (!html?.trim() && !markdown?.trim()) {
         setRootHtml("");
         setRootMarkdown("");
@@ -163,6 +173,7 @@ export function ModelExplorerPage({ projectRoot }: ModelExplorerPageProps) {
       const nextHtml = html ?? fallbackMarkdownHtml(markdown ?? "");
       setRootHtml(nextHtml);
       setRootMarkdown(markdown ?? "");
+      setInspectedRegistry(isUmlModelRegistry(inspected) ? inspected : null);
       setActiveHtml(nextHtml);
       setActiveMarkdown(markdown ?? "");
       setActiveDocumentPath("docs/models/models-map.html");
@@ -204,7 +215,7 @@ export function ModelExplorerPage({ projectRoot }: ModelExplorerPageProps) {
       setStatus("文档读取失败");
       return;
     }
-    setActiveHtml(html ?? fallbackMarkdownHtml(markdown ?? ""));
+    setActiveHtml(markdown?.trim() ? renderAuthoredModelMarkdown(markdown) : html ?? "");
     setActiveMarkdown(markdown ?? "");
     setActiveDocumentPath(htmlPath);
     setActiveDocumentTitle(document.title);
@@ -328,7 +339,9 @@ function ModelTree({
   useEffect(() => {
     if (!registry) return;
     setExpandedModelIds(new Set(registry.models.map((model) => model.id)));
-    setExpandedPackageIds(new Set(registry.models.flatMap((model) => model.packages.filter((pkg) => !pkg.parentPackageId || pkg.packagePath === ".").map((pkg) => pkg.id))));
+    setExpandedPackageIds(new Set(registry.models.flatMap((model) => model.packages
+      .filter((pkg) => (pkg.level ?? 0) <= 1)
+      .map((pkg) => pkg.id))));
   }, [registry?.generatedAt]);
   if (!registry) return <div className="engineering-empty-note">尚未载入 docs/models。</div>;
   const projectionCount = registry.summary.projectionCount ?? registry.projections?.length ?? 0;
@@ -500,7 +513,7 @@ function SemanticModelHtml({
     const scrollLeft = host.scrollLeft;
     const nextHost = document.createElement("div");
     nextHost.innerHTML = safeHtml;
-    const blocks = Array.from(nextHost.querySelectorAll("pre.mermaid"));
+    const blocks = findSemanticMermaidBlocks(nextHost);
     void renderSemanticMermaidBlocks({
       blocks,
       renderIdPrefix: "praxis-model-explorer",
@@ -643,6 +656,14 @@ function parseModelRegistry(html: string): UmlModelRegistry | null {
   }
 }
 
+function isUmlModelRegistry(value: unknown): value is UmlModelRegistry {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<UmlModelRegistry>;
+  return candidate.schemaVersion === "praxis.umlModelRegistry.v1"
+    && Array.isArray(candidate.models)
+    && Boolean(candidate.summary && typeof candidate.summary === "object");
+}
+
 function documentCardReferenceFromTarget(target: EventTarget | null): ModelDocumentCardReference | null {
   if (!(target instanceof Element)) return null;
   const card = target.closest("[data-praxis-document-html]");
@@ -672,6 +693,89 @@ function fallbackMarkdownHtml(markdown: string): string {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
   return `<main class="praxis-model-registry"><pre>${escaped}</pre></main>`;
+}
+
+function renderAuthoredModelMarkdown(markdown: string): string {
+  const lines = markdown.split(/\r?\n/);
+  const html: string[] = ['<main class="praxis-model-document model-authored-document" data-praxis-kind="authored_model_document">'];
+  let index = 0;
+  while (index < lines.length) {
+    const line = lines[index] ?? "";
+    const fence = line.match(/^```([A-Za-z0-9_-]*)\s*$/);
+    if (fence) {
+      const language = (fence[1] ?? "").toLowerCase();
+      const code: string[] = [];
+      index += 1;
+      while (index < lines.length && !/^```\s*$/.test(lines[index] ?? "")) {
+        code.push(lines[index] ?? "");
+        index += 1;
+      }
+      const className = language === "mermaid" ? ' class="mermaid"' : "";
+      html.push(`<pre${className}><code>${escapeAuthoredModelHtml(code.join("\n"))}</code></pre>`);
+      index += 1;
+      continue;
+    }
+    const heading = line.match(/^(#{1,4})\s+(.+)$/);
+    if (heading) {
+      const level = heading[1]?.length ?? 2;
+      html.push(`<h${level}>${renderAuthoredModelInline(heading[2] ?? "")}</h${level}>`);
+      index += 1;
+      continue;
+    }
+    if (/^\|.+\|\s*$/.test(line)) {
+      const rows: string[][] = [];
+      while (index < lines.length && /^\|.+\|\s*$/.test(lines[index] ?? "")) {
+        const tableLine = (lines[index] ?? "").trim();
+        const cells = tableLine.slice(1, -1).split("|").map((cell) => cell.trim());
+        if (!cells.every((cell) => /^:?-{3,}:?$/.test(cell))) rows.push(cells);
+        index += 1;
+      }
+      if (rows.length) {
+        const [header, ...body] = rows;
+        html.push("<table><thead><tr>", ...header.map((cell) => `<th>${renderAuthoredModelInline(cell)}</th>`), "</tr></thead><tbody>");
+        for (const row of body) html.push("<tr>", ...row.map((cell) => `<td>${renderAuthoredModelInline(cell)}</td>`), "</tr>");
+        html.push("</tbody></table>");
+      }
+      continue;
+    }
+    if (/^-\s+/.test(line)) {
+      html.push("<ul>");
+      while (index < lines.length && /^-\s+/.test(lines[index] ?? "")) {
+        html.push(`<li>${renderAuthoredModelInline((lines[index] ?? "").replace(/^-\s+/, ""))}</li>`);
+        index += 1;
+      }
+      html.push("</ul>");
+      continue;
+    }
+    if (/^\d+\.\s+/.test(line)) {
+      html.push("<ol>");
+      while (index < lines.length && /^\d+\.\s+/.test(lines[index] ?? "")) {
+        html.push(`<li>${renderAuthoredModelInline((lines[index] ?? "").replace(/^\d+\.\s+/, ""))}</li>`);
+        index += 1;
+      }
+      html.push("</ol>");
+      continue;
+    }
+    if (line.trim()) html.push(`<p>${renderAuthoredModelInline(line.trim())}</p>`);
+    index += 1;
+  }
+  html.push("</main>");
+  return html.join("\n");
+}
+
+function renderAuthoredModelInline(value: string): string {
+  return escapeAuthoredModelHtml(value)
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>');
+}
+
+function escapeAuthoredModelHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }
 
 function modelDocumentStatusLabel(state: ModelDocumentState): string {

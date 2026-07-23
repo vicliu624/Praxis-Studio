@@ -3,7 +3,7 @@ import { type TranslationKey, useI18n } from "../i18n";
 import { AgentConversationPanel, type AgentConversationEvent } from "../chat/AgentConversationPanel";
 import { ScopedAgentPanel, type ScopedAgentSubmitResult } from "../chat/ScopedAgentPanel";
 import { CodeEvidencePreview } from "../components/CodeEvidencePreview";
-import { renderSemanticMermaidBlocks, useUmlFullscreenViewer } from "../components/SemanticMermaidRenderer";
+import { findSemanticMermaidBlocks, renderSemanticMermaidBlocks, useUmlFullscreenViewer } from "../components/SemanticMermaidRenderer";
 import { normalizeInternalTermsInHtmlDocument } from "../components/userFacingText";
 import {
   designUseCaseHtmlRelativePath,
@@ -11,11 +11,9 @@ import {
   openProjectFileWith,
   runDesignDiscoveryWithProgress,
   readProjectFile,
+  readProjectTree,
   readDesignMapMarkdown,
   readDesignSemanticHtml,
-  readDesignUseCaseSemanticHtml,
-  readProjectedGraphViews,
-  refreshDesignViews,
   submitDesignStoryIntake,
   type RuntimeDesignAffectedDocument,
   type RuntimeDesignCurrentUmlContext,
@@ -24,7 +22,6 @@ import {
   type RuntimeDesignDiscoveryProgress,
   type RuntimeDesignStoryIntakeResult,
   type ProjectFileOpener,
-  type RuntimeProjectionViewsResult,
   type RuntimeProjectedGraphNode,
   type RuntimeProjectedGraphViewRecord,
   type RuntimeScopedAgentHistoryEntry
@@ -171,6 +168,7 @@ export function DesignExplorerPage({ projectRoot }: DesignExplorerPageProps) {
   const { t } = useI18n();
   const [records, setRecords] = useState<RuntimeProjectedGraphViewRecord[]>([]);
   const [skippedPaths, setSkippedPaths] = useState<string[]>([]);
+  const [designDocPaths, setDesignDocPaths] = useState<string[]>([]);
   const [semanticHtml, setSemanticHtml] = useState("");
   const [designMarkdown, setDesignMarkdown] = useState("");
   const [selectedSemanticAnchor, setSelectedSemanticAnchor] = useState<SemanticHtmlSelection | null>(null);
@@ -190,6 +188,7 @@ export function DesignExplorerPage({ projectRoot }: DesignExplorerPageProps) {
     }
     setRecords([]);
     setSkippedPaths([]);
+    setDesignDocPaths([]);
     setSemanticHtml("");
     setDesignMarkdown("");
     setSelectedSemanticAnchor(null);
@@ -217,8 +216,8 @@ export function DesignExplorerPage({ projectRoot }: DesignExplorerPageProps) {
     [designRecords]
   );
   const useCaseItems = useMemo(
-    () => buildUseCaseDiagramItems(useCaseListRecord, useCaseContextRecords, semanticHtml, designMarkdown),
-    [designMarkdown, semanticHtml, useCaseListRecord, useCaseContextRecords]
+    () => buildUseCaseDiagramItems(useCaseListRecord, useCaseContextRecords, semanticHtml, designMarkdown, designDocPaths),
+    [designDocPaths, designMarkdown, semanticHtml, useCaseListRecord, useCaseContextRecords]
   );
   const selectedUseCase = useMemo(
     () => useCaseItems.find((item) => item.id === selectedUseCaseId) ?? null,
@@ -245,8 +244,8 @@ export function DesignExplorerPage({ projectRoot }: DesignExplorerPageProps) {
     [designMarkdown, semanticHtml]
   );
   const docsBackedDrilldownCounts = useMemo(
-    () => countDesignDrilldownsFromDocs(semanticHtml),
-    [semanticHtml]
+    () => countDesignDrilldownsFromDocs(semanticHtml, designDocPaths),
+    [designDocPaths, semanticHtml]
   );
   useEffect(() => {
     if (selectedUseCaseId && !selectedUseCase) setSelectedUseCaseId(null);
@@ -292,7 +291,7 @@ export function DesignExplorerPage({ projectRoot }: DesignExplorerPageProps) {
         if (!loaded) throw new Error(`UML document not found: ${candidates.join(" | ")}`);
         if (active) {
           setActiveUmlPath(loaded.path);
-          setActiveUmlHtml(loaded.content);
+          setActiveUmlHtml(renderAuthoredDesignDocument(loaded.path, loaded.content));
         }
       } catch (error) {
         if (active) {
@@ -320,10 +319,11 @@ export function DesignExplorerPage({ projectRoot }: DesignExplorerPageProps) {
       polling = true;
       void readProjectFile(projectRoot, activeUmlPath)
         .then((content) => {
-          if (disposed || !content.trim() || content === activeUmlHtmlRef.current) return;
-          activeUmlHtmlRef.current = content;
-          setActiveUmlHtml(content);
-          if (activeUmlNode?.root) setSelectedUseCaseHtml(content);
+          const rendered = renderAuthoredDesignDocument(activeUmlPath, content);
+          if (disposed || !content.trim() || rendered === activeUmlHtmlRef.current) return;
+          activeUmlHtmlRef.current = rendered;
+          setActiveUmlHtml(rendered);
+          if (activeUmlNode?.root) setSelectedUseCaseHtml(rendered);
           setActiveUmlLiveUpdating(true);
           setActiveUmlLiveUpdatedAt(new Date().toLocaleTimeString());
           window.setTimeout(() => {
@@ -346,9 +346,10 @@ export function DesignExplorerPage({ projectRoot }: DesignExplorerPageProps) {
     try {
       const content = await readProjectFile(projectRoot, activeUmlPath);
       if (!content.trim()) return;
-      activeUmlHtmlRef.current = content;
-      setActiveUmlHtml(content);
-      if (activeUmlNode?.root) setSelectedUseCaseHtml(content);
+      const rendered = renderAuthoredDesignDocument(activeUmlPath, content);
+      activeUmlHtmlRef.current = rendered;
+      setActiveUmlHtml(rendered);
+      if (activeUmlNode?.root) setSelectedUseCaseHtml(rendered);
       setActiveUmlLiveUpdating(true);
       setActiveUmlLiveUpdatedAt(new Date().toLocaleTimeString());
       window.setTimeout(() => setActiveUmlLiveUpdating(false), 900);
@@ -360,21 +361,29 @@ export function DesignExplorerPage({ projectRoot }: DesignExplorerPageProps) {
   useEffect(() => {
     let active = true;
     async function loadSelectedUseCaseHtml() {
-      if (!projectRoot || !selectedUseCaseId) {
+      if (!projectRoot || !selectedUseCaseId || !selectedUseCase) {
         setSelectedUseCaseHtml("");
         setSelectedUseCaseHtmlPath("");
         setSelectedUseCaseHtmlLoading(false);
         return;
       }
-      const htmlPath = designUseCaseHtmlRelativePath(selectedUseCaseId);
-      setSelectedUseCaseHtmlPath(htmlPath);
+      const pathCandidates = useCaseDocumentPathCandidates(selectedUseCase);
+      const displayPath = pathCandidates[0] ?? designUseCaseHtmlRelativePath(selectedUseCaseId);
+      setSelectedUseCaseHtmlPath(displayPath);
       setSelectedUseCaseHtmlLoading(true);
       const fallbackHtml = extractUseCaseSectionHtml(semanticHtml, selectedUseCaseId);
       try {
-        const html = await readDesignUseCaseSemanticHtml(projectRoot, selectedUseCaseId);
-        if (active) setSelectedUseCaseHtml(html?.trim() ? html : fallbackHtml ?? "");
+        const loaded = await readFirstProjectFile(projectRoot, pathCandidates);
+        if (active) {
+          setSelectedUseCaseHtml(
+            loaded?.content.trim()
+              ? renderAuthoredDesignDocument(loaded.path, loaded.content)
+              : fallbackHtml ?? renderAuthoredDesignMarkdown(syntheticUseCaseDocument(selectedUseCase))
+          );
+        }
+        if (active && loaded?.path) setSelectedUseCaseHtmlPath(loaded.path);
       } catch {
-        if (active) setSelectedUseCaseHtml(fallbackHtml ?? "");
+        if (active) setSelectedUseCaseHtml(fallbackHtml ?? renderAuthoredDesignMarkdown(syntheticUseCaseDocument(selectedUseCase)));
       } finally {
         if (active) setSelectedUseCaseHtmlLoading(false);
       }
@@ -383,7 +392,7 @@ export function DesignExplorerPage({ projectRoot }: DesignExplorerPageProps) {
     return () => {
       active = false;
     };
-  }, [projectRoot, selectedUseCaseId, semanticHtml]);
+  }, [projectRoot, selectedUseCase, selectedUseCaseId, semanticHtml]);
   const designNodeRecords = useCaseContextRecords.flatMap((record) => record.view.nodes);
   const projectedSequenceCount = designNodeRecords.filter((node) => node.kind === "design_sequence").length;
   const projectedClassCollaborationCount = designNodeRecords.filter((node) => node.kind === "design_class_collaboration").length;
@@ -401,23 +410,13 @@ export function DesignExplorerPage({ projectRoot }: DesignExplorerPageProps) {
     setError("");
     setGenerationProgress(null);
     try {
-      let html = await readDesignSemanticHtml(root);
-      let markdown = await readDesignMapMarkdown(root);
-      let result = await readProjectedGraphViews(root);
+      const html = await readDesignSemanticHtml(root);
+      const markdown = await readDesignMapMarkdown(root);
+      const docPaths = await listDesignProjectDocuments(root);
 
-      if (!html) {
-        if (markdown?.trim()) {
-          result = await refreshDesignViews(root);
-          html = await readDesignSemanticHtml(root);
-          markdown = await readDesignMapMarkdown(root);
-        }
-      } else if (!hasDesignRecords(result)) {
-        const refreshed = await refreshDesignViews(root).catch(() => undefined);
-        if (refreshed) result = refreshed;
-      }
-
-      setRecords(result.records);
-      setSkippedPaths(result.skippedPaths);
+      setRecords([]);
+      setSkippedPaths([]);
+      setDesignDocPaths(filterDesignDocumentPaths(docPaths));
       setSemanticHtml(html ?? "");
       setDesignMarkdown(markdown ?? "");
       setSelectedSemanticAnchor(null);
@@ -425,7 +424,7 @@ export function DesignExplorerPage({ projectRoot }: DesignExplorerPageProps) {
       setSelectedUseCaseHtml("");
       setSelectedUseCaseHtmlPath("");
       setSelectedUseCaseHtmlLoading(false);
-      setDocumentState(html?.trim() ? "ready" : "missing");
+      setDocumentState(html?.trim() || markdown?.trim() || docPaths.length ? "ready" : "missing");
       setStatus("");
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : String(loadError));
@@ -441,9 +440,11 @@ export function DesignExplorerPage({ projectRoot }: DesignExplorerPageProps) {
     setError("");
     setGenerationProgress(null);
     try {
-      const result = await runDesignDiscoveryWithProgress(root, setGenerationProgress);
-      setRecords(result.records);
-      setSkippedPaths(result.skippedPaths);
+      await runDesignDiscoveryWithProgress(root, setGenerationProgress);
+      const docPaths = await listDesignProjectDocuments(root);
+      setRecords([]);
+      setSkippedPaths([]);
+      setDesignDocPaths(filterDesignDocumentPaths(docPaths));
       const html = await readDesignSemanticHtml(root);
       const markdown = await readDesignMapMarkdown(root);
       setSemanticHtml(html ?? "");
@@ -453,7 +454,7 @@ export function DesignExplorerPage({ projectRoot }: DesignExplorerPageProps) {
       setSelectedUseCaseHtml("");
       setSelectedUseCaseHtmlPath("");
       setSelectedUseCaseHtmlLoading(false);
-      setDocumentState(html?.trim() ? "ready" : "missing");
+      setDocumentState(html?.trim() || markdown?.trim() || docPaths.length ? "ready" : "missing");
       setStatus("");
     } catch (loadError) {
       setError(formatDesignGenerationError(loadError));
@@ -465,6 +466,25 @@ export function DesignExplorerPage({ projectRoot }: DesignExplorerPageProps) {
   function selectSemanticAnchor(event: MouseEvent<HTMLDivElement>) {
     const target = event.target;
     if (!(target instanceof Element)) return;
+    const link = target.closest("a[href]");
+    if (link instanceof HTMLAnchorElement) {
+      const resolvedPath = resolveDesignDocumentHref(link.getAttribute("href") ?? "", activeUmlPath || selectedUseCaseHtmlPath || "docs/design/use-case-diagrams-maps.html");
+      if (resolvedPath) {
+        const targetUseCase = useCaseItems.find((item) => sameDesignDocumentPath(item.node.path, resolvedPath));
+        const targetNode = selectedUseCaseUmlTreeNodes.find((node) => sameDesignDocumentPath(node.htmlPath, resolvedPath));
+        if (targetUseCase || targetNode) {
+          event.preventDefault();
+          event.stopPropagation();
+          if (targetUseCase) {
+            setSelectedUseCaseId(targetUseCase.id);
+            setActiveUmlNodeId(`${targetUseCase.id}:use-case-diagram`);
+          } else if (targetNode) {
+            setActiveUmlNodeId(targetNode.id);
+          }
+          return;
+        }
+      }
+    }
     const element = target.closest("[data-praxis-anchor]");
     if (!element) {
       setSelectedSemanticAnchor(null);
@@ -840,9 +860,9 @@ function isDesignGeneratedFilePath(value: string | undefined): value is string {
   if (!value) return false;
   if (value.includes("*") || value.includes("<") || value.includes(">")) return false;
   return value.startsWith("docs/design/")
-    || value.startsWith(".distinction/cache/")
-    || value.startsWith(".distinction/views/")
-    || value.startsWith(".distinction/runtime/");
+    || value.startsWith(".praxis/runtime/cache/")
+    || value.startsWith(".praxis/runtime/views/")
+    || value.startsWith(".praxis/runtime/");
 }
 
 function progressEventStatus(
@@ -1550,7 +1570,7 @@ function useCaseUmlHtmlPathCandidates(useCaseId: string, node: Pick<UseCaseUmlTr
   } else if (node.kind === "composite_structure") {
     addSluggedDrilldownCandidates(candidates, `${base}/composite-structures`, node.id, "composite-structure", "composite_structure");
   }
-  return Array.from(candidates).filter(Boolean);
+  return expandDesignDocumentPathCandidates(Array.from(candidates).filter(Boolean));
 }
 
 function addSluggedDrilldownCandidates(candidates: Set<string>, directory: string, id: string, ...prefixes: string[]) {
@@ -2071,7 +2091,7 @@ function SemanticDesignHtml({
 }) {
   const { t } = useI18n();
   const hostRef = useRef<HTMLDivElement | null>(null);
-  const safeHtml = useMemo(() => sanitizeSemanticHtml(html), [html]);
+  const safeHtml = useMemo(() => sanitizeSemanticHtml(renderSemanticDocumentHtml(html)), [html]);
   const umlFullscreen = useUmlFullscreenViewer(safeHtml);
   const fullscreenLabel = t("design.fullscreenUml");
 
@@ -2083,7 +2103,7 @@ function SemanticDesignHtml({
     const scrollLeft = host.scrollLeft;
     const nextHost = document.createElement("div");
     nextHost.innerHTML = safeHtml;
-    const blocks = Array.from(nextHost.querySelectorAll("pre.mermaid"));
+    const blocks = findSemanticMermaidBlocks(nextHost);
     void renderSemanticMermaidBlocks({
       blocks,
       renderIdPrefix: "praxis-design-map",
@@ -2124,10 +2144,6 @@ function DesignMetric({ label, value }: { label: string; value: number }) {
       <strong>{value}</strong>
     </section>
   );
-}
-
-function hasDesignRecords(result: RuntimeProjectionViewsResult): boolean {
-  return result.records.some((record) => designViewKinds.has(record.view.kind));
 }
 
 function extractUseCaseSectionHtml(mapHtml: string, useCaseId: string): string | undefined {
@@ -2298,8 +2314,12 @@ function buildUseCaseDiagramItems(
   listRecord: RuntimeProjectedGraphViewRecord | undefined,
   contextRecords: RuntimeProjectedGraphViewRecord[],
   semanticHtml: string,
-  designMarkdown: string
+  designMarkdown: string,
+  designDocPaths: string[]
 ): UseCaseDiagramItem[] {
+  const docItems = buildUseCaseDiagramItemsFromDocs(semanticHtml, designMarkdown, designDocPaths);
+  if (docItems.length) return docItems;
+
   const sourceNodes = listRecord?.view.nodes.filter((node) => node.kind === "design_use_case") ?? [];
   const fallbackNodes = contextRecords.flatMap((record) => record.view.nodes.filter((node) => node.kind === "design_use_case"));
   const nodes = sourceNodes.length ? sourceNodes : fallbackNodes;
@@ -2342,8 +2362,7 @@ function buildUseCaseDiagramItems(
       drilldownNodes: itemDrilldownNodes
     });
   }
-  if (items.length) return items.sort((left, right) => left.title.localeCompare(right.title));
-  return buildUseCaseDiagramItemsFromDocs(semanticHtml, designMarkdown);
+  return items.sort((left, right) => left.title.localeCompare(right.title));
 }
 
 function isDesignDrilldownGraphNode(node: RuntimeProjectedGraphNode): boolean {
@@ -2354,17 +2373,31 @@ interface DocBackedUseCaseIndexEntry {
   id: string;
   title: string;
   htmlPath?: string;
+  markdownPath?: string;
   summary?: string;
   contextTitle?: string;
   status?: string;
   confidence?: string;
   drilldownCount?: number;
   updatedAt?: string;
+  drilldowns?: DocBackedUseCaseDrilldownEntry[];
 }
 
-function buildUseCaseDiagramItemsFromDocs(html: string, markdown: string): UseCaseDiagramItem[] {
+interface DocBackedUseCaseDrilldownEntry {
+  id: string;
+  kind: UseCaseUmlTreeNode["kind"];
+  title: string;
+  summary?: string;
+  path: string;
+  status?: string;
+  confidence?: string;
+}
+
+function buildUseCaseDiagramItemsFromDocs(html: string, markdown: string, docPaths: string[]): UseCaseDiagramItem[] {
   const htmlEntries = parseUseCaseIndexEntriesFromHtml(html);
-  const entries = htmlEntries.length ? htmlEntries : parseUseCaseIndexEntriesFromMarkdown(markdown);
+  const markdownEntries = parseUseCaseIndexEntriesFromMarkdown(markdown);
+  const scannedEntries = parseUseCaseIndexEntriesFromDocPaths(docPaths);
+  const entries = mergeDocBackedUseCaseEntries([...scannedEntries, ...htmlEntries, ...markdownEntries]);
   return entries.map((entry) => docBackedUseCaseItem(entry)).sort((left, right) => left.title.localeCompare(right.title));
 }
 
@@ -2421,11 +2454,13 @@ function parseUseCaseIndexEntriesFromMarkdown(markdown: string): DocBackedUseCas
     const cells = line.split("|").slice(1, -1).map((cell) => cell.trim());
     if (cells.length < 8) continue;
     const id = cells[0];
-    const htmlPath = normalizeDesignMapHref(markdownLinkTarget(cells[2])) || designUseCaseHtmlRelativePath(id);
+    const markdownPath = normalizeDesignMapHref(markdownLinkTarget(cells[1]));
+    const htmlPath = normalizeDesignMapHref(markdownLinkTarget(cells[2])) || markdownPath?.replace(/\.md$/i, ".html") || designUseCaseHtmlRelativePath(id);
     entries.push({
       id,
       title: stripMarkdown(cells[1]) || id.replace(/^use-case:/, ""),
       htmlPath,
+      markdownPath,
       summary: `Use Case Diagram：${stripMarkdown(cells[1]) || id.replace(/^use-case:/, "")}`,
       drilldownCount: Number(cells[3]) || undefined,
       contextTitle: stripMarkdown(cells[4]),
@@ -2437,11 +2472,217 @@ function parseUseCaseIndexEntriesFromMarkdown(markdown: string): DocBackedUseCas
   return entries;
 }
 
-function countDesignDrilldownsFromDocs(html: string): {
+function parseUseCaseIndexEntriesFromDocPaths(docPaths: string[]): DocBackedUseCaseIndexEntry[] {
+  const files = filterDesignDocumentPaths(docPaths);
+  const fileSet = new Set(files);
+  const entriesBySlug = new Map<string, DocBackedUseCaseIndexEntry>();
+
+  function ensureEntry(slug: string): DocBackedUseCaseIndexEntry {
+    const existing = entriesBySlug.get(slug);
+    if (existing) return existing;
+    const markdownPath = preferredDesignDocumentPath(`docs/design/use-case-diagrams/${slug}.md`, fileSet);
+    const htmlPath = preferredDesignDocumentPath(`docs/design/use-case-diagrams/${slug}.html`, fileSet) ?? markdownPath?.replace(/\.md$/i, ".html");
+    const entry: DocBackedUseCaseIndexEntry = {
+      id: `use-case:${slug}`,
+      title: humanizeDesignSlug(slug),
+      htmlPath,
+      markdownPath,
+      summary: `Use Case Diagram：${humanizeDesignSlug(slug)}`,
+      status: "candidate",
+      confidence: "candidate",
+      drilldowns: []
+    };
+    entriesBySlug.set(slug, entry);
+    return entry;
+  }
+
+  for (const path of files) {
+    const relative = path.replace(/\\/g, "/");
+    const match = relative.match(/^docs\/design\/use-case-diagrams\/([^/]+)(?:\/(.+)|\.(md|html))$/i);
+    if (!match) continue;
+    const slug = match[1];
+    const rest = match[2] ?? "";
+    const extension = match[3];
+    const entry = ensureEntry(slug);
+    if (extension) {
+      if (extension.toLowerCase() === "md") entry.markdownPath = relative;
+      if (extension.toLowerCase() === "html") entry.htmlPath = relative;
+      continue;
+    }
+
+    const drilldown = docBackedDrilldownFromPath(slug, relative, fileSet);
+    if (!drilldown) continue;
+    entry.drilldowns = mergeDocBackedDrilldowns([...(entry.drilldowns ?? []), drilldown]);
+    entry.drilldownCount = entry.drilldowns.length;
+  }
+
+  return Array.from(entriesBySlug.values());
+}
+
+function docBackedDrilldownFromPath(
+  useCaseSlug: string,
+  path: string,
+  fileSet: Set<string>
+): DocBackedUseCaseDrilldownEntry | undefined {
+  const normalized = path.replace(/\\/g, "/");
+  const leaf = normalized.split("/").pop() ?? "";
+  const stem = leaf.replace(/\.(md|html)$/i, "");
+  const preferredPath = preferredDesignDocumentPath(normalized, fileSet) ?? normalized;
+  if (/\/activity\.(md|html)$/i.test(normalized)) {
+    return {
+      id: `activity:${useCaseSlug}`,
+      kind: "activity",
+      title: "Activity Diagram",
+      summary: "业务流程、分支、失败路径和关键决策点。",
+      path: preferredPath,
+      status: "candidate",
+      confidence: "candidate"
+    };
+  }
+  if (/\/sequences\/.+\.(md|html)$/i.test(normalized)) {
+    return {
+      id: `sequence:${stem}`,
+      kind: "sequence",
+      title: humanizeDesignSlug(stem.replace(/^sequence-/, "")),
+      summary: "对象、组件或外部系统之间的消息时序。",
+      path: preferredPath,
+      status: "candidate",
+      confidence: "candidate"
+    };
+  }
+  if (/\/(state-machines|states)\/.+\.(md|html)$/i.test(normalized) || /\/state-machine\.(md|html)$/i.test(normalized)) {
+    return {
+      id: `state-machine:${stem}`,
+      kind: "state_machine",
+      title: humanizeDesignSlug(stem.replace(/^state-machine-/, "")),
+      summary: "关键业务对象生命周期和状态迁移。",
+      path: preferredPath,
+      status: "candidate",
+      confidence: "candidate"
+    };
+  }
+  if (/\/realization\/class-collaboration\.(md|html)$/i.test(normalized) || /\/class-collaboration\.(md|html)$/i.test(normalized)) {
+    return {
+      id: `class-collaboration:${useCaseSlug}`,
+      kind: "class_collaboration",
+      title: "Class Collaboration",
+      summary: "结构承载、协作角色、接口、端口、适配器和策略关系。",
+      path: preferredPath,
+      status: "candidate",
+      confidence: "candidate"
+    };
+  }
+  if (/\/communications\/.+\.(md|html)$/i.test(normalized)) {
+    return {
+      id: `communication:${stem}`,
+      kind: "communication",
+      title: humanizeDesignSlug(stem.replace(/^communication-/, "")),
+      summary: "运行时对象之间的消息网络和协作中心。",
+      path: preferredPath,
+      status: "candidate",
+      confidence: "candidate"
+    };
+  }
+  if (/\/timing\/.+\.(md|html)$/i.test(normalized)) {
+    return {
+      id: `timing:${stem}`,
+      kind: "timing",
+      title: humanizeDesignSlug(stem.replace(/^timing-/, "")),
+      summary: "时间窗口、超时、重试、轮询或 SLA 约束。",
+      path: preferredPath,
+      status: "candidate",
+      confidence: "candidate"
+    };
+  }
+  if (/\/object-snapshots\/.+\.(md|html)$/i.test(normalized)) {
+    return {
+      id: `object-snapshot:${stem}`,
+      kind: "object_snapshot",
+      title: humanizeDesignSlug(stem.replace(/^object-snapshot-/, "")),
+      summary: "关键时刻的运行时对象实例和关系。",
+      path: preferredPath,
+      status: "candidate",
+      confidence: "candidate"
+    };
+  }
+  if (/\/composite-structures\/.+\.(md|html)$/i.test(normalized)) {
+    return {
+      id: `composite-structure:${stem}`,
+      kind: "composite_structure",
+      title: humanizeDesignSlug(stem.replace(/^composite-structure-/, "")),
+      summary: "复杂结构内部部件、端口和连接关系。",
+      path: preferredPath,
+      status: "candidate",
+      confidence: "candidate"
+    };
+  }
+  if (/\/interaction-overviews\/.+\.(md|html)$/i.test(normalized)) {
+    return {
+      id: `interaction-overview:${stem}`,
+      kind: "interaction_overview",
+      title: humanizeDesignSlug(stem.replace(/^interaction-overview-/, "")),
+      summary: "多个交互片段、分支和子场景的组合关系。",
+      path: preferredPath,
+      status: "candidate",
+      confidence: "candidate"
+    };
+  }
+  return undefined;
+}
+
+function mergeDocBackedUseCaseEntries(entries: DocBackedUseCaseIndexEntry[]): DocBackedUseCaseIndexEntry[] {
+  const merged = new Map<string, DocBackedUseCaseIndexEntry>();
+  for (const entry of entries) {
+    const existing = merged.get(entry.id);
+    if (!existing) {
+      merged.set(entry.id, {
+        ...entry,
+        drilldowns: mergeDocBackedDrilldowns(entry.drilldowns ?? [])
+      });
+      continue;
+    }
+    merged.set(entry.id, {
+      ...existing,
+      ...entry,
+      htmlPath: entry.htmlPath ?? existing.htmlPath,
+      markdownPath: entry.markdownPath ?? existing.markdownPath,
+      summary: entry.summary ?? existing.summary,
+      contextTitle: entry.contextTitle ?? existing.contextTitle,
+      status: entry.status ?? existing.status,
+      confidence: entry.confidence ?? existing.confidence,
+      updatedAt: entry.updatedAt ?? existing.updatedAt,
+      drilldownCount: Math.max(existing.drilldownCount ?? 0, entry.drilldownCount ?? 0),
+      drilldowns: mergeDocBackedDrilldowns([...(existing.drilldowns ?? []), ...(entry.drilldowns ?? [])])
+    });
+  }
+  return Array.from(merged.values());
+}
+
+function mergeDocBackedDrilldowns(entries: DocBackedUseCaseDrilldownEntry[]): DocBackedUseCaseDrilldownEntry[] {
+  const merged = new Map<string, DocBackedUseCaseDrilldownEntry>();
+  for (const entry of entries) {
+    merged.set(`${entry.kind}:${entry.id}`, { ...merged.get(`${entry.kind}:${entry.id}`), ...entry });
+  }
+  return Array.from(merged.values()).sort(compareDocBackedDrilldowns);
+}
+
+function compareDocBackedDrilldowns(left: DocBackedUseCaseDrilldownEntry, right: DocBackedUseCaseDrilldownEntry): number {
+  return umlTreeSortOrder(left.kind) - umlTreeSortOrder(right.kind) || left.title.localeCompare(right.title, "zh-CN");
+}
+
+function countDesignDrilldownsFromDocs(html: string, docPaths: string[] = []): {
   sequence: number;
   classCollaboration: number;
   stateMachine: number;
 } {
+  const normalizedPaths = filterDesignDocumentPaths(docPaths);
+  if (normalizedPaths.length) {
+    return {
+      sequence: normalizedPaths.filter((path) => /\/sequences\/.+\.(md|html)$/i.test(path)).length,
+      classCollaboration: normalizedPaths.filter((path) => /\/realization\/class-collaboration\.(md|html)$/i.test(path) || /\/class-collaboration\.(md|html)$/i.test(path)).length,
+      stateMachine: normalizedPaths.filter((path) => /\/(state-machines|states)\/.+\.(md|html)$/i.test(path) || /\/state-machine\.(md|html)$/i.test(path)).length
+    };
+  }
   if (!html.trim() || typeof DOMParser === "undefined") {
     return { sequence: 0, classCollaboration: 0, stateMachine: 0 };
   }
@@ -2458,6 +2699,111 @@ function markdownLinkTarget(value: string): string {
   return value.match(/\[[^\]]+\]\(([^)]+)\)/)?.[1]?.trim() ?? "";
 }
 
+function filterDesignDocumentPaths(paths: string[]): string[] {
+  return Array.from(new Set(paths
+    .map((path) => path.replace(/\\/g, "/").replace(/^\.\//, ""))
+    .filter((path) => /^docs\/design\/use-case-diagrams\/.+\.(md|html)$/i.test(path))
+  )).sort();
+}
+
+async function listDesignProjectDocuments(root: string): Promise<string[]> {
+  const designRoot = `${root.replace(/[\\/]+$/, "")}/docs/design/use-case-diagrams`;
+  const tree = await readProjectTree(designRoot).catch(() => undefined);
+  if (!tree) return [];
+
+  const paths: string[] = [];
+  const visit = (node: typeof tree.root) => {
+    if (node.kind === "file") {
+      const relative = node.path.replace(/\\/g, "/").replace(/^\.?\//, "");
+      paths.push(`docs/design/use-case-diagrams/${relative}`);
+    }
+    for (const child of node.children ?? []) visit(child);
+  };
+  visit(tree.root);
+  return filterDesignDocumentPaths(paths);
+}
+
+function preferredDesignDocumentPath(path: string | undefined, fileSet: Set<string>): string | undefined {
+  if (!path) return undefined;
+  const normalized = path.replace(/\\/g, "/");
+  if (fileSet.has(normalized)) return normalized;
+  if (/\.html$/i.test(normalized)) {
+    const markdown = normalized.replace(/\.html$/i, ".md");
+    if (fileSet.has(markdown)) return markdown;
+  }
+  if (/\.md$/i.test(normalized)) {
+    const html = normalized.replace(/\.md$/i, ".html");
+    if (fileSet.has(html)) return html;
+  }
+  return undefined;
+}
+
+function expandDesignDocumentPathCandidates(paths: string[]): string[] {
+  const expanded: string[] = [];
+  for (const path of paths) {
+    const normalized = path.replace(/\\/g, "/");
+    if (/\.html$/i.test(normalized)) {
+      expanded.push(normalized.replace(/\.html$/i, ".md"), normalized);
+    } else if (/\.md$/i.test(normalized)) {
+      expanded.push(normalized, normalized.replace(/\.md$/i, ".html"));
+    } else {
+      expanded.push(normalized);
+    }
+  }
+  return Array.from(new Set(expanded.filter(Boolean)));
+}
+
+function useCaseDocumentPathCandidates(item: UseCaseDiagramItem): string[] {
+  const sourceSpecPaths = metadataStringArray(item.node, "sourceSpecPaths")
+    .filter((path) => /^docs\/design\/use-case-diagrams\/.+\.(md|html)$/i.test(path));
+  return expandDesignDocumentPathCandidates([
+    item.node.path ?? "",
+    ...sourceSpecPaths,
+    designUseCaseHtmlRelativePath(item.id)
+  ].filter(Boolean));
+}
+
+async function readFirstProjectFile(root: string, candidates: string[]): Promise<{ path: string; content: string } | undefined> {
+  for (const candidate of expandDesignDocumentPathCandidates(candidates)) {
+    try {
+      return { path: candidate, content: await readProjectFile(root, candidate) };
+    } catch {
+      // Try the next durable document candidate.
+    }
+  }
+  return undefined;
+}
+
+function syntheticUseCaseDocument(item: UseCaseDiagramItem): string {
+  const drilldowns = item.drilldownNodes
+    .map((node) => `- ${umlDiagramLabel(diagramKindFromNode(node))}：[${node.label}](${node.path ?? ""})`)
+    .join("\n");
+  return [
+    `# Use Case Diagram：${item.title}`,
+    "",
+    item.summary || "该 Use Case 入口由 docs/design/use-case-diagrams 下的下钻文档合成。",
+    "",
+    "## 元数据",
+    "",
+    `状态：${item.status}`,
+    item.confidence ? `置信度：${item.confidence}` : "",
+    item.contextTitle || item.contextId ? `业务边界：${item.contextTitle ?? item.contextId}` : "",
+    "",
+    "## 下钻 UML",
+    "",
+    drilldowns || "- 暂未发现下钻 UML 文档。"
+  ].filter((line) => line !== "").join("\n");
+}
+
+function humanizeDesignSlug(value: string): string {
+  return value
+    .replace(/^use-case:/, "")
+    .replace(/\.(md|html)$/i, "")
+    .replace(/[-_]+/g, " ")
+    .replace(/\b\w/g, (char) => char.toUpperCase())
+    .trim() || value;
+}
+
 function normalizeDesignMapHref(href: string): string | undefined {
   const clean = href.trim().replace(/\\/g, "/");
   if (!clean || clean.startsWith("#") || /^[a-z]+:/i.test(clean)) return undefined;
@@ -2467,27 +2813,165 @@ function normalizeDesignMapHref(href: string): string | undefined {
   return `docs/design/${withoutHash.replace(/^\.\//, "")}`;
 }
 
+function resolveDesignDocumentHref(href: string, currentPath: string): string | undefined {
+  const clean = href.trim().replace(/\\/g, "/");
+  if (!clean || clean.startsWith("#") || /^[a-z]+:/i.test(clean)) return undefined;
+  const withoutHash = clean.split("#")[0].replace(/^\.\//, "");
+  if (!withoutHash.endsWith(".html")) return undefined;
+  if (withoutHash.startsWith("docs/design/")) return normalizeDesignPath(withoutHash);
+  if (withoutHash.startsWith("use-case-diagrams/")) return normalizeDesignPath(`docs/design/${withoutHash}`);
+  const baseDir = currentPath.includes("/") ? currentPath.split("/").slice(0, -1).join("/") : "docs/design";
+  return normalizeDesignPath(`${baseDir}/${withoutHash}`);
+}
+
+function sameDesignDocumentPath(left: string | undefined, right: string | undefined): boolean {
+  if (!left || !right) return false;
+  return normalizeDesignComparablePath(left) === normalizeDesignComparablePath(right);
+}
+
+function normalizeDesignComparablePath(value: string): string {
+  return normalizeDesignPath(value).replace(/\.(md|html)$/i, "");
+}
+
+function normalizeDesignPath(value: string): string {
+  const parts: string[] = [];
+  for (const part of value.replace(/\\/g, "/").split("/")) {
+    if (!part || part === ".") continue;
+    if (part === "..") {
+      parts.pop();
+      continue;
+    }
+    parts.push(part);
+  }
+  return parts.join("/");
+}
+
+function renderAuthoredDesignDocument(path: string, content: string): string {
+  return /\.md$/i.test(path) ? renderAuthoredDesignMarkdown(content) : content;
+}
+
+function renderAuthoredDesignMarkdown(markdown: string): string {
+  const lines = markdown.split(/\r?\n/);
+  const html: string[] = ['<main class="praxis-design-document design-authored-document" data-praxis-kind="authored_design_document">'];
+  let index = 0;
+  while (index < lines.length) {
+    const line = lines[index] ?? "";
+    const fence = line.match(/^```([A-Za-z0-9_-]*)\s*$/);
+    if (fence) {
+      const language = (fence[1] ?? "").toLowerCase();
+      const code: string[] = [];
+      index += 1;
+      while (index < lines.length && !/^```\s*$/.test(lines[index] ?? "")) {
+        code.push(lines[index] ?? "");
+        index += 1;
+      }
+      const className = language === "mermaid" ? ' class="mermaid"' : "";
+      html.push(`<pre${className}><code>${escapeAuthoredDesignHtml(code.join("\n"))}</code></pre>`);
+      index += 1;
+      continue;
+    }
+    const heading = line.match(/^(#{1,4})\s+(.+)$/);
+    if (heading) {
+      const level = heading[1]?.length ?? 2;
+      html.push(`<h${level}>${renderAuthoredDesignInline(heading[2] ?? "")}</h${level}>`);
+      index += 1;
+      continue;
+    }
+    if (/^\|.+\|\s*$/.test(line)) {
+      const rows: string[][] = [];
+      while (index < lines.length && /^\|.+\|\s*$/.test(lines[index] ?? "")) {
+        const tableLine = (lines[index] ?? "").trim();
+        const cells = tableLine.slice(1, -1).split("|").map((cell) => cell.trim());
+        if (!cells.every((cell) => /^:?-{3,}:?$/.test(cell))) rows.push(cells);
+        index += 1;
+      }
+      if (rows.length) {
+        const [header, ...body] = rows;
+        html.push("<table><thead><tr>", ...header.map((cell) => `<th>${renderAuthoredDesignInline(cell)}</th>`), "</tr></thead><tbody>");
+        for (const row of body) html.push("<tr>", ...row.map((cell) => `<td>${renderAuthoredDesignInline(cell)}</td>`), "</tr>");
+        html.push("</tbody></table>");
+      }
+      continue;
+    }
+    if (/^-\s+/.test(line)) {
+      html.push("<ul>");
+      while (index < lines.length && /^-\s+/.test(lines[index] ?? "")) {
+        html.push(`<li>${renderAuthoredDesignInline((lines[index] ?? "").replace(/^-\s+/, ""))}</li>`);
+        index += 1;
+      }
+      html.push("</ul>");
+      continue;
+    }
+    if (/^\d+\.\s+/.test(line)) {
+      html.push("<ol>");
+      while (index < lines.length && /^\d+\.\s+/.test(lines[index] ?? "")) {
+        html.push(`<li>${renderAuthoredDesignInline((lines[index] ?? "").replace(/^\d+\.\s+/, ""))}</li>`);
+        index += 1;
+      }
+      html.push("</ol>");
+      continue;
+    }
+    if (line.trim()) html.push(`<p>${renderAuthoredDesignInline(line.trim())}</p>`);
+    index += 1;
+  }
+  html.push("</main>");
+  return html.join("\n");
+}
+
+function renderAuthoredDesignInline(value: string): string {
+  return escapeAuthoredDesignHtml(value)
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>');
+}
+
+function escapeAuthoredDesignHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
 function docBackedUseCaseItem(entry: DocBackedUseCaseIndexEntry): UseCaseDiagramItem {
   const confidence = entry.confidence || "candidate";
   const status = entry.status || "candidate";
+  const primaryPath = entry.htmlPath || entry.markdownPath;
   const node: RuntimeProjectedGraphNode = {
     id: `docs:${entry.id}`,
     kind: "design_use_case",
     label: entry.title,
-    source: { type: "durable_document", id: entry.htmlPath || entry.id },
-    anchor: { kind: "design_use_case", id: entry.id, path: entry.htmlPath },
-    path: entry.htmlPath,
+    source: { type: "durable_document", id: primaryPath || entry.id },
+    anchor: { kind: "design_use_case", id: entry.id, path: primaryPath },
+    path: primaryPath,
     summary: entry.summary,
     status,
     metadata: {
       confidence,
       contextId: entry.contextTitle,
-      sourceSpecPaths: [entry.htmlPath, "docs/design/use-case-diagrams-maps.md"].filter(Boolean),
+      sourceSpecPaths: [entry.markdownPath, entry.htmlPath, "docs/design/use-case-diagrams-maps.md"].filter(Boolean),
       drilldownCount: entry.drilldownCount,
       updatedAt: entry.updatedAt
     }
   };
-  const drilldownCount = entry.drilldownCount ?? 0;
+  const drilldownNodes = (entry.drilldowns ?? []).map((drilldown): RuntimeProjectedGraphNode => ({
+    id: `docs:${entry.id}:${drilldown.id}`,
+    kind: designGraphKindFromDiagramKind(drilldown.kind),
+    label: drilldown.title,
+    source: { type: "durable_document", id: drilldown.path },
+    anchor: { kind: designGraphAnchorKindFromDiagramKind(drilldown.kind), id: drilldown.id, path: drilldown.path },
+    path: drilldown.path,
+    summary: drilldown.summary,
+    status: drilldown.status ?? status,
+    metadata: {
+      confidence: drilldown.confidence ?? confidence,
+      diagramKind: drilldown.kind,
+      useCaseId: entry.id,
+      htmlPath: drilldown.path,
+      sourceSpecPaths: [drilldown.path]
+    }
+  }));
+  const drilldownCount = entry.drilldownCount ?? drilldownNodes.length;
   return {
     id: entry.id,
     title: entry.title,
@@ -2502,8 +2986,29 @@ function docBackedUseCaseItem(entry: DocBackedUseCaseIndexEntry): UseCaseDiagram
     edgeCount: 0,
     node,
     viewRecord: undefined,
-    drilldownNodes: []
+    drilldownNodes
   };
+}
+
+function designGraphKindFromDiagramKind(kind: string): RuntimeProjectedGraphNode["kind"] {
+  if (kind === "activity") return "design_activity";
+  if (kind === "sequence") return "design_sequence";
+  if (kind === "state_machine") return "design_state_machine";
+  if (kind === "class_collaboration") return "design_class_collaboration";
+  if (kind === "interaction_overview") return "design_interaction_overview";
+  if (kind === "communication") return "design_communication";
+  if (kind === "timing") return "design_timing";
+  if (kind === "object_snapshot") return "design_object_snapshot";
+  if (kind === "composite_structure") return "design_composite_structure";
+  return "design_pattern_map";
+}
+
+function designGraphAnchorKindFromDiagramKind(kind: string): RuntimeProjectedGraphNode["anchor"]["kind"] {
+  if (kind === "activity") return "design_activity";
+  if (kind === "sequence") return "design_sequence";
+  if (kind === "state_machine") return "design_state_machine";
+  if (kind === "class_collaboration") return "design_class_collaboration";
+  return "design_pattern";
 }
 
 function uniqueRuntimeNodes(nodes: RuntimeProjectedGraphNode[]): RuntimeProjectedGraphNode[] {
@@ -2795,6 +3300,117 @@ function designDocumentStatusLabel(
   return t("design.statusIdle");
 }
 
+function renderSemanticDocumentHtml(content: string): string {
+  const raw = content.trim();
+  if (!raw) return "";
+  if (looksLikeHtmlDocument(raw)) return raw;
+
+  const lines = raw.split(/\r?\n/);
+  const html: string[] = [];
+  let paragraph: string[] = [];
+  let listItems: string[] = [];
+  let inCodeBlock = false;
+  let codeFenceLanguage = "";
+  let codeLines: string[] = [];
+
+  function flushParagraph() {
+    if (!paragraph.length) return;
+    html.push(`<p>${inlineMarkdownToHtml(paragraph.join(" "))}</p>`);
+    paragraph = [];
+  }
+
+  function flushList() {
+    if (!listItems.length) return;
+    html.push(`<ul>${listItems.map((item) => `<li>${inlineMarkdownToHtml(item)}</li>`).join("")}</ul>`);
+    listItems = [];
+  }
+
+  function flushCodeBlock() {
+    const source = escapeHtml(codeLines.join("\n"));
+    const language = codeFenceLanguage.toLowerCase();
+    if (language === "mermaid" || looksLikeMermaidSource(codeLines.join("\n"))) {
+      html.push(`<pre class="mermaid">${source}</pre>`);
+    } else {
+      html.push(`<pre><code>${source}</code></pre>`);
+    }
+    codeLines = [];
+    codeFenceLanguage = "";
+  }
+
+  for (const line of lines) {
+    const fence = line.match(/^```\s*([\w-]+)?\s*$/);
+    if (fence) {
+      if (inCodeBlock) {
+        flushCodeBlock();
+        inCodeBlock = false;
+      } else {
+        flushParagraph();
+        flushList();
+        inCodeBlock = true;
+        codeFenceLanguage = fence[1] ?? "";
+      }
+      continue;
+    }
+
+    if (inCodeBlock) {
+      codeLines.push(line);
+      continue;
+    }
+
+    const heading = line.match(/^(#{1,6})\s+(.+)$/);
+    if (heading) {
+      flushParagraph();
+      flushList();
+      const level = Math.min(heading[1].length, 4);
+      html.push(`<h${level}>${inlineMarkdownToHtml(heading[2])}</h${level}>`);
+      continue;
+    }
+
+    const listItem = line.match(/^\s*[-*]\s+(.+)$/);
+    if (listItem) {
+      flushParagraph();
+      listItems.push(listItem[1]);
+      continue;
+    }
+
+    if (!line.trim()) {
+      flushParagraph();
+      flushList();
+      continue;
+    }
+
+    flushList();
+    paragraph.push(line.trim());
+  }
+
+  if (inCodeBlock) flushCodeBlock();
+  flushParagraph();
+  flushList();
+  return html.join("\n");
+}
+
+function looksLikeHtmlDocument(value: string): boolean {
+  return /<\s*(article|section|div|h1|h2|p|pre|ul|ol|table|html|body)\b/i.test(value);
+}
+
+function looksLikeMermaidSource(value: string): boolean {
+  const firstLine = value
+    .split(/\r?\n/)
+    .find((line) => line.trim().length > 0)
+    ?.trim() ?? "";
+  return /^(flowchart|graph|sequenceDiagram|stateDiagram-v2|classDiagram|erDiagram|journey|gantt|pie|mindmap|timeline)\b/.test(firstLine);
+}
+
+function inlineMarkdownToHtml(value: string): string {
+  return escapeHtml(value)
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_match, label: string, href: string) => {
+      const safeHref = escapeHtml(href);
+      return `<a href="${safeHref}">${label}</a>`;
+    });
+}
+
 function sanitizeSemanticHtml(html: string): string {
   if (!html.trim() || typeof DOMParser === "undefined") return "";
   const doc = new DOMParser().parseFromString(html, "text/html");
@@ -2814,6 +3430,15 @@ function sanitizeSemanticHtml(html: string): string {
   });
   normalizeInternalTermsInHtmlDocument(doc);
   return doc.body.innerHTML;
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 function escapeRegExp(value: string): string {

@@ -4,13 +4,11 @@ import { readProjectGitVersion, readProjectSemanticVersion, type DesignGitVersio
 
 export const UML_MODEL_ROOT_DOC_RELATIVE_PATH = "docs/models/models-map.md";
 export const UML_MODEL_ROOT_HTML_RELATIVE_PATH = "docs/models/models-map.html";
+export const UML_MODEL_SOURCE_RELATIVE_PATH = "docs/models/model-registry.json";
 export const UML_MODEL_REGISTRY_START = "<!-- praxis:uml-model-registry:start -->";
 export const UML_MODEL_REGISTRY_END = "<!-- praxis:uml-model-registry:end -->";
 
-type UmlModelKind =
-  | "organization_process"
-  | "software_structure"
-  | "deployment_artifact";
+type UmlModelKind = string;
 
 type UmlDiagramKind =
   | "use_case"
@@ -275,24 +273,20 @@ interface InteractionModelLike {
 export async function buildUmlModelRegistry(root: string, generatedAt = new Date().toISOString()): Promise<UmlModelRegistry> {
   const projectVersion = await readProjectSemanticVersion(root) ?? "0.1.0";
   const git = await readProjectGitVersion(root);
+  const authoredRegistry = await readAuthoredUmlModelRegistry(root);
+  if (authoredRegistry) {
+    return normalizeAuthoredUmlModelRegistry(authoredRegistry, {
+      generatedAt,
+      projectVersion,
+      git
+    });
+  }
   const design = await readDesignModelProjection(root);
   const engineering = await readEngineeringModelProjection(root);
   const architecture = await readArchitectureModelProjection(root);
-
-  const organizationModel = organizationProcessModel(design);
-  const softwareModel = softwareStructureModel(engineering);
-  const deploymentModel = deploymentArtifactModel(engineering);
-  const models = [organizationModel, softwareModel, deploymentModel];
-  const projections = buildProjectionEntries(design, engineering, architecture);
+  const models: UmlModelEntry[] = [];
+  const projections = buildProjectionEntries(design, engineering, architecture, models);
   const traces = buildTraceLinks(models, projections);
-  const packageCount = models.reduce((sum, model) => sum + model.packages.length, 0);
-  const elementCount = models.reduce((sum, model) => sum + model.elements.length, 0);
-  const diagramCount = models.reduce((sum, model) => sum + model.diagrams.length, 0);
-  const legacyProjections = [
-    legacyProjection("legacy:design", "组织/过程模型投影", "design", "docs/design/use-case-diagrams-maps.md", "docs/design/use-case-diagrams-maps.html", organizationModel.id, design.available),
-    legacyProjection("legacy:engineering", "软件结构模型投影", "engineering", "docs/engineering/engineering-maps.md", "docs/engineering/engineering-maps.html", softwareModel.id, engineering.available),
-    legacyProjection("legacy:architecture", "C4 架构投影", "architecture", "docs/architecture/c4/c4-model-maps.md", "docs/architecture/c4/c4-model-maps.html", softwareModel.id, architecture.available)
-  ];
 
   return {
     schemaVersion: "praxis.umlModelRegistry.v1",
@@ -302,25 +296,27 @@ export async function buildUmlModelRegistry(root: string, generatedAt = new Date
     rootDocPath: UML_MODEL_ROOT_DOC_RELATIVE_PATH,
     rootHtmlPath: UML_MODEL_ROOT_HTML_RELATIVE_PATH,
     summary: {
-      modelCount: models.length,
-      packageCount,
-      elementCount,
-      diagramCount,
+      modelCount: 0,
+      packageCount: 0,
+      elementCount: 0,
+      diagramCount: 0,
       traceCount: traces.length,
       projectionCount: projections.length
     },
     principles: [
-      "业务与技术通过 Model 的 viewpoint、stakeholder 和 abstraction level 区分，而不是通过 UML 图种硬编码分层。",
+      "Model 必须来自明确编写并可审查的领域模型注册表；Explorer 不得用固定模板假装已经发现领域模型。",
+      "业务与技术通过 Model 的 viewpoint、stakeholder 和 abstraction level 区分，而不是通过 UML 图种或固定数量硬编码分层。",
       "整体到局部使用 Model -> Package -> Classifier -> Feature / internal structure / owned Behavior 组织。",
       "Structure Diagram 与 Behavior Diagram 是正交视角；同一 Package 可以拥有多张互补图。",
       "C4 只能作为架构视角投影存在，不是 docs 记忆中的独立真相源。",
+      "未发现领域模型与代码中未形成领域模型是两种不同的评审结论；二者都应进入 Review Queue，而不是生成占位 Model。",
       "内部仓库分析指标、关系计数和工具节点 ID 只是证据与生成过程，不得成为用户可见模型语言。"
     ],
     models,
-    elements: models.flatMap((model) => model.elements),
+    elements: [],
     projections,
     traces,
-    legacyProjections
+    legacyProjections: []
   };
 }
 
@@ -332,6 +328,10 @@ export async function writeUmlModelRegistryDocuments(root: string, registry?: Um
   const modelRegistry = registry ?? await buildUmlModelRegistry(root);
   const markdownPath = path.join(root, UML_MODEL_ROOT_DOC_RELATIVE_PATH);
   const htmlPath = path.join(root, UML_MODEL_ROOT_HTML_RELATIVE_PATH);
+  const authoredRegistry = await readAuthoredUmlModelRegistry(root);
+  if (authoredRegistry) {
+    return { markdownPath, htmlPath, registry: modelRegistry };
+  }
   await mkdir(path.dirname(markdownPath), { recursive: true });
   await writeFile(markdownPath, renderUmlModelRegistryMarkdown(modelRegistry), "utf8");
   await writeFile(htmlPath, renderUmlModelRegistryHtml(modelRegistry), "utf8");
@@ -345,55 +345,197 @@ export async function writeUmlModelRegistryDocuments(root: string, registry?: Um
   return { markdownPath, htmlPath, registry: modelRegistry };
 }
 
-function organizationProcessModel(projection: DesignProjection): UmlModelEntry {
-  const diagrams = projection.diagrams.length ? projection.diagrams : [placeholderDiagram({
-    id: "model:organization-process:missing-design",
-    modelId: "model:organization-process",
-    kind: "use_case",
-    title: "尚未生成组织/过程模型",
-    summary: "运行 Design Discovery 后，这里会显示 UseCase、Activity、Interaction、StateMachine 和业务概念类图。",
-    docPath: "docs/design/use-case-diagrams-maps.md",
-    htmlPath: "docs/design/use-case-diagrams-maps.html",
-    packagePath: "candidate"
-  })];
-  return modelEntry({
-    id: "model:organization-process",
-    kind: "organization_process",
-    title: "组织 / 过程模型",
-    viewpoint: "描述参与者、业务过程、用例目标、可观察结果和业务概念",
-    stakeholder: ["业务负责人", "产品负责人", "领域专家", "开发者"],
-    abstractionLevel: "system intent / business process / observable behavior",
-    purpose: "解释系统要改变或稳定的业务秩序；UseCase 不描述 subject 内部结构，内部结构由 Trace / Refine 连接到软件结构模型。",
-    authority: "docs/models/organization-process 是归一化模型目录；docs/design 作为组织/过程模型的兼容投影输入共同承载。",
+async function readAuthoredUmlModelRegistry(root: string): Promise<UmlModelRegistry | undefined> {
+  const source = await readOptionalProjectFile(root, UML_MODEL_SOURCE_RELATIVE_PATH);
+  if (!source) return undefined;
+  try {
+    const parsed = JSON.parse(source) as Partial<UmlModelRegistry>;
+    return Array.isArray(parsed.models) ? parsed as UmlModelRegistry : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizeAuthoredUmlModelRegistry(
+  registry: UmlModelRegistry,
+  metadata: { generatedAt: string; projectVersion: string; git: DesignGitVersionInfo }
+): UmlModelRegistry {
+  const models = registry.models
+    .map((model, index) => normalizeAuthoredModel(model, index))
+    .filter((model): model is UmlModelEntry => Boolean(model));
+  const modelIds = new Set(models.map((model) => model.id));
+  const projections = (registry.projections ?? [])
+    .map((projection, index) => normalizeAuthoredProjection(projection, index, modelIds))
+    .filter((projection): projection is UmlProjectionEntry => Boolean(projection));
+  const authoredTraces = (registry.traces ?? [])
+    .map((trace, index) => normalizeAuthoredTrace(trace, index, modelIds))
+    .filter((trace): trace is UmlTraceLink => Boolean(trace));
+  const traces = uniqueById([...authoredTraces, ...buildTraceLinks(models, projections)]);
+  const elements = models.flatMap((model) => model.elements);
+  return {
+    schemaVersion: "praxis.umlModelRegistry.v1",
+    generatedAt: metadata.generatedAt,
+    projectVersion: metadata.projectVersion,
+    git: metadata.git,
+    rootDocPath: UML_MODEL_ROOT_DOC_RELATIVE_PATH,
+    rootHtmlPath: UML_MODEL_ROOT_HTML_RELATIVE_PATH,
+    summary: {
+      modelCount: models.length,
+      packageCount: models.reduce((sum, model) => sum + model.packages.length, 0),
+      elementCount: elements.length,
+      diagramCount: models.reduce((sum, model) => sum + model.diagrams.length, 0),
+      traceCount: traces.length,
+      projectionCount: projections.length
+    },
+    principles: uniqueStrings((registry.principles ?? []).filter((item): item is string => typeof item === "string" && Boolean(item.trim()))),
+    models,
+    elements,
+    projections,
+    traces,
+    legacyProjections: Array.isArray(registry.legacyProjections) ? registry.legacyProjections : []
+  };
+}
+
+function normalizeAuthoredModel(model: UmlModelEntry, index: number): UmlModelEntry | undefined {
+  if (!model || typeof model !== "object") return undefined;
+  const id = nonEmptyString(model.id) ?? `model:domain-${index + 1}`;
+  const title = nonEmptyString(model.title) ?? id;
+  const kind = nonEmptyString(model.kind) ?? "domain";
+  const diagrams = (Array.isArray(model.diagrams) ? model.diagrams : [])
+    .map((diagram, diagramIndex) => normalizeAuthoredDiagram(diagram, diagramIndex, id))
+    .filter((diagram): diagram is UmlDiagramEntry => Boolean(diagram));
+  const authoredElements = (Array.isArray(model.elements) ? model.elements : [])
+    .map((element, elementIndex) => normalizeAuthoredElement(element, elementIndex, id))
+    .filter((element): element is UmlModelElement => Boolean(element));
+  const normalizedElements = authoredElements.length ? authoredElements : inferModelElements(id, kind, diagrams);
+  const elements = normalizedElements.map((element) => ({
+    ...element,
+    representedByDiagramIds: uniqueStrings([
+      ...element.representedByDiagramIds,
+      ...diagrams
+        .filter((diagram) => diagram.representedElements.includes(element.id))
+        .map((diagram) => diagram.id)
+    ])
+  }));
+  const slug = safeFilePart(id.replace(/^model:/, ""));
+  return {
+    id,
+    kind,
+    title,
+    viewpoint: nonEmptyString(model.viewpoint) ?? "由编写者声明的领域模型视角。",
+    stakeholder: stringArray(model.stakeholder),
+    abstractionLevel: nonEmptyString(model.abstractionLevel) ?? "domain model",
+    purpose: nonEmptyString(model.purpose) ?? `解释 ${title} 的领域概念、规则、状态和协作边界。`,
+    authority: nonEmptyString(model.authority) ?? `${UML_MODEL_SOURCE_RELATIVE_PATH} 中的已编写模型定义。`,
+    docPath: safeModelDocumentPath(model.docPath, `docs/models/${slug}/model.md`, ".md"),
+    htmlPath: safeModelDocumentPath(model.htmlPath, `docs/models/${slug}/model.html`, ".html"),
+    anchor: nonEmptyString(model.anchor) ?? id,
+    status: statusValue(model.status),
+    packages: packagesFromDiagrams(id, title, diagrams, elements),
+    elements,
     diagrams
-  });
+  };
 }
 
-function softwareStructureModel(projection: EngineeringProjection): UmlModelEntry {
-  const diagrams = projection.diagrams.filter((item) => item.kind !== "deployment" && item.kind !== "technical_hotspot");
-  return modelEntry({
-    id: "model:software-structure",
-    kind: "software_structure",
-    title: "软件结构模型",
-    viewpoint: "描述 Package、Component、Interface、Port、Class、Connector、结构协作和运行时 Interaction",
-    stakeholder: ["架构师", "开发者", "维护者", "评审者"],
-    abstractionLevel: "package / component / classifier / owned behavior",
-    purpose: "解释软件如何被模块化、如何通过接口协作、哪些结构承载业务用例；不把目录、调用密度或工具指标当成模型对象。",
-    authority: "docs/models/software-structure 是归一化模型目录；docs/engineering 作为软件结构模型的兼容投影输入共同承载。",
-    diagrams: diagrams.length ? diagrams : [placeholderDiagram({
-      id: "model:software-structure:missing-engineering",
-      modelId: "model:software-structure",
-      kind: "package",
-      title: "尚未生成软件结构模型",
-      summary: "运行 Engineering Discovery 后，这里会显示 Package、Component、Class、Sequence 和技术热点投影。",
-      docPath: "docs/engineering/engineering-maps.md",
-      htmlPath: "docs/engineering/engineering-maps.html",
-      packagePath: "candidate"
-    })]
-  });
+function normalizeAuthoredDiagram(diagram: UmlDiagramEntry, index: number, modelId: string): UmlDiagramEntry | undefined {
+  if (!diagram || typeof diagram !== "object") return undefined;
+  const id = nonEmptyString(diagram.id) ?? `${modelId}:diagram:${index + 1}`;
+  const kind = nonEmptyString(diagram.kind) as UmlDiagramKind | undefined;
+  const title = nonEmptyString(diagram.title) ?? id;
+  return {
+    id,
+    kind: kind ?? "class",
+    title,
+    summary: nonEmptyString(diagram.summary) ?? `${title} 的模型投影。`,
+    modelId,
+    packagePath: normalizePackagePath(diagram.packagePath),
+    docPath: nonEmptyString(diagram.docPath) ?? UML_MODEL_ROOT_DOC_RELATIVE_PATH,
+    htmlPath: nonEmptyString(diagram.htmlPath) ?? UML_MODEL_ROOT_HTML_RELATIVE_PATH,
+    anchor: nonEmptyString(diagram.anchor) ?? id,
+    status: statusValue(diagram.status),
+    confidence: confidenceValue(diagram.confidence),
+    projectionOf: stringArray(diagram.projectionOf),
+    representedElements: stringArray(diagram.representedElements)
+  };
 }
 
-function buildProjectionEntries(design: DesignProjection, engineering: EngineeringProjection, architecture: ArchitectureProjection): UmlProjectionEntry[] {
+function normalizeAuthoredElement(element: UmlModelElement, index: number, modelId: string): UmlModelElement | undefined {
+  if (!element || typeof element !== "object") return undefined;
+  const packagePath = normalizePackagePath(element.packagePath);
+  const name = nonEmptyString(element.name) ?? `Element ${index + 1}`;
+  const id = nonEmptyString(element.id) ?? `${modelId}:element:${safeId(name)}`;
+  return {
+    id,
+    kind: element.kind ?? "unknown",
+    role: element.role ?? "classifier",
+    name,
+    summary: nonEmptyString(element.summary) ?? `${name} 是 ${modelId} 中已编写的领域模型元素。`,
+    modelId,
+    packageId: packageIdFor(modelId, packagePath),
+    packagePath,
+    ownerElementId: nonEmptyString(element.ownerElementId),
+    representedByDiagramIds: stringArray(element.representedByDiagramIds),
+    traceIds: stringArray(element.traceIds),
+    status: statusValue(element.status),
+    confidence: confidenceValue(element.confidence),
+    sourcePaths: stringArray(element.sourcePaths)
+  };
+}
+
+function normalizeAuthoredProjection(
+  projection: UmlProjectionEntry,
+  index: number,
+  modelIds: Set<string>
+): UmlProjectionEntry | undefined {
+  if (!projection || typeof projection !== "object") return undefined;
+  const source = projection.source === "engineering" || projection.source === "architecture" ? projection.source : "design";
+  const kind = projection.kind === "engineering_explorer" || projection.kind === "architecture_c4" ? projection.kind : "design_explorer";
+  const id = nonEmptyString(projection.id) ?? `projection:${source}-${index + 1}`;
+  return {
+    id,
+    kind,
+    title: nonEmptyString(projection.title) ?? id,
+    source,
+    docPath: nonEmptyString(projection.docPath) ?? projectionDefaultPath(source, "md"),
+    htmlPath: nonEmptyString(projection.htmlPath) ?? projectionDefaultPath(source, "html"),
+    projectionOf: stringArray(projection.projectionOf).filter((modelId) => modelIds.has(modelId)),
+    status: statusValue(projection.status),
+    confidence: confidenceValue(projection.confidence),
+    summary: nonEmptyString(projection.summary) ?? "由已编写领域模型产生的阅读投影。",
+    diagrams: (Array.isArray(projection.diagrams) ? projection.diagrams : [])
+      .map((diagram, diagramIndex) => normalizeAuthoredDiagram(diagram, diagramIndex, nonEmptyString(diagram.modelId) ?? ""))
+      .filter((diagram): diagram is UmlDiagramEntry => Boolean(diagram))
+  };
+}
+
+function normalizeAuthoredTrace(trace: UmlTraceLink, index: number, modelIds: Set<string>): UmlTraceLink | undefined {
+  if (!trace || typeof trace !== "object") return undefined;
+  const sourceId = nonEmptyString(trace.sourceId);
+  const targetId = nonEmptyString(trace.targetId);
+  if (!sourceId || !targetId) return undefined;
+  const relation = trace.relation === "refine" || trace.relation === "realize" || trace.relation === "project" ? trace.relation : "trace";
+  const sourceModelId = nonEmptyString(trace.sourceModelId);
+  const targetModelId = nonEmptyString(trace.targetModelId);
+  return {
+    id: nonEmptyString(trace.id) ?? `trace:authored-${index + 1}`,
+    relation,
+    sourceId,
+    targetId,
+    summary: nonEmptyString(trace.summary) ?? `${sourceId} ${relation} ${targetId}.`,
+    sourceModelId: sourceModelId && modelIds.has(sourceModelId) ? sourceModelId : undefined,
+    targetModelId: targetModelId && modelIds.has(targetModelId) ? targetModelId : undefined
+  };
+}
+
+function buildProjectionEntries(
+  design: DesignProjection,
+  engineering: EngineeringProjection,
+  architecture: ArchitectureProjection,
+  models: UmlModelEntry[]
+): UmlProjectionEntry[] {
+  const designModelIds = modelIdsProjectedByDocumentRoot(models, "docs/design/");
+  const engineeringModelIds = modelIdsProjectedByDocumentRoot(models, "docs/engineering/");
+  const architectureModelIds = modelIdsProjectedByDocumentRoot(models, "docs/architecture/");
   return [
     {
       id: "projection:design-explorer",
@@ -402,7 +544,7 @@ function buildProjectionEntries(design: DesignProjection, engineering: Engineeri
       source: "design",
       docPath: "docs/design/use-case-diagrams-maps.md",
       htmlPath: "docs/design/use-case-diagrams-maps.html",
-      projectionOf: ["model:organization-process"],
+      projectionOf: designModelIds,
       status: design.available ? "candidate" : "inference",
       confidence: design.available ? "high" : "low",
       summary: design.available
@@ -417,7 +559,7 @@ function buildProjectionEntries(design: DesignProjection, engineering: Engineeri
       source: "engineering",
       docPath: "docs/engineering/engineering-maps.md",
       htmlPath: "docs/engineering/engineering-maps.html",
-      projectionOf: ["model:software-structure", "model:deployment-artifact"],
+      projectionOf: engineeringModelIds,
       status: engineering.available ? "candidate" : "inference",
       confidence: engineering.available ? "high" : "low",
       summary: engineering.available
@@ -432,7 +574,7 @@ function buildProjectionEntries(design: DesignProjection, engineering: Engineeri
       source: "architecture",
       docPath: "docs/architecture/c4/c4-model-maps.md",
       htmlPath: "docs/architecture/c4/c4-model-maps.html",
-      projectionOf: ["model:organization-process", "model:software-structure", "model:deployment-artifact"],
+      projectionOf: architectureModelIds,
       status: architecture.available ? "candidate" : "inference",
       confidence: architecture.available ? "high" : "low",
       summary: architecture.available
@@ -441,6 +583,12 @@ function buildProjectionEntries(design: DesignProjection, engineering: Engineeri
       diagrams: architecture.diagrams
     }
   ];
+}
+
+function modelIdsProjectedByDocumentRoot(models: UmlModelEntry[], documentRoot: string): string[] {
+  return models
+    .filter((model) => model.diagrams.some((diagram) => diagram.docPath.startsWith(documentRoot) || diagram.htmlPath.startsWith(documentRoot)))
+    .map((model) => model.id);
 }
 
 function inferModelElements(modelId: string, modelKind: UmlModelKind, diagrams: UmlDiagramEntry[]): UmlModelElement[] {
@@ -529,45 +677,6 @@ function modelKindLabel(kind: UmlModelKind): string {
   return "制品/部署模型";
 }
 
-function deploymentArtifactModel(engineering: EngineeringProjection): UmlModelEntry {
-  const engineeringDeployment = engineering.diagrams.filter((item) => item.kind === "deployment");
-  return modelEntry({
-    id: "model:deployment-artifact",
-    kind: "deployment_artifact",
-    title: "制品 / 部署模型",
-    viewpoint: "描述 Artifact、Node、Device、ExecutionEnvironment、Deployment 和 CommunicationPath",
-    stakeholder: ["架构师", "运维", "发布负责人", "开发者"],
-    abstractionLevel: "artifact / node / execution environment / deployment",
-    purpose: "解释开发、部署和运行中使用或产生的物理信息项，以及它们被分配到哪些计算资源上执行。",
-    authority: "docs/models/deployment-artifact 与 docs/engineering 的 deployment 投影共同承载。",
-    diagrams: engineeringDeployment.length ? engineeringDeployment : [placeholderDiagram({
-      id: "model:deployment-artifact:missing-deployment",
-      modelId: "model:deployment-artifact",
-      kind: "deployment",
-      title: "尚未生成制品 / 部署模型",
-      summary: "运行 Engineering 或 Architecture Discovery 后，这里会显示部署、制品、运行节点和通信路径。",
-      docPath: "docs/models/deployment-artifact/model.md",
-      htmlPath: "docs/models/deployment-artifact/model.html",
-      packagePath: "candidate"
-    })]
-  });
-}
-
-function modelEntry(input: Omit<UmlModelEntry, "anchor" | "docPath" | "htmlPath" | "status" | "packages" | "elements"> & { diagrams: UmlDiagramEntry[] }): UmlModelEntry {
-  const normalizedDiagrams = input.diagrams.map((diagram) => ({ ...diagram, modelId: input.id }));
-  const elements = inferModelElements(input.id, input.kind, normalizedDiagrams);
-  return {
-    ...input,
-    anchor: input.id,
-    docPath: `docs/models/${input.id.replace(/^model:/, "")}/model.md`,
-    htmlPath: `docs/models/${input.id.replace(/^model:/, "")}/model.html`,
-    status: normalizedDiagrams.some((diagram) => diagram.status === "confirmed") ? "confirmed" : "candidate",
-    packages: packagesFromDiagrams(input.id, input.title, normalizedDiagrams, elements),
-    elements,
-    diagrams: normalizedDiagrams
-  };
-}
-
 function packagesFromDiagrams(modelId: string, modelTitle: string, diagrams: UmlDiagramEntry[], elements: UmlModelElement[]): UmlPackageEntry[] {
   type MutablePackage = UmlPackageEntry;
   const byPath = new Map<string, MutablePackage>();
@@ -631,32 +740,7 @@ function packagesFromDiagrams(modelId: string, modelTitle: string, diagrams: Uml
 }
 
 function buildTraceLinks(models: UmlModelEntry[], projections: UmlProjectionEntry[]): UmlTraceLink[] {
-  const organization = models.find((model) => model.kind === "organization_process");
-  const software = models.find((model) => model.kind === "software_structure");
-  const deployment = models.find((model) => model.kind === "deployment_artifact");
   const traces: UmlTraceLink[] = [];
-  if (organization && software) {
-    traces.push({
-      id: "trace:model:organization-process:software-structure",
-      relation: "refine",
-      sourceId: organization.id,
-      targetId: software.id,
-      sourceModelId: organization.id,
-      targetModelId: software.id,
-      summary: "组织/过程模型中的 UseCase、Activity 和业务概念需要通过 Trace / Refine 连接到承载它们的软件结构。"
-    });
-  }
-  if (software && deployment) {
-    traces.push({
-      id: "trace:model:software-structure:deployment-artifact",
-      relation: "realize",
-      sourceId: software.id,
-      targetId: deployment.id,
-      sourceModelId: software.id,
-      targetModelId: deployment.id,
-      summary: "软件结构中的 Component、Interface 和 Classifier 最终应映射到 Artifact、Node 或 ExecutionEnvironment。"
-    });
-  }
   for (const projection of projections) {
     for (const modelId of projection.projectionOf) {
       traces.push({
@@ -1249,46 +1333,6 @@ function renderUmlModelDocumentHtml(registry: UmlModelRegistry, model: UmlModelE
 </html>`;
 }
 
-function placeholderDiagram(input: {
-  id: string;
-  modelId: string;
-  kind: UmlDiagramKind;
-  title: string;
-  summary: string;
-  docPath: string;
-  htmlPath: string;
-  packagePath: string;
-}): UmlDiagramEntry {
-  return {
-    ...input,
-    anchor: input.id,
-    status: "candidate",
-    confidence: "low",
-    representedElements: representedElementsForDiagramKind(input.kind)
-  };
-}
-
-function legacyProjection(
-  id: string,
-  title: string,
-  source: UmlLegacyProjection["source"],
-  docPath: string,
-  htmlPath: string,
-  modelId: string,
-  available: boolean
-): UmlLegacyProjection {
-  return {
-    id,
-    title,
-    source,
-    docPath,
-    htmlPath,
-    modelId,
-    status: available ? "candidate" : "inference",
-    summary: available ? "已有旧 Explorer 投影文档，已挂入对应 UML Model。" : "旧 Explorer 投影文档尚未生成。"
-  };
-}
-
 function designKindToUmlDiagramKind(kind: string | undefined): UmlDiagramKind {
   if (kind === "activity") return "activity";
   if (kind === "sequence") return "sequence";
@@ -1367,6 +1411,38 @@ function statusValue(value: unknown): UmlModelStatus {
 
 function confidenceValue(value: unknown): "low" | "medium" | "high" {
   return value === "low" || value === "medium" || value === "high" ? value : "medium";
+}
+
+function nonEmptyString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? uniqueStrings(value.map(nonEmptyString).filter((item): item is string => Boolean(item)))
+    : [];
+}
+
+function safeModelDocumentPath(value: unknown, fallback: string, extension: ".md" | ".html"): string {
+  const candidate = nonEmptyString(value)?.replace(/\\/g, "/");
+  if (!candidate) return fallback;
+  const normalized = path.posix.normalize(candidate);
+  if (!normalized.startsWith("docs/models/") || normalized.includes("../") || !normalized.endsWith(extension)) return fallback;
+  return normalized;
+}
+
+function projectionDefaultPath(source: UmlProjectionEntry["source"], extension: "md" | "html"): string {
+  if (source === "engineering") return `docs/engineering/engineering-maps.${extension}`;
+  if (source === "architecture") return `docs/architecture/c4/c4-model-maps.${extension}`;
+  return `docs/design/use-case-diagrams-maps.${extension}`;
+}
+
+function uniqueById<T extends { id: string }>(values: T[]): T[] {
+  const byId = new Map<string, T>();
+  for (const value of values) {
+    if (!byId.has(value.id)) byId.set(value.id, value);
+  }
+  return [...byId.values()];
 }
 
 function safeFilePart(value: string): string {

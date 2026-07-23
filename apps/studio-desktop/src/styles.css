@@ -359,6 +359,82 @@
   list-style: none;
 }
 
+.model-semantic-html .model-authored-document {
+  display: grid;
+  gap: 10px;
+  padding: 18px;
+  color: #dbe7f3;
+}
+
+.model-semantic-html .model-authored-document h1,
+.model-semantic-html .model-authored-document h2,
+.model-semantic-html .model-authored-document h3,
+.model-semantic-html .model-authored-document p,
+.model-semantic-html .model-authored-document ul,
+.model-semantic-html .model-authored-document ol {
+  margin: 0;
+}
+
+.model-semantic-html .model-authored-document h1 {
+  font-size: 24px;
+  line-height: 1.2;
+}
+
+.model-semantic-html .model-authored-document h2 {
+  margin-top: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  font-size: 17px;
+}
+
+.model-semantic-html .model-authored-document h3 {
+  font-size: 14px;
+}
+
+.model-semantic-html .model-authored-document p,
+.model-semantic-html .model-authored-document li {
+  color: #b8c8d8;
+  line-height: 1.65;
+}
+
+.model-semantic-html .model-authored-document code {
+  border: 1px solid #263748;
+  border-radius: 4px;
+  background: #0a121b;
+  padding: 1px 4px;
+  color: #9edcff;
+}
+
+.model-semantic-html .model-authored-document table {
+  width: 100%;
+  border-collapse: collapse;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+}
+
+.model-semantic-html .model-authored-document th,
+.model-semantic-html .model-authored-document td {
+  border-bottom: 1px solid var(--border);
+  padding: 7px 9px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.model-semantic-html .model-authored-document th {
+  background: #111d28;
+  color: #e8f1f9;
+}
+
+.model-semantic-html .model-authored-document pre {
+  margin: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #0a121b;
+  padding: 12px;
+  overflow: auto;
+}
+
 .model-tree-package {
   display: grid;
   gap: 2px;

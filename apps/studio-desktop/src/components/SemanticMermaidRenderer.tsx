@@ -161,6 +161,27 @@ export function copySemanticAttributes(source: Element, target: Element) {
   }
 }
 
+export function findSemanticMermaidBlocks(root: ParentNode): Element[] {
+  const candidates = Array.from(root.querySelectorAll("pre.mermaid, pre"));
+  const seen = new Set<Element>();
+  const blocks: Element[] = [];
+  for (const candidate of candidates) {
+    if (seen.has(candidate)) continue;
+    seen.add(candidate);
+    if (candidate.classList.contains("mermaid") || looksLikeMermaidSource(candidate.textContent ?? "")) {
+      candidate.classList.add("mermaid");
+      blocks.push(candidate);
+    }
+  }
+  return blocks;
+}
+
+function looksLikeMermaidSource(value: string): boolean {
+  const source = normalizeMermaidRenderSource(value);
+  const firstLine = source.split(/\r?\n/).find((line) => line.trim().length > 0)?.trim() ?? "";
+  return /^(flowchart|graph|sequenceDiagram|stateDiagram-v2|classDiagram|erDiagram|journey|gantt|pie|mindmap|timeline)\b/.test(firstLine);
+}
+
 interface C4LayerView {
   level: string;
   label: string;
